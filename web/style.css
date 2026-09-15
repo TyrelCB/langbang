@@ -51,6 +51,8 @@ body {
 .btn:hover { border-color: var(--cyan); color: var(--cyan); }
 .btn.accent { background: var(--cyan); color: #04101c; font-weight: 700; }
 .btn.accent:hover { background: var(--orange); }
+.btn.accent.stop { background: var(--danger); color: #fff; }
+.btn.accent.stop:hover { background: var(--orange); }
 .btn.ghost { background: transparent; }
 .sidebar-footer { display: flex; flex-direction: column; gap: 6px; }
 .health { color: var(--muted); font-size: 12px; letter-spacing: 1px; }

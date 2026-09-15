@@ -10,6 +10,7 @@ const el = (tag, cls, txt) => {
 let threadId = null;
 let threads = [];
 let streaming = false;
+let aborter = null;
 
 // ---------- API ----------
 const api = {
@@ -92,6 +93,7 @@ async function send() {
   addMsg("user", text);
   SFX.play("message_sent");
   streaming = true;
+  aborter = new AbortController();
   setBusy(true);
 
   const asstMsg = addMsg("assistant", "");
@@ -102,6 +104,7 @@ async function send() {
     const res = await fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ thread_id: threadId, text }),
+      signal: aborter.signal,
     });
     const reader = res.body.getReader();
     const dec = new TextDecoder();
@@ -118,8 +121,12 @@ async function send() {
       }
     }
   } catch (e) {
-    addMsg("error", "CONNECTION LOST: " + e);
-    SFX.play("error");
+    if (e.name === "AbortError") {
+      addMsg("error", "TRANSMISSION ABORTED");
+    } else {
+      addMsg("error", "CONNECTION LOST: " + e);
+      SFX.play("error");
+    }
   }
   asstMsg.classList.remove("cursor");
   streaming = false;
@@ -157,8 +164,12 @@ async function send() {
 }
 
 function setBusy(b) {
-  $("#btn-send").disabled = b;
-  $("#btn-send").textContent = b ? "…" : "SEND ▶";
+  $("#btn-send").textContent = b ? "■ STOP" : "SEND ▶";
+  $("#btn-send").classList.toggle("stop", b);
+}
+
+function stopGeneration() {
+  if (aborter) aborter.abort();
 }
 
 // ---------- threads ----------
@@ -236,7 +247,11 @@ async function checkHealth() {
   $("#model-tag").textContent = h.model;
 }
 
-$("#btn-send").onclick = () => { SFX.play("click"); send(); };
+$("#btn-send").onclick = () => {
+  if (streaming) { stopGeneration(); return; }
+  SFX.play("click");
+  send();
+};
 $("#btn-new").onclick = () => { SFX.play("click"); newThread(); };
 $("#btn-settings").onclick = openSettings;
 $("#btn-save").onclick = saveSettings;
