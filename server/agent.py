@@ -55,10 +55,12 @@ class SGlangChatOpenAI(ChatOpenAI):
 
 
 def model(s: dict) -> ChatOpenAI:
-    extra = {}
-    if s.get("enable_thinking"):
-        # sglang/vllm kwarg; unknown fields are ignored by other backends.
-        extra["extra_body"] = {"chat_template_kwargs": {"enable_thinking": True}}
+    # Always state enable_thinking explicitly. Qwen3-style hybrids think by
+    # *default* — omitting the kwarg would keep reasoning streaming even when
+    # the user turned thinking off (the sglang/vllm template flips per flag).
+    extra_body = {
+        "chat_template_kwargs": {"enable_thinking": bool(s.get("enable_thinking"))}
+    }
     return SGlangChatOpenAI(
         model=s["model"],
         base_url=s["base_url"],
@@ -66,7 +68,7 @@ def model(s: dict) -> ChatOpenAI:
         temperature=s["temperature"],
         max_tokens=s["max_tokens"],
         streaming=True,
-        **extra,
+        extra_body=extra_body,
         # sglang doesn't do usage on every stream chunk; keep defaults lean.
     )
 
@@ -177,7 +179,15 @@ async def run_chat(
                     yield {"type": "token", "text": text}
                 reasoning = (chunk.additional_kwargs or {}).get("reasoning_content")
                 if reasoning:
-                    yield {"type": "thinking", "text": reasoning}
+                    # Belt & braces: with thinking off we explicitly asked the
+                    # backend not to emit any; if one ignores that, keep the
+                    # text in the visible stream rather than a card the
+                    # REASONING toggle would strand.
+                    yield (
+                        {"type": "thinking", "text": reasoning}
+                        if s.get("enable_thinking")
+                        else {"type": "token", "text": reasoning}
+                    )
             elif kind == "on_tool_start":
                 yield {
                     "type": "tool_start",

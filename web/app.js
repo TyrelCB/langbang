@@ -182,7 +182,7 @@ function renderHistory(msgs) {
         const b = addBlock("thinking", "◈ THINKING");
         b.querySelector("pre").textContent = m.thinking;
       }
-      if (m.content) addMsg("assistant", textOf(m.content));
+      if (textOf(m.content).trim()) addMsg("assistant", textOf(m.content));
       for (const tc of m.tool_calls || []) {
         const b = addBlock("tool", `⚙ ${tc.name}`);
         b.querySelector("pre").textContent = "→ " + JSON.stringify(tc.args, null, 2);
@@ -209,16 +209,22 @@ async function send() {
   aborter = new AbortController();
   setBusy(true);
 
-  let asstMsg = addMsg("assistant", "");
+  let asstMsg = null; // created lazily on first visible token — no empty cursor boxes
   let asstRaw = "";
-  asstMsg.classList.add("cursor");
   let thinkingBlock = null, currentTool = null;
   let renderTimer = null;
+  const ensureAsst = () => {
+    if (!asstMsg) {
+      asstMsg = addMsg("assistant", "");
+      asstRaw = "";
+      asstMsg.classList.add("cursor");
+    }
+  };
   const scheduleRender = () => {
     if (renderTimer) return;
     renderTimer = setTimeout(() => {
       renderTimer = null;
-      setMarkdown(asstMsg, asstRaw);
+      if (asstMsg) setMarkdown(asstMsg, asstRaw);
       scrollBottom();
     }, 80);
   };
@@ -251,24 +257,26 @@ async function send() {
       SFX.play("error");
     }
   }
-  asstMsg.classList.remove("cursor");
+  if (asstMsg) asstMsg.classList.remove("cursor");
   streaming = false;
   setBusy(false);
   await refreshThreads();
 
   function handleEvent(ev) {
-    if (ev.type === "token") { asstRaw += ev.text; scheduleRender(); }
+    if (ev.type === "token") {
+      if (ev.text.trim()) ensureAsst(); // whitespace-only content never opens a bubble
+      if (asstMsg) { asstRaw += ev.text; scheduleRender(); }
+    }
     else if (ev.type === "thinking") {
       if (!thinkingBlock) { thinkingBlock = addBlock("thinking", "◈ THINKING"); }
       thinkingBlock.querySelector("pre").textContent += ev.text;
     } else if (ev.type === "tool_start") {
       SFX.play("tool_start");
+      // close the current answer bubble; the next one opens on its first token
+      if (asstMsg) { asstMsg.classList.remove("cursor"); asstMsg = null; }
       currentTool = addBlock("tool", `⚙ ${ev.name} …`);
       currentTool.open = true;
       currentTool.querySelector("pre").textContent = "→ " + JSON.stringify(ev.input, null, 2);
-      asstMsg = addMsg("assistant", "");
-      asstRaw = "";
-      asstMsg.classList.add("cursor");
     } else if (ev.type === "tool_end") {
       SFX.play("tool_end");
       if (currentTool) {
