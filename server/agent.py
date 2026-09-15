@@ -143,8 +143,7 @@ async def run_chat(thread_id: str, user_text: str, s: dict) -> AsyncIterator[dic
                     "input": _safe(ev["data"].get("input")),
                 }
             elif kind == "on_tool_end":
-                out = ev["data"].get("output")
-                yield {"type": "tool_end", "name": ev["name"], "output": _safe(out)}
+                yield {"type": "tool_end", "name": ev["name"], "output": _tool_text(ev["data"].get("output"))}
         yield {"type": "done"}
     except Exception as e:  # noqa: BLE001 - stream errors to the UI
         yield {"type": "error", "message": f"{type(e).__name__}: {e}"}
@@ -156,3 +155,14 @@ def _safe(x):
         return x
     except (TypeError, ValueError):
         return str(x)
+
+
+def _tool_text(out):
+    """Flatten ToolMessage / MCP result to plain text for the UI."""
+    if hasattr(out, "content"):
+        out = out.content
+    if isinstance(out, list):  # content blocks
+        out = "\n".join(
+            b.get("text", "") if isinstance(b, dict) else str(b) for b in out
+        )
+    return _safe(out)
