@@ -21,6 +21,12 @@ DEFAULTS = {
     "system_prompt": "You are LangBang, a concise, capable agent. Use tools when they help.",
     "mcp_servers": {},
     "max_react_iterations": 12,
+    "local_tools": {
+        "run_bash": True,
+        "read_file": True,
+        "write_file": True,
+        "list_dir": True,
+    },
 }
 
 

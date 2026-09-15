@@ -288,8 +288,17 @@ async function newThread() {
 // ---------- settings ----------
 async function openSettings() {
   const s = await api.settings();
-  for (const k of ["base_url", "model", "temperature", "max_tokens", "system_prompt"])
+  for (const k of ["base_url", "model", "temperature", "max_tokens", "max_react_iterations", "system_prompt"])
     $("#set-" + k).value = s[k];
+  const tb = $("#set-tools");
+  tb.innerHTML = "";
+  for (const [name, on] of Object.entries(s.local_tools || {})) {
+    const lab = el("label", "chk");
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.checked = !!on; cb.dataset.tool = name;
+    lab.append(cb, document.createTextNode(" " + name));
+    tb.appendChild(lab);
+  }
   $("#set-mcp").value = JSON.stringify(s.mcp_servers || {}, null, 2);
   $("#settings-panel").classList.remove("hidden");
   SFX.play("click");
@@ -301,12 +310,18 @@ async function saveSettings() {
   let mcp;
   try { mcp = JSON.parse($("#set-mcp").value); }
   catch { err.textContent = "MCP JSON is invalid."; err.classList.remove("hidden"); return; }
+  const local_tools = {};
+  document.querySelectorAll("#set-tools input").forEach((cb) => {
+    local_tools[cb.dataset.tool] = cb.checked;
+  });
   await api.saveSettings({
     base_url: $("#set-base_url").value,
     model: $("#set-model").value,
     temperature: parseFloat($("#set-temperature").value),
     max_tokens: parseInt($("#set-max_tokens").value),
+    max_react_iterations: parseInt($("#set-max_react_iterations").value),
     system_prompt: $("#set-system_prompt").value,
+    local_tools,
     mcp_servers: mcp,
   });
   $("#settings-panel").classList.add("hidden");

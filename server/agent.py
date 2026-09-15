@@ -43,7 +43,10 @@ def model(s: dict) -> ChatOpenAI:
 
 
 async def build_agent(s: dict, checkpointer=None):
-    tools = local_tools.LOCAL_TOOLS + await mcp.get_tools(s.get("mcp_servers") or {})
+    enabled = s.get("local_tools") or {}
+    tools = [
+        t for t in local_tools.LOCAL_TOOLS if enabled.get(t.name, True)
+    ] + await mcp.get_tools(s.get("mcp_servers") or {})
     return create_react_agent(
         model(s),
         tools,

@@ -152,6 +152,12 @@ body {
 }
 .panel-inner input:focus, .panel-inner textarea:focus { border-color: var(--cyan); }
 .row { display: flex; gap: 12px; } .row.end { justify-content: flex-end; margin-top: 8px; }
+.group-label { color: var(--cyan); letter-spacing: 2px; font-size: 12px; margin: 4px 0 6px; }
+.tools-box { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-bottom: 14px; }
+.tools-box .chk { display: flex; align-items: center; gap: 6px; color: var(--text);
+  margin: 0; cursor: pointer; letter-spacing: 1px; }
+.tools-box input[type="checkbox"] { width: auto; margin: 0; accent-color: var(--cyan); }
+.panel-inner label code { color: var(--orange); background: var(--panel); padding: 0 4px; }
 .hidden { display: none !important; }
 .error { color: var(--danger); margin-top: 8px; }
 .cursor::after { content: "▌"; color: var(--cyan); animation: blink .8s steps(1) infinite; }
