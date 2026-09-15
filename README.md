@@ -6,6 +6,8 @@ but built on the LangChain/LangGraph ecosystem:
 - **LangGraph** ReAct agent with SQLite checkpointing (thread persistence)
 - **LangChain** `ChatOpenAI` pointed at any OpenAI-compatible backend
   (default: sglang on `spark-ee93:30000` serving `RadixArk/Qwen3.8-Flash-Next-NVFP4`)
+- **Built-in local tools** (`server/local_tools.py`): `run_bash` (shell on the
+  server host, cwd=home, 300s cap), `read_file`, `write_file`, `list_dir`
 - **MCP servers** via `langchain-mcp-adapters` (stdio / SSE / streamable-HTTP)
 - **LangSmith** tracing — set `LANGCHAIN_API_KEY` + `LANGCHAIN_TRACING_V2=true`
   in the environment and it activates automatically via langchain-core
@@ -17,9 +19,17 @@ but built on the LangChain/LangGraph ecosystem:
 
 ```bash
 uv sync
-uv run uvicorn server.main:app --host 0.0.0.0 --port 8080
-# open http://localhost:8080
+uv run uvicorn server.main:app --port 8123
+# open http://localhost:8123
 ```
+
+## ⚠ Security
+
+The built-in tools give the agent **unsandboxed shell and file access on the
+machine running the server** (`run_bash` = `bash -lc`). There is no approval
+prompt — by design, this is a personal LAN tool. Do **not** expose
+`/api/chat` beyond localhost/LAN, and do not add auth-bypassing proxies in
+front of it. Anyone who can post to `/api/chat` can run commands as you.
 
 ## Layout
 

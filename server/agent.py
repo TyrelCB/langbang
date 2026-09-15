@@ -10,7 +10,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.prebuilt import create_react_agent
 
-from . import config, mcp
+from . import config, local_tools, mcp
 
 _checkpointer: AsyncSqliteSaver | None = None
 _db: aiosqlite.Connection | None = None
@@ -43,12 +43,12 @@ def model(s: dict) -> ChatOpenAI:
 
 
 async def build_agent(s: dict, checkpointer=None):
-    tools = await mcp.get_tools(s.get("mcp_servers") or {})
+    tools = local_tools.LOCAL_TOOLS + await mcp.get_tools(s.get("mcp_servers") or {})
     return create_react_agent(
         model(s),
         tools,
         checkpointer=checkpointer or _checkpointer,
-        prompt=SystemMessage(content=s["system_prompt"]),
+        prompt=SystemMessage(content=s["system_prompt"] + local_tools.TOOLS_NOTE),
     )
 
 
