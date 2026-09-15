@@ -7,3 +7,4 @@ data/settings.json
 web/sounds/*.mp3
 web/sounds/*.ogg
 web/sounds/*.wav
+data/perf.log
