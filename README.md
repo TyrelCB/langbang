@@ -26,6 +26,12 @@ points at them:
   targets (SSRF guard) — crawl public URLs only.
 - **LangSmith** tracing — set `LANGCHAIN_API_KEY` + `LANGCHAIN_TRACING_V2=true`
   in the environment and it activates automatically via langchain-core
+- **Vision / multimodal** — paste or attach images in the composer, gated by
+  the `capabilities.vision` toggle in CONFIG (sglang can't advertise input
+  modes, so it's declared). `RadixArk/Qwen3.8-Flash-Next-NVFP4` verified
+  vision-capable on the Spark → on by default. Max 4 images / ~5 MB each per
+  message; note images re-prefill on every history replay, so attachments are
+  expensive on a single Spark — keep them few and small.
 - Web UI: dark Mega Man X HUD by default, streaming chat, visible
   thinking/tool-call cards, thread management, live config editor
 - Sound effects: wired up, assets deferred → see `SOUND_DESIGN.md`

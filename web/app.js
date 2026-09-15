@@ -11,6 +11,10 @@ let threadId = null;
 let threads = [];
 let streaming = false;
 let aborter = null;
+let supportsVision = false;
+let pendingImages = []; // data URLs awaiting send
+const MAX_IMAGES = 4;
+const MAX_IMG_BYTES = 6 * 1024 * 1024;
 
 // ---------- API ----------
 const api = {
@@ -97,10 +101,51 @@ function enhanceCodeBlocks(root) {
   });
 }
 
+// ---------- images: paste / attach ----------
+function addImage(file) {
+  if (!file || !supportsVision) return;
+  if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) return;
+  if (pendingImages.length >= MAX_IMAGES) return;
+  if (file.size > MAX_IMG_BYTES) return;
+  const fr = new FileReader();
+  fr.onload = () => {
+    pendingImages.push(fr.result);
+    renderAttachStrip();
+  };
+  fr.readAsDataURL(file);
+}
+
+function renderAttachStrip() {
+  const strip = $("#attach-strip");
+  strip.innerHTML = "";
+  pendingImages.forEach((url, i) => {
+    const chip = el("div", "attach");
+    const img = el("img");
+    img.src = url;
+    const x = el("span", "x", "✕");
+    x.onclick = () => { pendingImages.splice(i, 1); renderAttachStrip(); };
+    chip.append(img, x);
+    strip.appendChild(chip);
+  });
+}
+
+function imagesOf(content) {
+  const arr = Array.isArray(content) ? content : [content];
+  return arr
+    .filter((b) => b && b.type === "image_url")
+    .map((b) => (typeof b.image_url === "string" ? b.image_url : b.image_url?.url))
+    .filter(Boolean);
+}
+
 // ---------- rendering ----------
-function addMsg(role, text) {
+function addMsg(role, text, images) {
   const m = el("div", "msg " + role);
   setMarkdown(m, text);
+  for (const url of images || []) {
+    const img = el("img", "msg-img");
+    img.src = url;
+    m.insertBefore(img, m.firstChild);
+  }
   $("#chat").appendChild(m);
   scrollBottom();
   return m;
@@ -131,7 +176,7 @@ function renderHistory(msgs) {
   $("#chat").innerHTML = "";
   for (const m of msgs) {
     if (m.role === "system") continue;
-    if (m.role === "human") addMsg("user", textOf(m.content));
+    if (m.role === "human") addMsg("user", textOf(m.content), imagesOf(m.content));
     else if (m.role === "ai") {
       if (m.thinking) {
         const b = addBlock("thinking", "◈ THINKING");
@@ -152,10 +197,13 @@ function renderHistory(msgs) {
 // ---------- chat ----------
 async function send() {
   const text = $("#input").value.trim();
-  if (!text || streaming) return;
+  const images = pendingImages;
+  if ((!text && !images.length) || streaming) return;
   if (!threadId) await newThread();
   $("#input").value = "";
-  addMsg("user", text);
+  pendingImages = [];
+  renderAttachStrip();
+  addMsg("user", text, images);
   SFX.play("message_sent");
   streaming = true;
   aborter = new AbortController();
@@ -178,7 +226,7 @@ async function send() {
   try {
     const res = await fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ thread_id: threadId, text }),
+      body: JSON.stringify({ thread_id: threadId, text, images }),
       signal: aborter.signal,
     });
     const reader = res.body.getReader();
@@ -300,6 +348,7 @@ async function openSettings() {
     tb.appendChild(lab);
   }
   $("#set-mcp").value = JSON.stringify(s.mcp_servers || {}, null, 2);
+  $("#set-vision").checked = !!(s.capabilities || {}).vision;
   $("#settings-panel").classList.remove("hidden");
   SFX.play("click");
 }
@@ -321,6 +370,7 @@ async function saveSettings() {
     max_tokens: parseInt($("#set-max_tokens").value),
     max_react_iterations: parseInt($("#set-max_react_iterations").value),
     system_prompt: $("#set-system_prompt").value,
+    capabilities: { vision: $("#set-vision").checked },
     local_tools,
     mcp_servers: mcp,
   });
@@ -336,6 +386,9 @@ async function checkHealth() {
   el2.textContent = "LINK: " + (h.backend_up ? "ONLINE" : "OFFLINE");
   el2.className = "health " + (h.backend_up ? "up" : "down");
   $("#model-tag").textContent = h.model;
+  supportsVision = !!h.supports_vision;
+  $("#btn-attach").classList.toggle("hidden", !supportsVision);
+  if (!supportsVision && pendingImages.length) { pendingImages = []; renderAttachStrip(); }
 }
 
 $("#btn-send").onclick = () => {
@@ -350,6 +403,22 @@ $("#btn-cancel").onclick = () => $("#settings-panel").classList.add("hidden");
 $("#input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
 });
+// image paste / attach (only meaningful when supportsVision; server still enforces)
+$("#input").addEventListener("paste", (e) => {
+  if (!supportsVision) return;
+  const files = [...(e.clipboardData?.items || [])]
+    .filter((it) => it.kind === "file" && it.type.startsWith("image/"))
+    .map((it) => it.getAsFile());
+  if (files.some(Boolean)) {
+    e.preventDefault();
+    files.forEach((f) => f && addImage(f));
+  }
+});
+$("#btn-attach").onclick = () => { SFX.play("click"); $("#file-img").click(); };
+$("#file-img").onchange = (e) => {
+  [...e.target.files].forEach(addImage);
+  e.target.value = ""; // allow re-selecting the same file
+};
 $("#btn-sound").onclick = () => {
   const on = localStorage.getItem("lb-sound") === "on";
   localStorage.setItem("lb-sound", on ? "off" : "on");

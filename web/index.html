@@ -25,8 +25,11 @@
       <div id="model-tag"></div>
     </header>
     <div id="chat"></div>
+    <div id="attach-strip"></div>
     <footer id="composer">
-      <textarea id="input" rows="2" placeholder="Transmit message… (Enter to send, Shift+Enter for newline)"></textarea>
+      <button id="btn-attach" class="btn ghost hidden" title="Attach image">📎 ATTACH</button>
+      <input id="file-img" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple class="hidden">
+      <textarea id="input" rows="2" placeholder="Transmit message… (Enter to send, Shift+Enter for newline; paste images when vision is on)"></textarea>
       <button id="btn-send" class="btn accent">SEND ▶</button>
     </footer>
   </main>
@@ -42,6 +45,10 @@
         <label>Max agent iterations <input id="set-max_react_iterations" type="number" step="1" min="1" max="200"></label>
       </div>
       <label>System prompt <textarea id="set-system_prompt" rows="3"></textarea></label>
+      <div class="group-label">MULTIMODAL</div>
+      <div class="tools-box">
+        <label class="chk"><input type="checkbox" id="set-vision"> model supports vision (image paste / attach)</label>
+      </div>
       <div class="group-label">LOCAL TOOLS</div>
       <div id="set-tools" class="tools-box"></div>
       <label>MCP servers (JSON — add <code>"disabled": true</code> to park one) <textarea id="set-mcp" rows="8" spellcheck="false"></textarea></label>

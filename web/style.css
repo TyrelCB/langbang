@@ -128,8 +128,25 @@ body {
 .block pre { margin: 0; padding: 8px; background: var(--bg2); overflow-x: auto; white-space: pre-wrap; }
 .block[open] summary { color: var(--text); }
 
+/* attach strip (pending images above composer) */
+#attach-strip { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px; }
+#attach-strip:not(:empty) { padding-bottom: 10px; }
+#attach-strip:empty { display: none; padding: 0; }
+.attach { position: relative; border: 1px solid var(--cyan-dim); background: var(--panel);
+  clip-path: var(--clip); padding: 3px; }
+.attach img { display: block; max-height: 64px; max-width: 96px; object-fit: cover; }
+.attach .x { position: absolute; top: -6px; right: -6px; width: 18px; height: 18px;
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+  background: var(--bg2); border: 1px solid var(--danger); color: var(--danger);
+  font-size: 11px; line-height: 1; }
+.attach .x:hover { background: var(--danger); color: var(--bg2); }
+
+/* images inside messages */
+.msg-img { display: block; max-width: 260px; max-height: 260px; margin: 6px 0;
+  border: 1px solid var(--line); clip-path: var(--clip); }
+
 /* composer */
-#composer { display: flex; gap: 10px; padding: 12px 16px; border-top: 1px solid var(--line); background: var(--bg2); }
+#composer { display: flex; gap: 10px; padding: 12px 16px; border-top: 1px solid var(--line); background: var(--bg2); align-items: flex-end; }
 #input {
   flex: 1; resize: none; font: inherit; color: var(--text);
   background: var(--panel); border: 1px solid var(--line); padding: 10px;

@@ -1,6 +1,7 @@
 """LangBang server: FastAPI app with a llama.cpp-style web UI."""
 import json
 import os
+import re
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -32,7 +33,12 @@ async def health():
             up = r.status_code < 500
     except Exception:
         pass
-    return {"model": s["model"], "base_url": s["base_url"], "backend_up": up}
+    return {
+        "model": s["model"],
+        "base_url": s["base_url"],
+        "backend_up": up,
+        "supports_vision": bool((s.get("capabilities") or {}).get("vision")),
+    }
 
 
 @app.get("/api/settings")
@@ -78,17 +84,39 @@ async def messages(tid: str):
 
 # ---- chat (SSE stream) ----
 
+MAX_IMAGES = 4
+MAX_IMG_B64 = 7_000_000  # ~5 MB decoded; images re-prefill every turn on Spark
+DATA_IMG_RE = re.compile(r"^data:image/(png|jpeg|webp|gif);base64,([A-Za-z0-9+/=\s]+)$")
+
+
 class ChatIn(BaseModel):
     thread_id: str
-    text: str
+    text: str = ""
+    images: list[str] = []
 
 
 @app.post("/api/chat")
 async def chat(body: ChatIn):
     s = config.load()
+    text = body.text.strip()
+    if not text and not body.images:
+        raise HTTPException(400, "empty message")
+    if body.images:
+        if not (s.get("capabilities") or {}).get("vision"):
+            raise HTTPException(
+                400, "model does not support vision (enable it in CONFIG)"
+            )
+        if len(body.images) > MAX_IMAGES:
+            raise HTTPException(400, f"max {MAX_IMAGES} images per message")
+        for du in body.images:
+            m = DATA_IMG_RE.match(du)
+            if not m:
+                raise HTTPException(400, "images must be base64 data URLs (png/jpeg/webp/gif)")
+            if len(m.group(2)) > MAX_IMG_B64:
+                raise HTTPException(400, "image too large (max ~5 MB)")
 
     async def gen():
-        async for ev in agent.run_chat(body.thread_id, body.text, s):
+        async for ev in agent.run_chat(body.thread_id, text, s, images=body.images):
             yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(

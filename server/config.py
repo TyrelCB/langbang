@@ -27,6 +27,12 @@ DEFAULTS = {
         },
     },
     "max_react_iterations": 12,
+    # Model input modalities. sglang/llama.cpp can't tell us, so the user
+    # declares them; the UI only offers image paste/attach when vision=true.
+    # RadixArk/Qwen3.8-Flash-Next-NVFP4 verified vision-capable on the Spark
+    # (1x1 pixel color tests) -> on by default. Images re-prefill every turn,
+    # so keep attachments small/few.
+    "capabilities": {"vision": True},
     "local_tools": {
         "run_bash": True,
         "read_file": True,

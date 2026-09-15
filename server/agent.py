@@ -120,17 +120,25 @@ async def _touch(thread_id: str, first_text: str) -> None:
 
 # ---- streaming runner ----
 
-async def run_chat(thread_id: str, user_text: str, s: dict) -> AsyncIterator[dict]:
+async def run_chat(
+    thread_id: str, user_text: str, s: dict, images: list[str] | None = None
+) -> AsyncIterator[dict]:
     """Yield SSE-ready dicts: token | thinking | tool_start | tool_end | done | error."""
     try:
-        await _touch(thread_id, user_text)
+        await _touch(thread_id, user_text or "[image]")
         agent = await build_agent(s)
         cfg = {
             "configurable": {"thread_id": thread_id},
             "recursion_limit": 2 * int(s.get("max_react_iterations", 12)) + 2,
         }
+        if images:
+            content = [
+                {"type": "image_url", "image_url": {"url": du}} for du in images
+            ] + [{"type": "text", "text": user_text or "Describe the image."}]
+        else:
+            content = user_text
         async for ev in agent.astream_events(
-            {"messages": [HumanMessage(content=user_text)]}, cfg, version="v2"
+            {"messages": [HumanMessage(content=content)]}, cfg, version="v2"
         ):
             kind = ev["event"]
             if kind == "on_chat_model_stream":
