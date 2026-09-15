@@ -40,6 +40,61 @@ function renderMarkdown(text) {
 }
 function setMarkdown(node, raw) {
   node.innerHTML = renderMarkdown(raw);
+  enhanceCodeBlocks(node);
+}
+
+// ---------- code blocks: highlight + copy/save toolbar ----------
+const LANG_EXT = {
+  python: "py", js: "js", javascript: "js", typescript: "ts", json: "json",
+  bash: "sh", sh: "sh", shell: "sh", zsh: "sh", sql: "sql", yaml: "yml",
+  yml: "yml", toml: "toml", html: "html", css: "css", c: "c", cpp: "cpp",
+  go: "go", rust: "rs", java: "java", md: "md", diff: "diff", text: "txt",
+  plaintext: "txt",
+};
+function codeLang(code) {
+  const c = [...code.classList].find((x) => x.startsWith("language-"));
+  return c ? c.slice(9) : "";
+}
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); return true; }
+  catch {
+    const ta = el("textarea"); ta.value = t;
+    ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    let ok = false; try { ok = document.execCommand("copy"); } catch {}
+    ta.remove(); return ok;
+  }
+}
+function enhanceCodeBlocks(root) {
+  root.querySelectorAll("pre > code").forEach((code) => {
+    const lang = codeLang(code);
+    if (lang && hljs.getLanguage(lang))
+      code.innerHTML = hljs.highlight(code.textContent, { language: lang, ignoreIllegals: true }).value;
+    else if (!lang)
+      code.innerHTML = hljs.highlightAuto(code.textContent).value;
+    code.classList.add("hljs");
+
+    const wrap = el("div", "codeblock");
+    const bar = el("div", "cb-bar");
+    bar.appendChild(el("span", "cb-lang", (lang || "text").toUpperCase()));
+    const copy = el("button", "cb-btn", "⧉ COPY");
+    copy.onclick = () =>
+      copyText(code.textContent).then((ok) => {
+        copy.textContent = ok ? "✓ COPIED" : "✕ FAIL";
+        setTimeout(() => (copy.textContent = "⧉ COPY"), 1200);
+      });
+    const dl = el("button", "cb-btn", "⬇ SAVE");
+    dl.onclick = () => {
+      const ext = LANG_EXT[(lang || "").toLowerCase()] || "txt";
+      const url = URL.createObjectURL(new Blob([code.textContent], { type: "text/plain" }));
+      const a = el("a"); a.href = url; a.download = `langbang-${Date.now()}.${ext}`;
+      a.click(); setTimeout(() => URL.revokeObjectURL(url), 5000);
+    };
+    bar.append(copy, dl);
+    const pre = code.parentElement;
+    pre.replaceWith(wrap);
+    wrap.append(bar, pre);
+  });
 }
 
 // ---------- rendering ----------
