@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+data/*.db*
+data/settings.json
+.env
+web/sounds/*.mp3
+web/sounds/*.ogg
+web/sounds/*.wav

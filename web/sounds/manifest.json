@@ -1,0 +1,14 @@
+{
+  "_comment": "Sound slots for LangBang (Mega Man X style). file=TODO means not generated yet — see SOUND_DESIGN.md. Drop ogg/mp3 into web/sounds/ and replace TODO.",
+  "boot":              { "file": "TODO-boot.ogg",              "when": "page load / app boot" },
+  "click":             { "file": "TODO-click.ogg",             "when": "button click" },
+  "hover":             { "file": "TODO-hover.ogg",             "when": "thread hover" },
+  "message_sent":      { "file": "TODO-message-sent.ogg",      "when": "user transmits" },
+  "thinking":          { "file": "TODO-thinking-loop.ogg",     "when": "stream start (loop while generating)" },
+  "message_received":  { "file": "TODO-message-received.ogg",  "when": "assistant message completes" },
+  "tool_start":        { "file": "TODO-tool-start.ogg",        "when": "tool call begins" },
+  "tool_end":          { "file": "TODO-tool-end.ogg",          "when": "tool result arrives" },
+  "error":             { "file": "TODO-error.ogg",             "when": "backend/stream error" },
+  "thread_new":        { "file": "TODO-thread-new.ogg",        "when": "new chat created" },
+  "settings_saved":    { "file": "TODO-settings-saved.ogg",    "when": "config saved" }
+}
