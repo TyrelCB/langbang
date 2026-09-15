@@ -7,8 +7,23 @@ but built on the LangChain/LangGraph ecosystem:
 - **LangChain** `ChatOpenAI` pointed at any OpenAI-compatible backend
   (default: sglang on `spark-ee93:30000` serving `RadixArk/Qwen3.8-Flash-Next-NVFP4`)
 - **Built-in local tools** (`server/local_tools.py`): `run_bash` (shell on the
-  server host, cwd=home, 300s cap), `read_file`, `write_file`, `list_dir`
+  server host, cwd=home, 300s cap), `read_file`, `write_file`, `list_dir`,
+  `crawl_url` (fetch any web page as Markdown)
 - **MCP servers** via `langchain-mcp-adapters` (stdio / SSE / streamable-HTTP)
+
+## Spark services wired in by default
+
+Both run on `spark-ee93` as the user's own long-lived services — LangBang just
+points at them:
+
+- **`rag-mcp`** (`~/projects/rag-mcp`, streamable-HTTP MCP at `:8004/mcp`):
+  hybrid RAG over distilled Claude/Codex/Hermes session history. Tools:
+  `rag_search`, `rag_ingest_text`, `rag_ingest_url`, `rag_status`.
+- **`crawl4ai-workbench`** (`~/projects/crawl4ai-workbench`, REST at `:8088`):
+  it exposes no MCP transport, so LangBang wraps its `POST /api/crawl` as the
+  `crawl_url` local tool instead (override target with
+  `LANGBANG_CRAWL4AI_URL`). Note the workbench blocks private-network crawl
+  targets (SSRF guard) — crawl public URLs only.
 - **LangSmith** tracing — set `LANGCHAIN_API_KEY` + `LANGCHAIN_TRACING_V2=true`
   in the environment and it activates automatically via langchain-core
 - Web UI: dark Mega Man X HUD by default, streaming chat, visible

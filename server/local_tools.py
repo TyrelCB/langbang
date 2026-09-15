@@ -1,13 +1,17 @@
 """Built-in local tools: shell + filesystem. Runs on THIS machine — the box
 serving LangBang. Deliberately unrestricted (personal LAN tool, bypass-perms
 philosophy); see README before exposing this server beyond localhost/LAN."""
+import json
+import os
 import subprocess
+import urllib.request
 from pathlib import Path
 
 from langchain_core.tools import tool
 
 HOME = Path.home()
 MAX_OUT = 12_000  # chars — keep tool output off Spark's prefill budget
+CRAWL_API = os.environ.get("LANGBANG_CRAWL4AI_URL", "http://spark-ee93:8088")
 
 
 def _trim(s: str) -> str:
@@ -81,9 +85,37 @@ def list_dir(path: str = ".") -> str:
         return f"ERROR: {type(e).__name__}: {e}"
 
 
-LOCAL_TOOLS = [run_bash, read_file, write_file, list_dir]
+@tool
+def crawl_url(url: str) -> str:
+    """Crawl a public web page and return its readable Markdown, using the
+    Crawl4AI workbench running on spark-ee93. Good for docs/articles; blocks
+    private-network targets. May take ~10-60s."""
+    try:
+        req = urllib.request.Request(
+            CRAWL_API.rstrip("/") + "/api/crawl",
+            data=json.dumps({"url": url, "fit_markdown": True}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=180) as r:
+            d = json.load(r)
+        if not d.get("success"):
+            return f"CRAWL FAILED for {url}: {d.get('error', d)}"
+        return _trim(
+            f"# {d.get('title') or url}\n"
+            f"[{d.get('word_count', '?')} words, {d.get('elapsed_seconds', '?')}s, "
+            f"saved: {d.get('output_file', '-')}, "
+            f"links: {d.get('internal_links', '?')} in / {d.get('external_links', '?')} out]\n\n"
+            + (d.get("markdown") or "")
+        )
+    except Exception as e:  # noqa: BLE001 - report to model, not crash
+        return f"ERROR: {type(e).__name__}: {e} (workbench at {CRAWL_API})"
+
+
+LOCAL_TOOLS = [run_bash, read_file, write_file, list_dir, crawl_url]
 
 TOOLS_NOTE = (
     "\n\nLocal tools available: run_bash (shell, cwd=home), read_file, "
-    "write_file, list_dir. Prefer them over asking the user to run things."
+    "write_file, list_dir, crawl_url (fetch any web page as Markdown via "
+    "Crawl4AI on spark-ee93). Prefer them over asking the user to run things."
 )

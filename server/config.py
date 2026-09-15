@@ -19,13 +19,20 @@ DEFAULTS = {
     "max_tokens": 8192,
     # Keep this short: every token costs ~2-4s of prefill on the Spark.
     "system_prompt": "You are LangBang, a concise, capable agent. Use tools when they help.",
-    "mcp_servers": {},
+    "mcp_servers": {
+        # User's hybrid session-history RAG on spark-ee93 (systemd unit: rag-mcp).
+        "rag-mcp": {
+            "transport": "streamable_http",
+            "url": os.environ.get("LANGBANG_RAG_MCP_URL", "http://spark-ee93:8004/mcp"),
+        },
+    },
     "max_react_iterations": 12,
     "local_tools": {
         "run_bash": True,
         "read_file": True,
         "write_file": True,
         "list_dir": True,
+        "crawl_url": True,
     },
 }
 
