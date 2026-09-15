@@ -349,6 +349,7 @@ async function openSettings() {
   }
   $("#set-mcp").value = JSON.stringify(s.mcp_servers || {}, null, 2);
   $("#set-vision").checked = !!(s.capabilities || {}).vision;
+  $("#set-thinking").checked = !!s.enable_thinking;
   $("#settings-panel").classList.remove("hidden");
   SFX.play("click");
 }
@@ -371,6 +372,7 @@ async function saveSettings() {
     max_react_iterations: parseInt($("#set-max_react_iterations").value),
     system_prompt: $("#set-system_prompt").value,
     capabilities: { vision: $("#set-vision").checked },
+    enable_thinking: $("#set-thinking").checked,
     local_tools,
     mcp_servers: mcp,
   });
@@ -426,6 +428,21 @@ $("#btn-sound").onclick = () => {
 };
 if (localStorage.getItem("lb-sound") === "on")
   $("#btn-sound").textContent = "♪ SOUND: ON";
+
+// reasoning-card visibility (per browser; server decides whether the model thinks)
+function applyReasoningVis() {
+  const on = localStorage.getItem("lb-reasoning") !== "off";
+  document.body.classList.toggle("hide-reasoning", !on);
+  $("#btn-reasoning").textContent = "◈ REASONING: " + (on ? "ON" : "OFF");
+  $("#btn-reasoning").classList.toggle("on", on);
+}
+$("#btn-reasoning").onclick = () => {
+  SFX.play("click");
+  localStorage.setItem("lb-reasoning",
+    localStorage.getItem("lb-reasoning") === "off" ? "on" : "off");
+  applyReasoningVis();
+};
+applyReasoningVis();
 
 checkHealth();
 setInterval(checkHealth, 15000);

@@ -27,6 +27,11 @@ DEFAULTS = {
         },
     },
     "max_react_iterations": 12,
+    # Qwen3-style hybrids answer silently unless told otherwise; with this on
+    # we send chat_template_kwargs.enable_thinking so sglang streams
+    # reasoning_content separately (shown in the ◈ THINKING cards). Costs
+    # extra decode tokens per turn (~40-50 ms each on a single Spark).
+    "enable_thinking": True,
     # Model input modalities. sglang/llama.cpp can't tell us, so the user
     # declares them; the UI only offers image paste/attach when vision=true.
     # RadixArk/Qwen3.8-Flash-Next-NVFP4 verified vision-capable on the Spark

@@ -32,6 +32,13 @@ points at them:
   vision-capable on the Spark → on by default. Max 4 images / ~5 MB each per
   message; note images re-prefill on every history replay, so attachments are
   expensive on a single Spark — keep them few and small.
+- **Reasoning (thinking)** — CONFIG toggle "enable thinking" sends
+  `chat_template_kwargs.enable_thinking` to sglang/vLLM, whose separated
+  `reasoning_content` deltas are recovered via a small `ChatOpenAI` subclass
+  (langchain-openai ≥1.x drops non-spec fields by design). Thinking streams
+  into collapsible ◈ THINKING cards and persists in thread history. The
+  topbar **◈ REASONING** button shows/hides those cards per browser
+  (localStorage); thinking costs extra decode tokens per turn.
 - Web UI: dark Mega Man X HUD by default, streaming chat, visible
   thinking/tool-call cards, thread management, live config editor
 - Sound effects: wired up, assets deferred → see `SOUND_DESIGN.md`

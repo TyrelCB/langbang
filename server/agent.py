@@ -30,14 +30,43 @@ async def init() -> None:
     await _db.commit()
 
 
+class SGlangChatOpenAI(ChatOpenAI):
+    """ChatOpenAI that recovers `reasoning_content` from streamed deltas.
+
+    langchain-openai >=1.x deliberately ignores non-spec delta fields, so
+    sglang's/vLLM's separated thinking would be dropped on the floor; we
+    re-attach it to additional_kwargs where _msg_dict/run_chat can see it.
+    """
+
+    def _convert_chunk_to_generation_chunk(
+        self, chunk: dict, default_chunk_class: type, base_generation_info: dict | None
+    ):
+        gc = super()._convert_chunk_to_generation_chunk(
+            chunk, default_chunk_class, base_generation_info
+        )
+        if gc is None:
+            return None
+        choices = chunk.get("choices") or []
+        delta = choices[0].get("delta") if choices else None
+        rc = delta.get("reasoning_content") if isinstance(delta, dict) else None
+        if rc:
+            gc.message.additional_kwargs["reasoning_content"] = rc
+        return gc
+
+
 def model(s: dict) -> ChatOpenAI:
-    return ChatOpenAI(
+    extra = {}
+    if s.get("enable_thinking"):
+        # sglang/vllm kwarg; unknown fields are ignored by other backends.
+        extra["extra_body"] = {"chat_template_kwargs": {"enable_thinking": True}}
+    return SGlangChatOpenAI(
         model=s["model"],
         base_url=s["base_url"],
         api_key=s["api_key"],
         temperature=s["temperature"],
         max_tokens=s["max_tokens"],
         streaming=True,
+        **extra,
         # sglang doesn't do usage on every stream chunk; keep defaults lean.
     )
 

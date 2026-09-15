@@ -65,6 +65,10 @@ body {
   display: flex; justify-content: space-between; align-items: center;
   padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--bg2);
 }
+.topbar-right { display: flex; align-items: center; gap: 14px; }
+#btn-reasoning { font: inherit; font-size: 12px; letter-spacing: 1px; padding: 3px 10px; }
+#btn-reasoning.on { color: var(--cyan); border-color: var(--cyan-dim); }
+body.hide-reasoning .block.thinking { display: none; }
 #chat-title { color: var(--orange); letter-spacing: 2px; }
 #model-tag { color: var(--muted); font-size: 12px; }
 #chat { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }

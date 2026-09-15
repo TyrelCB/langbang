@@ -22,7 +22,10 @@
   <main id="main">
     <header id="topbar">
       <div id="chat-title">— SELECT OR START A CHAT —</div>
-      <div id="model-tag"></div>
+      <div class="topbar-right">
+        <button id="btn-reasoning" class="btn ghost" title="Show/hide model reasoning">◈ REASONING: ON</button>
+        <div id="model-tag"></div>
+      </div>
     </header>
     <div id="chat"></div>
     <div id="attach-strip"></div>
@@ -45,6 +48,10 @@
         <label>Max agent iterations <input id="set-max_react_iterations" type="number" step="1" min="1" max="200"></label>
       </div>
       <label>System prompt <textarea id="set-system_prompt" rows="3"></textarea></label>
+      <div class="group-label">REASONING</div>
+      <div class="tools-box">
+        <label class="chk"><input type="checkbox" id="set-thinking"> enable thinking — model drafts reasoning first (extra tokens per turn)</label>
+      </div>
       <div class="group-label">MULTIMODAL</div>
       <div class="tools-box">
         <label class="chk"><input type="checkbox" id="set-vision"> model supports vision (image paste / attach)</label>
