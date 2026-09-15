@@ -33,9 +33,19 @@ const api = {
   async messages(id) { return (await fetch(`/api/threads/${id}/messages`)).json(); },
 };
 
+// ---------- markdown ----------
+marked.use({ breaks: true, gfm: true });
+function renderMarkdown(text) {
+  return DOMPurify.sanitize(marked.parse(String(text || "")));
+}
+function setMarkdown(node, raw) {
+  node.innerHTML = renderMarkdown(raw);
+}
+
 // ---------- rendering ----------
 function addMsg(role, text) {
-  const m = el("div", "msg " + role, text);
+  const m = el("div", "msg " + role);
+  setMarkdown(m, text);
   $("#chat").appendChild(m);
   scrollBottom();
   return m;
@@ -96,9 +106,19 @@ async function send() {
   aborter = new AbortController();
   setBusy(true);
 
-  const asstMsg = addMsg("assistant", "");
+  let asstMsg = addMsg("assistant", "");
+  let asstRaw = "";
   asstMsg.classList.add("cursor");
   let thinkingBlock = null, currentTool = null;
+  let renderTimer = null;
+  const scheduleRender = () => {
+    if (renderTimer) return;
+    renderTimer = setTimeout(() => {
+      renderTimer = null;
+      setMarkdown(asstMsg, asstRaw);
+      scrollBottom();
+    }, 80);
+  };
 
   try {
     const res = await fetch("/api/chat", {
@@ -134,7 +154,7 @@ async function send() {
   await refreshThreads();
 
   function handleEvent(ev) {
-    if (ev.type === "token") asstMsg.textContent += ev.text;
+    if (ev.type === "token") { asstRaw += ev.text; scheduleRender(); }
     else if (ev.type === "thinking") {
       if (!thinkingBlock) { thinkingBlock = addBlock("thinking", "◈ THINKING"); }
       thinkingBlock.querySelector("pre").textContent += ev.text;
@@ -144,6 +164,7 @@ async function send() {
       currentTool.open = true;
       currentTool.querySelector("pre").textContent = "→ " + JSON.stringify(ev.input, null, 2);
       asstMsg = addMsg("assistant", "");
+      asstRaw = "";
       asstMsg.classList.add("cursor");
     } else if (ev.type === "tool_end") {
       SFX.play("tool_end");
@@ -269,4 +290,7 @@ if (localStorage.getItem("lb-sound") === "on")
 
 checkHealth();
 setInterval(checkHealth, 15000);
-refreshThreads();
+refreshThreads().then(() => {
+  const t = new URLSearchParams(location.search).get("thread");
+  if (t) { const th = threads.find((x) => x.id === t); if (th) openThread(th); }
+});
