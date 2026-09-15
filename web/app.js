@@ -55,24 +55,30 @@ function scrollBottom() {
   c.scrollTop = c.scrollHeight;
 }
 
+function textOf(content) {
+  if (Array.isArray(content))
+    return content.map((b) => (typeof b === "string" ? b : b.text || "")).join("");
+  return typeof content === "string" ? content : JSON.stringify(content);
+}
+
 function renderHistory(msgs) {
   $("#chat").innerHTML = "";
   for (const m of msgs) {
     if (m.role === "system") continue;
-    if (m.role === "human") addMsg("user", m.content);
+    if (m.role === "human") addMsg("user", textOf(m.content));
     else if (m.role === "ai") {
       if (m.thinking) {
         const b = addBlock("thinking", "◈ THINKING");
         b.querySelector("pre").textContent = m.thinking;
       }
-      if (m.content) addMsg("assistant", typeof m.content === "string" ? m.content : JSON.stringify(m.content));
+      if (m.content) addMsg("assistant", textOf(m.content));
       for (const tc of m.tool_calls || []) {
         const b = addBlock("tool", `⚙ ${tc.name}`);
         b.querySelector("pre").textContent = "→ " + JSON.stringify(tc.args, null, 2);
       }
     } else if (m.role === "tool") {
       const b = addBlock("tool", `⚙ ${m.tool_name} result`);
-      b.querySelector("pre").textContent = String(m.content).slice(0, 20000);
+      b.querySelector("pre").textContent = textOf(m.content).slice(0, 20000);
     }
   }
 }

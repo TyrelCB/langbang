@@ -70,7 +70,9 @@ async def history(thread_id: str) -> list:
     tup = await _checkpointer.aget({"configurable": {"thread_id": thread_id}})
     if not tup:
         return []
-    return [_msg_dict(m) for m in tup.channel_values.get("messages", [])]
+    # Newer checkpointer returns a CheckpointTuple; older returns dict.
+    cv = tup.get("channel_values") if isinstance(tup, dict) else tup.channel_values
+    return [_msg_dict(m) for m in (cv or {}).get("messages", [])]
 
 
 # ---- thread bookkeeping ----
