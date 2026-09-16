@@ -17,5 +17,6 @@
   "game_hurt":         { "file": "TODO-game-hurt.ogg",         "when": "X-SIM: player takes damage" },
   "game_kill":         { "file": "TODO-game-kill.ogg",         "when": "X-SIM: enemy destroyed" },
   "game_death":        { "file": "TODO-game-death.ogg",        "when": "X-SIM: player dies" },
+  "game_charge_full":    { "file": "TODO-game-charge-full.ogg", "when": "X-SIM: charge reaches max (shimmer ping)" },
   "game_clear":        { "file": "TODO-game-clear.ogg",        "when": "X-SIM: stage door reached" }
 }

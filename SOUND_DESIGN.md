@@ -32,13 +32,14 @@ Sample-accurate starts, tail decay < 80ms (keeps chat snappy).
 | game_kill | X-SIM enemy destroyed | 250ms small explosion crumble |
 | game_death | X-SIM player death | 600ms big crumble + descending whine |
 | game_clear | X-SIM stage door reached | 800ms victory arpeggio sting |
+| game_charge_full | X-SIM charge hits max | 120ms bright shimmer/ping |
 
 The `game_*` slots belong to the built-in X-SIM platformer (web/game.js) —
 same rule: imitate the Mega Man X *genre*, never rip game audio.
 
 ## Generation plan (later)
 - Prefer SFX-oriented synth/sampler: chiptune SFX generator or
-  Stable Audio / MusicGen short-prompt renders, batch of 18, ogg @ 44.1kHz.
+  Stable Audio / MusicGen short-prompt renders, batch of 19, ogg @ 44.1kHz.
 - Keep total bundle < 500KB; loop `thinking` from <= 64KB.
 - Mega Man X is copyrighted — imitate the *genre* (SNES UI chiptune), do not
   rip assets.

@@ -62,7 +62,8 @@ const GRAV = 2300, MAX_FALL = 820, JUMP_V = 620, JUMP_CUT = 0.45;
 const COYOTE = 0.08, BUF = 0.09;
 const SLIDE_MAX = 150, WJ_VX = 200, WJ_VY = 600, WJ_LOCK = 0.08;
 const DASH_SPD = 460, DASH_T = 0.2, DASH_CD = 0.25;
-const BSPD = 560, SHOT_CD = 0.15, MAX_SHOTS = 4;
+const BSPD = 560, SHOT_CD = 0.15, MAX_SHOTS = 6;
+const CHARGE_LV1 = 0.35, CHARGE_FULL = 1.05;   // hold Z: lv1 then full charge
 const IFRAMES = 1.1, HP_MAX = 12;
 
 // ---------- state ----------
@@ -92,7 +93,8 @@ function resetStage() {
   }
   P = { x: sx, y: sy, w: 10, h: 20, vx: 0, vy: 0, f: 1, hp: HP_MAX,
         onG: false, coyote: 0, bufT: 0, inv: 0, dashT: 0, dashCd: 0,
-        shotCd: 0, wall: 0, lockT: 0, muzzle: 0 };
+        shotCd: 0, wall: 0, lockT: 0, muzzle: 0,
+        charging: false, chargeT: 0, chargedPing: false };
   shots = []; eshots = []; parts = []; hist = [];
   timeS = 0; camX = clamp(P.x - VIEW_W / 2, 0, LW * TILE - VIEW_W);
 }
@@ -100,9 +102,13 @@ function resetStage() {
 // ---------- input ----------
 const GAME_KEYS = new Set([
   "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Space", "Enter",
-  "KeyA", "KeyD", "KeyW", "KeyX", "KeyZ", "KeyJ", "KeyK", "KeyR",
-  "ShiftLeft", "ShiftRight",
+  "KeyA", "KeyD", "KeyW", "KeyX", "KeyZ", "KeyJ", "KeyK", "KeyC", "KeyR",
+  "ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight",
 ]);
+// aliases so awkward physical-keyboard rollover never eats an action:
+// blaster = Z/J/K/C, dash = X/Shift/Ctrl
+const SHOOT_KEYS = ["KeyZ", "KeyJ", "KeyK", "KeyC"];
+const DASH_KEYS = ["KeyX", "ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight"];
 
 function onKey(e, down) {
   if (!running) return;
@@ -125,7 +131,11 @@ function onKey(e, down) {
   if (down) {
     if (!K.has(code)) {
       if (["Space", "ArrowUp", "KeyW"].includes(code)) P.bufT = BUF;
-      if (code === "KeyX" || code === "ShiftLeft" || code === "ShiftRight") tryDash();
+      if (DASH_KEYS.includes(code)) tryDash();
+      if (SHOOT_KEYS.includes(code) && state === "play" && !P.charging) {
+        P.charging = true; P.chargeT = 0; P.chargedPing = false;
+        if (P.shotCd <= 0 && shots.length < MAX_SHOTS) fireShot();
+      }
       if (code === "Enter" && (state === "ready" || state === "win")) {
         resetStage(); state = "play";
       }
@@ -144,6 +154,23 @@ function tryDash() {
   if (state !== "play" || P.dashCd > 0 || P.dashT > 0) return;
   P.dashT = DASH_T; P.dashCd = DASH_CD; P.f = left() ? -1 : right() ? 1 : P.f;
   sfx("game_dash");
+}
+
+function fireShot() {
+  shots.push({ x: P.x + P.f * 9, y: P.y - 11, vx: P.f * BSPD, w: 8, h: 4, centered: true });
+  P.shotCd = SHOT_CD; P.muzzle = 0.07; sfx("game_shoot");
+}
+
+// charged shots hit harder and punch THROUGH enemies, like the X buster
+function fireCharge(lvl) {
+  const s = lvl === 2
+    ? { w: 18, h: 12, spd: 640, dmg: 4 }
+    : { w: 12, h: 8, spd: 600, dmg: 2 };
+  shots.push({ x: P.x + P.f * 12, y: P.y - 11, vx: P.f * s.spd, w: s.w, h: s.h,
+               dmg: s.dmg, pierce: true, lvl, centered: true });
+  P.muzzle = 0.14;
+  if (lvl === 2) shake = Math.max(shake, 0.1);
+  sfx("game_shoot");
 }
 
 // ---------- physics helpers ----------
@@ -251,11 +278,18 @@ function update(dt) {
   // snap feet to tile grid so collision rows are exact
   // (p.y is the foot line; small float drift is fine at these speeds)
 
-  // shoot
-  if ((K.has("KeyZ") || K.has("KeyJ") || K.has("KeyK")) && p.shotCd <= 0 &&
-      shots.length < MAX_SHOTS && state === "play") {
-    shots.push({ x: p.x + p.f * 9, y: p.y - 11, vx: p.f * BSPD, w: 8, h: 4, centered: true });
-    p.shotCd = SHOT_CD; p.muzzle = 0.07; sfx("game_shoot");
+  // buster: press = quick shot, hold = charge, release = charged blast
+  if (p.charging) {
+    if (SHOOT_KEYS.some((c) => K.has(c))) {
+      p.chargeT += dt;
+      if (!p.chargedPing && p.chargeT >= CHARGE_FULL) {
+        p.chargedPing = true; sfx("game_charge_full");
+      }
+    } else {
+      const lvl = p.chargeT >= CHARGE_FULL ? 2 : p.chargeT >= CHARGE_LV1 ? 1 : 0;
+      p.charging = false; p.chargeT = 0; p.chargedPing = false;
+      if (lvl && shots.length < MAX_SHOTS) fireCharge(lvl);
+    }
   }
   shots = shots.filter((b) => {
     b.x += b.vx * dt;
@@ -305,7 +339,8 @@ function update(dt) {
     for (const e of enemies) {
       if (e.dead) continue;
       if (hit(b, e)) {
-        b.dead = true; e.hp -= 1;
+        if (!b.pierce) b.dead = true;
+        e.hp -= b.dmg || 1;
         if (e.hp <= 0) {
           e.dead = true; sfx("game_kill");
           for (let i = 0; i < 8; i++)
@@ -489,7 +524,7 @@ function drawPanel() {
        [P.newBest ? "NEW BEST!" : bestT !== null ? "BEST " + fmtT(bestT) : "", C.O, 10],
        ["[ENTER] RUN IT BACK", Math.floor(gt * 2) % 2 ? C.O : C.D, 9]]
     : [["X-SIM  //  STAGE X-01", C.A, 15],
-       ["←→/AD RUN   SPACE JUMP   X DASH   Z BLASTER", C.W, 8],
+       ["←→/AD RUN   SPACE JUMP   X DASH   Z BLASTER · HOLD Z = CHARGE", C.W, 8],
        ["WALL-KICK: HOLD INTO WALL + JUMP", C.W, 8],
        ["R RESTART   ESC EXIT SIM", C.D, 8],
        ["[ENTER] BEGIN THE HUNT", Math.floor(gt * 2) % 2 ? C.O : C.D, 10]];
@@ -509,11 +544,32 @@ function draw() {
   drawTiles();
   for (const h of hist) drawX({ x: h.x, y: h.y, f: h.f, onG: false, vx: 0, muzzle: 0, hp: 1, }, true);
   drawEnemies();
-  for (const b of shots) { rect(b.x - camX - 4, b.y - 2, 8, 4, C.A); rect(b.x - camX - 1, b.y - 1, 3, 2, C.W); }
+  for (const b of shots) {
+    const bx = b.x - camX;
+    if (b.lvl === 2) {
+      rect(bx - 11, b.y - 8, 22, 16, "rgba(255,143,43,.35)");
+      rect(bx - 9, b.y - 6, 18, 12, C.A); rect(bx - 5, b.y - 3, 10, 6, C.W);
+    } else if (b.lvl) {
+      rect(bx - 6, b.y - 4, 12, 8, C.A); rect(bx - 3, b.y - 2, 6, 4, C.W);
+    } else {
+      rect(bx - 4, b.y - 2, 8, 4, C.A); rect(bx - 1, b.y - 1, 3, 2, C.W);
+    }
+  }
   for (const b of eshots) { rect(b.x - camX - 3, b.y - 2, 6, 5, C.O); }
   for (const p of parts) { ctx.fillStyle = p.c; ctx.fillRect(Math.round(p.x - camX) - 1, Math.round(p.y) - 1, 2, 2); }
   if (state === "play" || state === "win") {
     if (!(P.inv > 0 && Math.floor(gt * 14) % 2)) drawX(P);
+    if (P.charging && P.chargeT > 0.12) {
+      const full = P.chargeT >= CHARGE_FULL;
+      ctx.strokeStyle = full ? C.O : C.A;
+      ctx.globalAlpha = 0.45 + 0.35 * Math.sin(gt * 22);
+      ctx.lineWidth = full ? 2 : 1;
+      ctx.beginPath();
+      ctx.arc(Math.round(P.x - camX), Math.round(P.y - 11),
+              9 + Math.min(P.chargeT / CHARGE_FULL, 1) * 9, 0, 6.283);
+      ctx.stroke();
+      ctx.globalAlpha = 1; ctx.lineWidth = 1;
+    }
   }
   drawHud();
   if (state === "ready" || state === "win") drawPanel();
@@ -572,5 +628,10 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 });
 
-window.LBGame = { open, close, isOpen: () => running };
+window.LBGame = {
+  open, close, isOpen: () => running,
+  keys: () => [...K],
+  debug: () => ({ keys: [...K], state, charging: P?.charging, chargeT: P?.chargeT,
+                 shots: shots.map((s) => ({ lvl: s.lvl || 0, dmg: s.dmg || 1 })) }),
+};
 })();
