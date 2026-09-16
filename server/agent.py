@@ -1,5 +1,6 @@
 """LangGraph agent + streaming runner + thread storage."""
 import json
+import logging
 import os
 import time
 import uuid
@@ -45,9 +46,13 @@ register_harness_profile(
     ),
 )
 
+logger = logging.getLogger("langbang.agent")
+
 _checkpointer: AsyncSqliteSaver | None = None
 _db: aiosqlite.Connection | None = None
 _edb: aiosqlite.Connection | None = None  # event-log connection (trajectory rows)
+# graph used ONLY to read state back (never invoked); see _read_agent()
+_read_graph = None
 
 
 async def init() -> None:
@@ -320,13 +325,50 @@ def _msg_dict(m) -> dict:
     return d
 
 
+async def _read_agent():
+    """Compiled deep-agent graph used only to load state — never invoked.
+
+    deepagents' DeepAgentState declares `messages` as a DeltaChannel (deltas
+    in the write log, full snapshots only every ~50 steps), so a raw
+    checkpointer blob may have no `messages` key at all. Only Pregel's own
+    state load (aget_state) replays the write log back into the channel.
+    Any compiled graph whose messages channel is a DeltaChannel can read any
+    thread: delta threads replay writes; plain threads seed from their
+    materialized blob value. Built lazily with empty tools (no MCP, no
+    local-tool wiring) since none of that affects the state schema.
+    """
+    global _read_graph
+    if _read_graph is None:
+        s = config.load()
+        _read_graph = create_deep_agent(
+            model(s), [], backend=_fs_backend(), checkpointer=_checkpointer
+        )
+    return _read_graph
+
+
+async def _live_messages(thread_id: str) -> list:
+    """Messages in live graph state (post-compaction), reconstructing the
+    delta-channel case. Returns [] for unknown threads."""
+    cfg = {"configurable": {"thread_id": thread_id}}
+    tup = await _checkpointer.aget(cfg)
+    if not tup:
+        return []
+    # Newer checkpointer returns a CheckpointTuple; older returns dict.
+    cv = tup.get("channel_values") if isinstance(tup, dict) else tup.channel_values
+    msgs = (cv or {}).get("messages")
+    if msgs is None:
+        try:
+            g = await _read_agent()
+            snap = await g.aget_state(cfg)
+            msgs = (snap.values if snap else {}).get("messages")
+        except Exception:  # never let a corrupt thread blank the whole UI
+            logger.exception("delta-channel state load failed for %s", thread_id)
+            msgs = None
+    return list(msgs or [])
+
+
 async def history(thread_id: str) -> list:
-    tup = await _checkpointer.aget({"configurable": {"thread_id": thread_id}})
-    live = []
-    if tup:
-        # Newer checkpointer returns a CheckpointTuple; older returns dict.
-        cv = tup.get("channel_values") if isinstance(tup, dict) else tup.channel_values
-        live = [_msg_dict(m) for m in (cv or {}).get("messages", [])]
+    live = [_msg_dict(m) for m in await _live_messages(thread_id)]
     # Pre-compaction originals were dropped from graph state; replay them so
     # the UI still shows the full transcript while the model sees the summary.
     cur = await _db.execute(
@@ -462,11 +504,8 @@ async def list_threads() -> list:
     for r in rows:
         # What the *next* model call would replay: live graph state (post-
         # compaction), not the full archived transcript the UI shows.
-        ctx = base
-        tup = await _checkpointer.aget({"configurable": {"thread_id": r[0]}})
-        if tup:
-            cv = tup.get("channel_values") if isinstance(tup, dict) else tup.channel_values
-            ctx += count_tokens_approximately((cv or {}).get("messages", []))
+        # _live_messages also reconstructs delta-stored messages (deep mode).
+        ctx = base + count_tokens_approximately(await _live_messages(r[0]))
         out.append(
             {"id": r[0], "title": r[1], "created_at": r[2], "updated_at": r[3],
              "context_tokens": ctx}
