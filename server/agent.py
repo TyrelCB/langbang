@@ -265,6 +265,16 @@ class _CompactionMiddleware(AgentMiddleware):
 # richer descriptions) — our same-named tools would collide on bind.
 DEEP_REPLACED_TOOLS = {"read_file", "write_file"}
 
+# Nudge the planner to use the concurrency the harness already supports:
+# ToolNode runs multiple tool calls from one message in parallel, and
+# several `task` sub-agents dispatched together crawl/research concurrently.
+DEEP_NOTE = (
+    "\n\nParallelism: independent work goes in ONE message — several `task` "
+    "sub-agents for independent research streams, and multiple tool calls "
+    "when one result doesn't feed the next; they run concurrently. Batch "
+    "write_todos status changes with the calls they describe."
+)
+
 
 def _fs_backend():
     """Real filesystem for the deep-agent file tools. No jail: the README
@@ -294,7 +304,7 @@ async def build_agent(s: dict, checkpointer=None):
         return create_deep_agent(
             model(s),
             tools,
-            system_prompt=prompt,
+            system_prompt=prompt + DEEP_NOTE,
             middleware=mw,
             backend=_fs_backend(),
             checkpointer=cp,
@@ -491,9 +501,10 @@ def prompt_overhead_tokens() -> int:
     more, uncounted here). Same estimator as compaction, so the UI's CTX chip
     and the compaction trigger speak the same units."""
     s = config.load()
-    return count_tokens_approximately(
-        [SystemMessage(content=s["system_prompt"] + local_tools.TOOLS_NOTE)]
-    )
+    p = s["system_prompt"] + local_tools.TOOLS_NOTE
+    if s.get("deep_agent", True):
+        p += DEEP_NOTE
+    return count_tokens_approximately([SystemMessage(content=p)])
 
 
 async def list_threads() -> list:

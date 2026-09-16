@@ -1,6 +1,7 @@
 """Built-in local tools: shell + filesystem. Runs on THIS machine — the box
 serving LangBang. Deliberately unrestricted (personal LAN tool, bypass-perms
 philosophy); see README before exposing this server beyond localhost/LAN."""
+import concurrent.futures
 import json
 import os
 import subprocess
@@ -12,6 +13,9 @@ from langchain_core.tools import tool
 HOME = Path.home()
 MAX_OUT = 12_000  # chars — keep tool output off Spark's prefill budget
 CRAWL_API = os.environ.get("LANGBANG_CRAWL4AI_URL", "http://spark-ee93:8088")
+# hard wall-clock cap for one crawl; dead sources should cost seconds, not
+# minutes (180s socket timeouts let wedged upstreams stall whole runs)
+CRAWL_TIMEOUT = int(os.environ.get("LANGBANG_CRAWL_TIMEOUT", "45"))
 
 
 def _trim(s: str) -> str:
@@ -85,31 +89,46 @@ def list_dir(path: str = ".") -> str:
         return f"ERROR: {type(e).__name__}: {e}"
 
 
+def _crawl_once(url: str) -> dict:
+    req = urllib.request.Request(
+        CRAWL_API.rstrip("/") + "/api/crawl",
+        data=json.dumps({"url": url, "fit_markdown": True}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    # urllib's timeout is PER SOCKET OP — a wedged upstream that trickles
+    # bytes can still hang far past it, so crawl_url caps wall clock too.
+    with urllib.request.urlopen(req, timeout=25) as r:
+        return json.load(r)
+
+
 @tool
 def crawl_url(url: str) -> str:
     """Crawl a public web page and return its readable Markdown, using the
     Crawl4AI workbench running on spark-ee93. Good for docs/articles; blocks
-    private-network targets. May take ~10-60s."""
+    private-network targets. Slow/dead sources fail within ~45s — crawl
+    independent URLs as parallel calls in ONE message, not turn by turn."""
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
-        req = urllib.request.Request(
-            CRAWL_API.rstrip("/") + "/api/crawl",
-            data=json.dumps({"url": url, "fit_markdown": True}).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=180) as r:
-            d = json.load(r)
-        if not d.get("success"):
-            return f"CRAWL FAILED for {url}: {d.get('error', d)}"
-        return _trim(
-            f"# {d.get('title') or url}\n"
-            f"[{d.get('word_count', '?')} words, {d.get('elapsed_seconds', '?')}s, "
-            f"saved: {d.get('output_file', '-')}, "
-            f"links: {d.get('internal_links', '?')} in / {d.get('external_links', '?')} out]\n\n"
-            + (d.get("markdown") or "")
+        d = ex.submit(_crawl_once, url).result(timeout=CRAWL_TIMEOUT)
+    except concurrent.futures.TimeoutError:
+        return (
+            f"ERROR: crawl timed out after {CRAWL_TIMEOUT}s — {url} is slow or "
+            "dead; move on or try another source (run_bash curl also works)"
         )
     except Exception as e:  # noqa: BLE001 - report to model, not crash
         return f"ERROR: {type(e).__name__}: {e} (workbench at {CRAWL_API})"
+    finally:
+        ex.shutdown(wait=False)  # orphan thread dies at its own socket timeout
+    if not d.get("success"):
+        return f"CRAWL FAILED for {url}: {d.get('error', d)}"
+    return _trim(
+        f"# {d.get('title') or url}\n"
+        f"[{d.get('word_count', '?')} words, {d.get('elapsed_seconds', '?')}s, "
+        f"saved: {d.get('output_file', '-')}, "
+        f"links: {d.get('internal_links', '?')} in / {d.get('external_links', '?')} out]\n\n"
+        + (d.get("markdown") or "")
+    )
 
 
 LOCAL_TOOLS = [run_bash, read_file, write_file, list_dir, crawl_url]
@@ -117,5 +136,8 @@ LOCAL_TOOLS = [run_bash, read_file, write_file, list_dir, crawl_url]
 TOOLS_NOTE = (
     "\n\nLocal tools available: run_bash (shell, cwd=home), read_file, "
     "write_file, list_dir, crawl_url (fetch any web page as Markdown via "
-    "Crawl4AI on spark-ee93). Prefer them over asking the user to run things."
+    "Crawl4AI on spark-ee93). Prefer them over asking the user to run things. "
+    "Parallelize: independent tool calls (several URLs, files, commands) go "
+    "in ONE message as multiple calls — they run concurrently; never spend a "
+    "separate turn on a call that didn't depend on the last one's result."
 )
