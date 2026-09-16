@@ -18,7 +18,13 @@ DEFAULTS = {
     "temperature": 0.6,
     "max_tokens": 8192,
     # Keep this short: every token costs ~2-4s of prefill on the Spark.
-    "system_prompt": "You are LangBang, a concise, capable agent. Use tools when they help.",
+    # The language rule matters: Qwen-style hybrids drift to Chinese on short
+    # prompts unless told to track the user's language.
+    "system_prompt": (
+        "You are LangBang, a concise, capable agent. Use tools when they help. "
+        "Always answer in the language the user writes in (English by default); "
+        "never switch languages unprompted."
+    ),
     "mcp_servers": {
         # User's hybrid session-history RAG on spark-ee93 (systemd unit: rag-mcp).
         "rag-mcp": {

@@ -201,9 +201,14 @@ body.hide-reasoning .block.thinking { display: none; }
 #search:focus { border-color: var(--cyan); }
 #search-results { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
 #search-results.hidden { display: none; }
+/* .thread has overflow:hidden → auto min-size is 0 → a long result list
+   SHRINKS rows instead of scrolling (glyphs sliced horizontally). Pin them. */
+.thread { flex-shrink: 0; }
 .result { display: block; } /* undo .thread flex — stack title over snippet */
 .result .t-name { display: block; }
-.result .r-snip { color: var(--muted); font-size: 11px; margin-top: 2px; }
+.result .r-snip { color: var(--muted); font-size: 11px; margin-top: 2px;
+  white-space: normal; } /* undo .thread nowrap — snippets wrap, not clipped */
+.result mark { background: var(--orange); color: #04101c; }
 .no-results { color: var(--muted); font-size: 12px; padding: 6px 4px; letter-spacing: 1px; }
 
 /* per-model-call token/speed line under each answer round */

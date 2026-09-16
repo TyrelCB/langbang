@@ -85,22 +85,23 @@ async def messages(tid: str):
 # ---- chat search ----
 
 SEARCH_LIMIT = 50
+PER_THREAD_LIMIT = 3  # short queries ("sm") hit dozens of messages per thread;
+# without a cap one chatty thread eats every slot and the list is useless
 
 
 @app.get("/api/search")
 async def search(q: str = ""):
     """Case-insensitive substring scan over every thread's full transcript
-    (compaction archives included). `pos` is the message's index among
-    non-system messages — exactly the chat DOM child index the UI renders,
-    so a click can scroll straight to the hit."""
+    (compaction archives included), newest threads first, max PER_THREAD_LIMIT
+    hits per thread so a broad query still surfaces breadth. `pos` is the
+    message's index among rendered messages — exactly the chat DOM child
+    index the UI renders, so a click can scroll straight to the hit."""
     q = q.strip().lower()
     if len(q) < 2:
         return []
     out = []
     for t in await agent.list_threads():
-        if q in t["title"].lower():
-            out.append({"thread_id": t["id"], "title": t["title"], "pos": -1,
-                        "role": "title", "snippet": t["title"]})
+        hits = []
         pos = -1
         for m in await agent.history(t["id"]):
             if m["role"] == "system":
@@ -120,10 +121,18 @@ async def search(q: str = ""):
             a = max(0, i - 40)
             b = min(len(text), i + len(q) + 120)
             snippet = ("… " if a else "") + " ".join(text[a:b].split()) + (" …" if b < len(text) else "")
-            out.append({"thread_id": t["id"], "title": t["title"], "pos": pos,
-                        "role": m["role"], "snippet": snippet})
-            if len(out) >= SEARCH_LIMIT:
-                return out
+            hits.append({"thread_id": t["id"], "title": t["title"], "pos": pos,
+                         "role": m["role"], "snippet": snippet})
+            if len(hits) >= PER_THREAD_LIMIT:
+                break
+        # title row only when the thread has no message hits — otherwise the
+        # title already shows on every hit row and this is pure noise
+        if not hits and q in t["title"].lower():
+            hits.append({"thread_id": t["id"], "title": t["title"], "pos": -1,
+                         "role": "title", "snippet": t["title"]})
+        out.extend(hits)
+        if len(out) >= SEARCH_LIMIT:
+            return out[:SEARCH_LIMIT]
     return out
 
 

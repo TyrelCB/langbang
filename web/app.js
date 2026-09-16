@@ -52,6 +52,18 @@ function setMarkdown(node, raw) {
   node.innerHTML = renderMarkdown(raw);
   enhanceCodeBlocks(node);
 }
+// escape + wrap first case-insensitive occurrence of q in <mark> (result hl)
+function hl(text, q) {
+  const esc = (s) =>
+    s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const i = text.toLowerCase().indexOf(q.toLowerCase());
+  if (i < 0) return esc(text);
+  return (
+    esc(text.slice(0, i)) +
+    "<mark>" + esc(text.slice(i, i + q.length)) + "</mark>" +
+    esc(text.slice(i + q.length))
+  );
+}
 
 // ---------- code blocks: highlight + copy/save toolbar ----------
 const LANG_EXT = {
@@ -399,10 +411,22 @@ async function runSearch() {
     box.appendChild(el("div", "no-results", "// NO MATCHES"));
     return;
   }
+  box.appendChild(
+    el("div", "no-results", `// ${rs.length} MATCH${rs.length > 1 ? "ES" : ""}` +
+      (rs.length >= 50 ? " (SHOWN, CAP REACHED)" : ""))
+  );
   for (const r of rs) {
     const d = el("div", "thread result");
-    d.appendChild(el("div", "t-name", r.title + (r.role === "title" ? "  ⌕ TITLE" : "")));
-    if (r.pos >= 0) d.appendChild(el("div", "r-snip", r.snippet));
+    const name = el("div", "t-name");
+    name.innerHTML = DOMPurify.sanitize(
+      hl(r.title, q) + (r.role === "title" ? "  ⌕ TITLE" : "")
+    );
+    d.appendChild(name);
+    if (r.pos >= 0) {
+      const snip = el("div", "r-snip");
+      snip.innerHTML = DOMPurify.sanitize(hl(r.snippet, q));
+      d.appendChild(snip);
+    }
     d.onclick = async () => {
       await openThread({ id: r.thread_id, title: r.title });
       if (r.pos < 0) return;

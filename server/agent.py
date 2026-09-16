@@ -82,6 +82,10 @@ def model(s: dict) -> ChatOpenAI:
         # sglang only sends usage in a final stream chunk when asked; we need
         # prompt/completion counts (and timing) for the per-turn speed readout.
         stream_usage=True,
+        # langchain-openai's default (120s) is too tight for a single Spark
+        # that may be queued behind other GPU work — a long silent gap is
+        # prefill, not a dead peer. Kills truly hung connections at 10 min.
+        stream_chunk_timeout=600,
         extra_body=extra_body,
     )
 
