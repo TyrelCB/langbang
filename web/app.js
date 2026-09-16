@@ -16,6 +16,11 @@ let pendingImages = []; // data URLs awaiting send
 const MAX_IMAGES = 4;
 const MAX_IMG_BYTES = 6 * 1024 * 1024;
 
+// agentic-visibility state
+let run = null;        // live-run bundle {t0, iv, tools:Map, subs:Map, stats} while streaming
+let trajCache = null;  // trajectory rows/totals for the current thread
+let trajVisible = false;
+
 // ---------- API ----------
 const api = {
   async settings() { return (await fetch("/api/settings")).json(); },
@@ -35,6 +40,7 @@ const api = {
   },
   async delThread(id) { await fetch("/api/threads/" + id, { method: "DELETE" }); },
   async messages(id) { return (await fetch(`/api/threads/${id}/messages`)).json(); },
+  async trajectory(id) { return (await fetch(`/api/threads/${id}/trajectory`)).json(); },
   async search(q) { return (await fetch("/api/search?q=" + encodeURIComponent(q))).json(); },
 };
 
@@ -42,6 +48,10 @@ const api = {
 // server's compaction trigger) — compact 12.3k display
 const fmtTok = (n) =>
   n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
+// "78m 08s" for prominent timers, "78m08s"/"4.2s" for inline chips
+const fmtClock = (s) => `${Math.floor(s / 60)}m ${String(Math.floor(s) % 60).padStart(2, "0")}s`;
+const fmtShort = (s) =>
+  s >= 60 ? `${Math.floor(s / 60)}m${String(Math.floor(s) % 60).padStart(2, "0")}s` : `${Math.round(s * 10) / 10}s`;
 
 // ---------- markdown ----------
 marked.use({ breaks: true, gfm: true });
@@ -177,6 +187,15 @@ function addMsgRaw(cls, text) {
   return m;
 }
 
+function buildToolCard(label, input) {
+  // same chrome as addBlock("tool", …) but DETACHED — caller chooses the host
+  // (plain #chat, or nested inside a sub-agent's card body for inner tools)
+  const d = el("details", "block tool");
+  d.appendChild(el("summary", null, label));
+  if (input !== null) d.appendChild(el("pre", null, "→ " + JSON.stringify(input, null, 2)));
+  return d;
+}
+
 function addBlock(kind, label) {
   const d = el("details", "block " + kind);
   const s = el("summary", null, label);
@@ -239,10 +258,21 @@ async function send() {
   streaming = true;
   aborter = new AbortController();
   setBusy(true);
+  // live-run bundle: timers are recomputed from t0 on every tick (background
+  // tabs throttle intervals — never accumulate elapsed by counting ticks)
+  run = {
+    t0: Date.now(),
+    iv: setInterval(tickRun, 250),
+    tools: new Map(), // run_id -> card el; pairs start/end even when parallel
+    subs: new Map(),  // task run_id -> {card, body, t0}
+    stats: { steps: 0, llm_s: 0, tool_s: 0, in: 0, out: 0, ttfts: 0, ttft_n: 0 },
+  };
+  $("#sb-live").classList.remove("hidden");
+  tickRun();
 
   let asstMsg = null; // created lazily on first visible token — no empty cursor boxes
   let asstRaw = "";
-  let thinkingBlock = null, currentTool = null;
+  let thinkingBlock = null;
   let renderTimer = null;
   const ensureAsst = () => {
     if (!asstMsg) {
@@ -291,7 +321,20 @@ async function send() {
   if (asstMsg) asstMsg.classList.remove("cursor");
   streaming = false;
   setBusy(false);
+  clearInterval(run.iv);
+  // aborted/errored runs: cards whose tool_end never arrived get sealed ✕ —
+  // never leave a spinner that will never stop
+  for (const card of run.tools.values()) {
+    const s = card.querySelector("summary");
+    s.textContent = "✕ " + s.textContent.replace(/ …$/, "");
+    card.open = false;
+  }
+  run = null;
+  $("#sb-live").classList.add("hidden");
   await refreshThreads();
+  // rows are committed per-event server-side, so totals read back coherently
+  // even after an abort or an error mid-run
+  refreshStats();
 
   function handleEvent(ev) {
     if (ev.type === "token") {
@@ -305,21 +348,52 @@ async function send() {
       SFX.play("tool_start");
       // close the current answer bubble; the next one opens on its first token
       if (asstMsg) { asstMsg.classList.remove("cursor"); asstMsg = null; }
-      currentTool = addBlock("tool", `⚙ ${ev.name} …`);
-      currentTool.open = true;
-      currentTool.querySelector("pre").textContent = "→ " + JSON.stringify(ev.input, null, 2);
+      let card, host = $("#chat");
+      if (ev.name === "task") {
+        // sub-agent run: the card IS the live activity container — inner
+        // tool cards nest into its body instead of into #chat
+        card = buildToolCard(
+          `◈ DEEP DIVING${ev.input?.subagent_type ? " — " + ev.input.subagent_type : ""} …`, null);
+        const body = el("div", "sub-body");
+        card.appendChild(body);
+        run.subs.set(ev.run_id, { card, body, t0: Date.now() });
+      } else {
+        card = buildToolCard(`⚙ ${ev.name} …`, ev.input);
+        if (ev.sub && run.subs.get(ev.sub)) host = run.subs.get(ev.sub).body;
+      }
+      card.open = true;
+      host.appendChild(card);
+      run.tools.set(ev.run_id, card);
     } else if (ev.type === "tool_end") {
       SFX.play("tool_end");
-      if (currentTool) {
-        currentTool.querySelector("summary").textContent = `⚙ ${ev.name}`;
-        currentTool.querySelector("pre").textContent += "\n← " + JSON.stringify(ev.output, null, 2);
-        currentTool.open = false;
-        currentTool = null;
+      run.stats.steps++;
+      if (ev.name !== "task" && typeof ev.dur === "number") run.stats.tool_s += ev.dur;
+      const card = run.tools.get(ev.run_id);
+      run.tools.delete(ev.run_id);
+      if (!card) {
+        console.debug("tool_end for unknown run_id", ev.run_id); // e.g. run teardown raced it
+      } else if (ev.name === "task") {
+        card.querySelector("summary").textContent = `✓ DEEP DIVING — ${fmtClock(ev.dur || 0)}`;
+        card.open = false;
+        run.subs.delete(ev.run_id);
+      } else {
+        card.querySelector("summary").textContent =
+          `⚙ ${ev.name}${typeof ev.dur === "number" ? " · " + fmtShort(ev.dur) : ""}`;
+        card.querySelector("pre").textContent += "\n← " + JSON.stringify(ev.output, null, 2);
+        card.open = false;
       }
+    } else if (ev.type === "todos") {
+      renderTodos(ev.todos);
     } else if (ev.type === "usage") {
       // one line per model call (ReAct rounds and the compaction summarizer
       // each report their own); prefill_tps is ttft-inclusive, so it's a
       // lower bound on real prefill speed — label kept honest as "~".
+      run.stats.steps++;
+      run.stats.in += ev.input || 0;
+      run.stats.out += ev.output || 0;
+      run.stats.llm_s += ev.seconds || 0;
+      run.stats.ttfts += ev.ttft || 0;
+      run.stats.ttft_n++;
       addMsgRaw(
         "usage",
         `⚡ IN ${fmtTok(ev.input)} → OUT ${fmtTok(ev.output)} · TTFT ${ev.ttft}s · ` +
@@ -344,6 +418,176 @@ function stopGeneration() {
   if (aborter) aborter.abort();
 }
 
+// ---------- agentic visibility: live run bar, to-dos, totals, trajectory ----------
+function tickRun() {
+  if (!run) return;
+  const bar = $("#sb-live");
+  const s = run.stats;
+  const parts = [`⏱ RUN ${fmtClock((Date.now() - run.t0) / 1000)}`, `${s.steps} STEPS`];
+  if (s.llm_s) parts.push(`LLM ${fmtShort(s.llm_s)}`);
+  if (s.tool_s) parts.push(`TOOL ${fmtShort(s.tool_s)}`);
+  if (s.ttft_n) parts.push(`TTFT ${Math.round((1000 * s.ttfts) / s.ttft_n)}ms`);
+  if (s.in || s.out) parts.push(`IN ${fmtTok(s.in)} · OUT ${fmtTok(s.out)}`);
+  bar.textContent = parts.join("  │  "); // wipes stale chips too
+  // one live timer chip per active sub-agent (reads as ×N when parallel)
+  for (const sub of run.subs.values())
+    bar.appendChild(
+      el("span", "sub-chip", `◈ DEEP DIVING ${fmtClock((Date.now() - sub.t0) / 1000)}`)
+    );
+}
+
+function renderTodos(todos) {
+  if (!Array.isArray(todos) || !todos.length) return hideTodos();
+  const head = (n, s) => n + " " + s;
+  const done = todos.filter((t) => t.status === "completed").length;
+  const prog = todos.filter((t) => t.status === "in_progress").length;
+  $("#todo-label").textContent =
+    `☰ TO-DOS — ${head(done, "COMPLETED")} · ${head(prog, "IN PROGRESS")} · ` +
+    `${head(todos.length - done - prog, "PENDING")}`;
+  const list = $("#todo-list");
+  list.innerHTML = "";
+  for (const t of todos) {
+    const row = el("div", "todo-item" + (t.status === "completed" ? " done" : ""));
+    const ic = el("span", "todo-ic");
+    if (t.status === "completed") ic.textContent = "✓";
+    else if (t.status === "in_progress") ic.classList.add("spin");
+    else ic.textContent = "○";
+    row.append(ic, el("span", "todo-txt", String(t.content ?? t.text ?? "")));
+    list.appendChild(row); // textContent-built: model-authored content stays XSS-safe
+  }
+  $("#todo-panel").classList.remove("hidden");
+  applyTodosCollapsed();
+}
+
+function hideTodos() {
+  $("#todo-panel").classList.add("hidden");
+  $("#todo-list").innerHTML = "";
+}
+
+function applyTodosCollapsed() {
+  $("#todo-list").classList.toggle("hidden", localStorage.getItem("lb-todos-collapsed") === "on");
+}
+
+function resetTrajView() {
+  hideTodos();
+  trajCache = null;
+  $("#sb-totals").textContent = "";
+  if (trajVisible) renderTraj();
+}
+
+// replay from persisted messages — write_todos calls live in tool_call args,
+// so this survives compaction (archived messages keep their args)
+function replayTodos(msgs) {
+  for (let i = msgs.length - 1; i >= 0; i--)
+    for (const tc of msgs[i].tool_calls || [])
+      if (tc.name === "write_todos" && Array.isArray(tc.args?.todos))
+        return renderTodos(tc.args.todos);
+  hideTodos();
+}
+
+async function refreshStats() {
+  const id = threadId;
+  if (!id) {
+    trajCache = null;
+    $("#sb-totals").textContent = "";
+    if (trajVisible) renderTraj();
+    return;
+  }
+  const data = await api.trajectory(id);
+  if (id !== threadId) return; // thread switched mid-fetch — stale read
+  trajCache = data;
+  const T = data.totals || {};
+  const groups = [];
+  const G = (...xs) => groups.push(xs.filter(Boolean).join(" · "));
+  if (T.turns) {
+    G(`${T.turns} TURNS`, `${T.steps} STEPS`);
+    G(`LLM ${fmtShort(T.llm_s || 0)}`, `TOOL ${fmtShort(T.tool_s || 0)}`);
+    const perf = [];
+    if (T.ttft_avg != null) perf.push(`TTFT ${Math.round(1000 * T.ttft_avg)}ms`);
+    if (T.llm_s > 0 && T.tok_out) perf.push(`${fmtTok(Math.round(T.tok_out / T.llm_s))} OUT/s`);
+    G(...perf);
+    if (T.cache_read > 0 && T.tok_in) G(`CACHE ${Math.round((100 * T.cache_read) / T.tok_in)}%`);
+    G(`IN ${fmtTok(T.tok_in || 0)}`, `OUT ${fmtTok(T.tok_out || 0)}`);
+  }
+  $("#sb-totals").textContent = groups.join("  │  ");
+  if (trajVisible) renderTraj();
+}
+
+function showTab(which) {
+  trajVisible = which === "traj";
+  $("#chat").classList.toggle("hidden", trajVisible);
+  $("#trajectory").classList.toggle("hidden", !trajVisible);
+  $("#tab-chat").classList.toggle("on", !trajVisible);
+  $("#tab-traj").classList.toggle("on", trajVisible);
+  if (!trajVisible) return;
+  if (trajCache) renderTraj();
+  else refreshStats(); // no rows cached yet for this thread — fetch, then render
+}
+
+function renderTraj() {
+  const body = $("#traj-body");
+  body.innerHTML = "";
+  const q = $("#traj-search").value.trim().toLowerCase();
+  const events = (trajCache && trajCache.events) || [];
+  if (!events.length) {
+    body.appendChild(el("div", "no-results", "// NO TELEMETRY YET"));
+    return;
+  }
+  const groups = []; // contiguous runs share a turn_id
+  for (const e of events) {
+    const g = groups[groups.length - 1];
+    if (g && g.turn_id === e.turn_id) g.rows.push(e);
+    else groups.push({ turn_id: e.turn_id, rows: [e] });
+  }
+  const BADGE = { user: "USER", model: "ASSISTANT", tool: "TOOL", error: "ERROR" };
+  // Rows land in seq order, but tool rows are logged at span END — a task's
+  // children would render above it. Sort by effective START (end - dur); the
+  // sort is stable, so ties keep log order.
+  const st = (e) => e.ts - (typeof e.dur === "number" ? e.dur : 0);
+  for (const g of groups) g.rows.sort((a, b) => st(a) - st(b));
+  groups.forEach((g, gi) => {
+    const t0 = Math.min(...g.rows.map(st));
+    const span = Math.max(Math.max(...g.rows.map((e) => e.ts)) - t0, 0.001);
+    const card = el("div", "traj-card");
+    card.appendChild(
+      el("div", "traj-head",
+        `RUN ${gi + 1} · ${new Date(t0 * 1000).toLocaleTimeString()} · ${fmtShort(span)}`)
+    );
+    const strip = el("div", "traj-strip");
+    strip.appendChild(el("i", "traj-tick input")); // input sits at 0 (CSS left:0)
+    for (const e of g.rows) {
+      if (e.type !== "model" && e.type !== "tool") continue;
+      const tk = el("i", "traj-tick " + e.type);
+      tk.style.left = (100 * (st(e) - t0)) / span + "%";
+      tk.title = `${e.name || e.type}${e.dur != null ? " · " + fmtShort(e.dur) : ""}`;
+      strip.appendChild(tk);
+    }
+    card.appendChild(strip);
+    for (const e of g.rows) {
+      const m = e.meta || {};
+      const label = BADGE[e.type] || e.type;
+      const preview =
+        e.type === "tool" ? (m.desc ? "◈ " + m.desc : String(m.in || ""))
+        : e.type === "error" ? String(m.message || "")
+        : String(m.text || "");
+      const row = el("div", "traj-row" + (m.sub ? " sub" : ""));
+      row.appendChild(el("span", "traj-badge " + e.type, label));
+      row.appendChild(el("span", "traj-name", e.name || (e.dur != null ? fmtShort(e.dur) : "")));
+      row.appendChild(el("span", "traj-pre", preview));
+      if (q && !(label + " " + (e.name || "") + " " + preview).toLowerCase().includes(q))
+        row.classList.add("hidden");
+      row.onclick = () => {
+        if (row._meta) { row._meta.remove(); row._meta = null; return; }
+        // meta pre is a SIBLING of the row — keep a direct ref to toggle it
+        row._meta = el("pre", "traj-meta", JSON.stringify({ ...e, meta: m }, null, 2));
+        row.after(row._meta);
+      };
+      card.appendChild(row);
+    }
+    body.appendChild(card);
+  });
+}
+
 // ---------- threads ----------
 async function refreshThreads() {
   threads = await api.threads();
@@ -357,7 +601,7 @@ async function refreshThreads() {
     x.onclick = async (e) => {
       e.stopPropagation();
       await api.delThread(t.id);
-      if (t.id === threadId) { threadId = null; $("#chat").innerHTML = ""; }
+      if (t.id === threadId) { threadId = null; $("#chat").innerHTML = ""; resetTrajView(); }
       refreshThreads();
     };
     d.appendChild(x);
@@ -377,7 +621,10 @@ async function openThread(t) {
   SFX.play("click");
   threadId = t.id;
   $("#chat-title").textContent = t.title.toUpperCase();
-  renderHistory(await api.messages(t.id));
+  const msgs = await api.messages(t.id);
+  renderHistory(msgs);
+  replayTodos(msgs); // last write_todos call re-draws the panel on switch/reload
+  refreshStats();
   refreshThreads();
 }
 
@@ -386,6 +633,7 @@ async function newThread() {
   threadId = t.id;
   $("#chat").innerHTML = "";
   $("#chat-title").textContent = "NEW CHAT";
+  resetTrajView();
   SFX.play("thread_new");
   refreshThreads();
 }
@@ -545,6 +793,16 @@ $("#file-img").onchange = (e) => {
   [...e.target.files].forEach(addImage);
   e.target.value = ""; // allow re-selecting the same file
 };
+$("#tab-chat").onclick = () => { SFX.play("click"); showTab("chat"); };
+$("#tab-traj").onclick = () => { SFX.play("click"); showTab("traj"); };
+$("#todo-head").onclick = () => {
+  SFX.play("click");
+  localStorage.setItem(
+    "lb-todos-collapsed",
+    localStorage.getItem("lb-todos-collapsed") === "on" ? "off" : "on");
+  applyTodosCollapsed();
+};
+$("#traj-search").addEventListener("input", () => renderTraj());
 $("#btn-sound").onclick = () => {
   const on = localStorage.getItem("lb-sound") === "on";
   localStorage.setItem("lb-sound", on ? "off" : "on");

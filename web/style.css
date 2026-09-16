@@ -238,3 +238,85 @@ body.hide-reasoning .block.thinking { display: none; }
   margin-top: 8px; font-size: 11px; letter-spacing: 1px; }
 .g-title { color: var(--orange); font-weight: 700; }
 .g-keys { color: var(--muted); flex: 1; }
+
+/* ---- agentic visibility: to-dos, deep-dive nesting, status bar, trajectory ---- */
+.btn.tab { font-size: 12px; padding: 3px 10px; }
+.btn.tab.on { color: var(--cyan); border-color: var(--cyan-dim); }
+
+/* live to-do panel pinned above the composer */
+#todo-panel {
+  flex-shrink: 0; max-height: 34vh; overflow-y: auto; padding: 8px 16px;
+  background: var(--bg2); border-top: 1px solid var(--line);
+}
+#todo-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  cursor: pointer; user-select: none; color: var(--cyan);
+  letter-spacing: 2px; font-size: 12px;
+}
+#todo-head .todo-caret { color: var(--muted); }
+#todo-list { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+.todo-item { display: flex; gap: 8px; align-items: baseline; font-size: 12px; }
+.todo-item .todo-ic { flex: 0 0 14px; text-align: center; color: var(--muted); }
+.todo-item.done .todo-ic { color: #7ee787; }
+.todo-item.done .todo-txt { color: var(--muted); text-decoration: line-through; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.todo-ic.spin {
+  width: 10px; height: 10px; align-self: center; border-radius: 50%;
+  border: 2px solid var(--orange); border-top-color: transparent;
+  animation: spin 1s steps(8) infinite;
+}
+
+/* sub-agent cards: inner tool cards nest into the task card's body */
+.sub-body {
+  margin: 6px 0 4px 14px; padding-left: 10px;
+  border-left: 2px solid var(--cyan-dim);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.sub-body .block { max-width: 100%; }
+
+/* one bar, two zones: thread totals always, live run zone while streaming */
+#statusbar {
+  display: flex; gap: 14px; align-items: baseline; padding: 4px 16px;
+  font-size: 11px; letter-spacing: 1px; color: var(--muted);
+  background: var(--bg2); border-top: 1px solid var(--line);
+  white-space: nowrap; overflow-x: auto;
+}
+#sb-live { color: var(--orange); }
+.sub-chip { border: 1px solid var(--orange); padding: 0 6px; margin-left: 8px; }
+
+/* trajectory tab (sibling of #chat — flex rules must not fight .hidden's !important) */
+#trajectory { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+#traj-search {
+  flex-shrink: 0; width: 100%; font: inherit; font-size: 12px; color: var(--text);
+  background: var(--panel); border: 1px solid var(--line); padding: 6px 8px;
+  clip-path: var(--clip); outline: none; letter-spacing: 1px;
+}
+#traj-search:focus { border-color: var(--cyan); }
+#traj-body { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+.traj-card { border: 1px solid var(--line); background: var(--bg2); clip-path: var(--clip); padding: 8px 10px; }
+.traj-head { color: var(--cyan); font-size: 12px; letter-spacing: 2px; margin-bottom: 6px; }
+.traj-strip { position: relative; height: 14px; background: var(--panel); border: 1px solid var(--line); margin-bottom: 8px; }
+.traj-tick { position: absolute; top: -1px; bottom: -1px; width: 2px; }
+.traj-tick.input { left: 0; background: var(--text); }
+.traj-tick.model { background: var(--cyan); }
+.traj-tick.tool { background: var(--orange); }
+.traj-row { display: flex; align-items: baseline; gap: 8px; font-size: 12px; cursor: pointer; padding: 2px 4px; }
+.traj-row:hover { background: var(--panel); }
+.traj-row.sub { margin-left: 18px; }
+.traj-badge { flex: 0 0 auto; font-size: 10px; letter-spacing: 1px; border: 1px solid var(--muted); padding: 0 4px; }
+.traj-badge.user { border-color: var(--orange); color: var(--orange); }
+.traj-badge.model { border-color: var(--cyan); color: var(--cyan); }
+.traj-badge.tool { border-color: var(--muted); color: var(--muted); }
+.traj-badge.error { border-color: var(--danger); color: var(--danger); }
+.traj-name {
+  flex: 0 1 auto; min-width: 0; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.traj-pre {
+  flex: 1; min-width: 0; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.traj-meta {
+  margin: 2px 0 6px; padding: 8px; font-size: 11px; white-space: pre-wrap;
+  background: var(--panel); border: 1px solid var(--line); overflow-x: auto;
+}

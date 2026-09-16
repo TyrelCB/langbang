@@ -25,6 +25,8 @@
     <header id="topbar">
       <div id="chat-title">— SELECT OR START A CHAT —</div>
       <div class="topbar-right">
+        <button id="tab-chat" class="btn ghost tab on" title="chat view">▣ CHAT</button>
+        <button id="tab-traj" class="btn ghost tab" title="agent trajectory — steps, timing, sub-agents">≡ TRAJECTORY</button>
         <button id="btn-game" class="btn ghost" title="X-SIM platformer — G to open, ESC to bail back to chat">⚔ X-SIM</button>
         <button id="btn-reasoning" class="btn ghost" title="Show/hide model reasoning">◈ REASONING: ON</button>
         <div id="ctx-tag" title="Tokens the model re-reads on the next call (post-compaction)"></div>
@@ -32,12 +34,29 @@
       </div>
     </header>
     <div id="chat"></div>
+    <!-- trajectory + todo panel are SIBLINGS of #chat: search-jump keys off
+         #chat child indices and server pos-counting, so nothing may nest in there -->
+    <div id="trajectory" class="hidden">
+      <input id="traj-search" type="text" placeholder="⌕ FILTER TRAJECTORY…" autocomplete="off">
+      <div id="traj-body"></div>
+    </div>
+    <div id="todo-panel" class="hidden">
+      <div id="todo-head">
+        <span id="todo-label">☰ TO-DOS</span>
+        <span class="todo-caret">▾</span>
+      </div>
+      <div id="todo-list"></div>
+    </div>
     <div id="attach-strip"></div>
     <footer id="composer">
       <button id="btn-attach" class="btn ghost hidden" title="Attach image">📎 ATTACH</button>
       <input id="file-img" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple class="hidden">
       <textarea id="input" rows="2" placeholder="Transmit message… (Enter to send, Shift+Enter for newline; paste images when vision is on)"></textarea>
       <button id="btn-send" class="btn accent">SEND ▶</button>
+    </footer>
+    <footer id="statusbar">
+      <span id="sb-totals"></span>
+      <span id="sb-live" class="hidden"></span>
     </footer>
   </main>
 
