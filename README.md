@@ -9,6 +9,14 @@ but built on the LangChain/LangGraph ecosystem:
 - **Built-in local tools** (`server/local_tools.py`): `run_bash` (shell on the
   server host, cwd=home, 300s cap), `read_file`, `write_file`, `list_dir`,
   `crawl_url` (fetch any web page as Markdown)
+- **Deep agent mode** (`deepagents`, on by default; CONFIG toggle): the agent
+  gets `write_todos` planning and a `task` tool that spawns autonomous
+  sub-agents, and its file tools (`ls`, `read_file`, `write_file`,
+  `edit_file`, `glob`, `grep`) come from the harness on the real filesystem
+  — our same-named `read_file`/`write_file` step aside, and oversize tool
+  results get auto-evicted to disk). `run_bash` stays the only
+  shell — the harness's extra `execute` tool is excluded. Turning the toggle
+  off falls back to the plain LangGraph ReAct graph
 - **MCP servers** via `langchain-mcp-adapters` (stdio / SSE / streamable-HTTP)
 
 ## Spark services wired in by default

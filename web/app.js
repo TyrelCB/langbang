@@ -468,6 +468,7 @@ async function openSettings() {
   $("#set-vision").checked = !!(s.capabilities || {}).vision;
   $("#set-thinking").checked = !!s.enable_thinking;
   $("#set-compact").checked = !!s.compact_enabled;
+  $("#set-deep_agent").checked = !!s.deep_agent;
   $("#settings-panel").classList.remove("hidden");
   SFX.play("click");
 }
@@ -492,6 +493,7 @@ async function saveSettings() {
     capabilities: { vision: $("#set-vision").checked },
     enable_thinking: $("#set-thinking").checked,
     compact_enabled: $("#set-compact").checked,
+    deep_agent: $("#set-deep_agent").checked,
     compact_trigger_tokens: parseInt($("#set-compact_trigger_tokens").value) || 0,
     compact_keep_messages: parseInt($("#set-compact_keep_messages").value) || 20,
     compact_summary_tokens: parseInt($("#set-compact_summary_tokens").value) || 800,

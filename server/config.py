@@ -33,6 +33,12 @@ DEFAULTS = {
         },
     },
     "max_react_iterations": 12,
+    # deepagents harness: write_todos planning, a `task` sub-agent for
+    # parallel/parallelizable digging, and built-in file tools on the real
+    # filesystem (these replace our read_file/write_file toggles, which stay
+    # inert in deep mode; run_bash remains the only shell — the harness's
+    # `execute` tool is excluded in agent.py). Off = plain create_react_agent.
+    "deep_agent": True,
     # Off by default: Qwen3-style hybrids answer silently unless asked, and
     # thinking adds a few hundred decode tokens per turn (~40-50 ms each on
     # a single Spark). Enable in CONFIG to stream reasoning into the

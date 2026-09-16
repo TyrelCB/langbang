@@ -1,10 +1,18 @@
 """LangGraph agent + streaming runner + thread storage."""
 import json
+import os
 import time
 import uuid
 from typing import AsyncIterator
 
 import aiosqlite
+from deepagents import (
+    HarnessProfile,
+    backends,
+    create_deep_agent,
+    register_harness_profile,
+)
+from langchain.agents.middleware import AgentMiddleware, TodoListMiddleware
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -20,6 +28,22 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.prebuilt import create_react_agent
 
 from . import config, local_tools, mcp
+
+# LangBang's tuning of the deepagents harness, registered for provider
+# "openai" (our sglang backend is OpenAI-compatible; the lookup falls back to
+# provider for pre-built model instances):
+# - Drop deepagents' SummarizationMiddleware — our own compaction replaces it
+#   and additionally archives originals to SQLite so the UI transcript stays
+#   complete (theirs offloads to backend files our history() never reads).
+# - Hide the built-in `execute` tool: LocalShellBackend would give the agent a
+#   second, always-on shell while run_bash is the one the CONFIG toggles govern.
+register_harness_profile(
+    "openai",
+    HarnessProfile(
+        excluded_middleware=frozenset({"SummarizationMiddleware"}),
+        excluded_tools=frozenset({"execute"}),
+    ),
+)
 
 _checkpointer: AsyncSqliteSaver | None = None
 _db: aiosqlite.Connection | None = None
@@ -195,16 +219,61 @@ def _compaction_hook(s: dict):
     return pre_model_hook
 
 
+class _CompactionMiddleware(AgentMiddleware):
+    """Deep-agent twin of `_compaction_hook`: create_agent-based graphs
+    (deepagents) take middleware instead of pre_model_hook."""
+
+    def __init__(self, s: dict):
+        super().__init__()
+        self._hook = _compaction_hook(s)
+
+    async def abefore_model(self, state, runtime):  # noqa: ANN001, ARG002
+        return await self._hook(state)
+
+
+# Provided by the deepagents harness itself in deep mode (on the real FS, with
+# richer descriptions) — our same-named tools would collide on bind.
+DEEP_REPLACED_TOOLS = {"read_file", "write_file"}
+
+
+def _fs_backend():
+    """Real filesystem for the deep-agent file tools. No jail: the README
+    already treats this server as an unsandboxed personal LAN tool (run_bash
+    is plain `bash -lc`), and `virtual_mode=False` lets absolute paths work;
+    relative paths resolve from $HOME like run_bash's cwd. Plain
+    FilesystemBackend (not LocalShellBackend): `execute` is excluded via the
+    harness profile, run_bash owns the shell."""
+    return backends.FilesystemBackend(root_dir=os.path.expanduser("~"), virtual_mode=False)
+
+
 async def build_agent(s: dict, checkpointer=None):
     enabled = s.get("local_tools") or {}
+    deep = bool(s.get("deep_agent", True))
+    skip = DEEP_REPLACED_TOOLS if deep else set()
     tools = [
-        t for t in local_tools.LOCAL_TOOLS if enabled.get(t.name, True)
+        t
+        for t in local_tools.LOCAL_TOOLS
+        if enabled.get(t.name, True) and t.name not in skip
     ] + await mcp.get_tools(s.get("mcp_servers") or {})
+    cp = checkpointer or _checkpointer
+    prompt = s["system_prompt"] + local_tools.TOOLS_NOTE
+    if deep:
+        mw = [TodoListMiddleware()]  # write_todos planning tool
+        if s.get("compact_enabled", True):
+            mw.append(_CompactionMiddleware(s))
+        return create_deep_agent(
+            model(s),
+            tools,
+            system_prompt=prompt,
+            middleware=mw,
+            backend=_fs_backend(),
+            checkpointer=cp,
+        )
     return create_react_agent(
         model(s),
         tools,
-        checkpointer=checkpointer or _checkpointer,
-        prompt=SystemMessage(content=s["system_prompt"] + local_tools.TOOLS_NOTE),
+        checkpointer=cp,
+        prompt=SystemMessage(content=prompt),
         pre_model_hook=_compaction_hook(s) if s.get("compact_enabled", True) else None,
     )
 
@@ -326,9 +395,12 @@ async def run_chat(
     try:
         await _touch(thread_id, user_text or "[image]")
         agent = await build_agent(s)
+        deep = bool(s.get("deep_agent", True))
+        # Deep mode grants headroom for write_todos bookkeeping rounds (each
+        # todo update is a full model+tool round that isn't "real" iteration).
         cfg = {
             "configurable": {"thread_id": thread_id},
-            "recursion_limit": 2 * int(s.get("max_react_iterations", 12)) + 2,
+            "recursion_limit": 2 * int(s.get("max_react_iterations", 12)) + 2 + (16 if deep else 0),
         }
         if images:
             content = [
@@ -341,13 +413,28 @@ async def run_chat(
         # compaction summarizer); each gets its own usage event.
         t0: float | None = None
         t_first: float | None = None
+        # Sub-agents launched via the `task` tool run their own model/tool
+        # calls on the same event bus. While a task run is live, suppress the
+        # model events whose ancestor chain contains it — otherwise a
+        # sub-agent's draft stream would render as the main answer and its
+        # per-call timings would corrupt ours. (`task` cards and the sub's
+        # tool cards still come through.)
+        sub_runs: set[str] = set()
         async for ev in agent.astream_events(
             {"messages": [HumanMessage(content=content)]}, cfg, version="v2"
         ):
             kind = ev["event"]
+            if kind == "on_tool_start" and ev["name"] == "task":
+                sub_runs.add(str(ev["run_id"]))
+            elif kind == "on_tool_end" and str(ev["run_id"]) in sub_runs:
+                sub_runs.discard(str(ev["run_id"]))
+            in_sub = bool(sub_runs & {str(p) for p in ev.get("parent_ids") or ()})
             if kind == "on_chat_model_start":
-                t0, t_first = time.time(), None
+                if not in_sub:
+                    t0, t_first = time.time(), None
             elif kind == "on_chat_model_stream":
+                if in_sub:
+                    continue
                 if t0 is not None and t_first is None:
                     t_first = time.time()  # includes prefill + first-token latency
                 chunk = ev["data"]["chunk"]
@@ -366,6 +453,8 @@ async def run_chat(
                         else {"type": "token", "text": reasoning}
                     )
             elif kind == "on_chat_model_end":
+                if in_sub:
+                    continue
                 # stream_usage=True makes sglang append a final usage chunk;
                 # langchain merges it into the assembled message's usage_metadata.
                 um = getattr(ev["data"].get("output"), "usage_metadata", None) or {}
