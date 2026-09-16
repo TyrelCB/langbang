@@ -60,7 +60,7 @@ const tileAt = (x, y) => MAP[Math.floor(y / TILE)]?.[Math.floor(x / TILE)] ?? " 
 const RUN = 205, ACC = 1750, AIR_ACC = 1150, FRIC = 2100;
 const GRAV = 2300, MAX_FALL = 820, JUMP_V = 620, JUMP_CUT = 0.45;
 const COYOTE = 0.08, BUF = 0.09;
-const SLIDE_MAX = 150, WJ_VX = 300, WJ_VY = 590, WJ_LOCK = 0.13;
+const SLIDE_MAX = 150, WJ_VX = 200, WJ_VY = 600, WJ_LOCK = 0.08;
 const DASH_SPD = 460, DASH_T = 0.2, DASH_CD = 0.25;
 const BSPD = 560, SHOT_CD = 0.15, MAX_SHOTS = 4;
 const IFRAMES = 1.1, HP_MAX = 12;
@@ -147,9 +147,12 @@ function tryDash() {
 }
 
 // ---------- physics helpers ----------
+// AABB. Entities are feet-anchored (y = feet, grows upward);
+// shots are center-anchored (y = center of the pellet).
+const cy = (o) => (o.centered ? o.y : o.y - o.h / 2);
 const hit = (a, b) =>
   a.x - a.w / 2 < b.x + b.w / 2 && a.x + a.w / 2 > b.x - b.w / 2 &&
-  a.y - a.h < b.y && a.y > b.y - b.h;
+  cy(a) - a.h / 2 < cy(b) + b.h / 2 && cy(a) + a.h / 2 > cy(b) - b.h / 2;
 
 function collide(x, y, w, h) {
   const c0 = Math.floor((x - w / 2) / TILE), c1 = Math.floor((x + w / 2 - 0.01) / TILE);
@@ -203,7 +206,7 @@ function update(dt) {
   if (p.dashT > 0) {
     p.dashT -= dt; p.vx = p.f * DASH_SPD;
     hist.push({ x: p.x, y: p.y, f: p.f, t: 0.18 });
-  } else if (p.lockT <= 0) {
+  } else if (p.lockT <= 0 || want === p.kickDir) {
     if (want) {
       const acc = (p.onG ? ACC : AIR_ACC) * dt;
       if (Math.sign(p.vx) === want && Math.abs(p.vx) >= RUN) p.vx = want * RUN;
@@ -215,7 +218,7 @@ function update(dt) {
     }
   }
   // excess speed from dashes/wall-jumps bleeds back down to RUN
-  if (p.dashT <= 0 && p.lockT <= 0 && Math.abs(p.vx) > RUN)
+  if (p.dashT <= 0 && (p.lockT <= 0 || want === p.kickDir) && Math.abs(p.vx) > RUN)
     p.vx -= Math.sign(p.vx) * Math.min(Math.abs(p.vx) - RUN, 1200 * dt);
 
   // jump
@@ -228,7 +231,7 @@ function update(dt) {
       p.vy = -JUMP_V; p.onG = false; p.coyote = 0; p.bufT = 0; sfx("game_jump");
     } else if (wallSlide) {
       p.vy = -WJ_VY; p.vx = -want * WJ_VX; p.f = -want;
-      p.lockT = WJ_LOCK; p.bufT = 0; sfx("game_jump");
+      p.lockT = WJ_LOCK; p.kickDir = want; p.bufT = 0; sfx("game_jump");
     }
   }
   if (!jumpHeld() && p.vy < -JUMP_V * JUMP_CUT) p.vy = -JUMP_V * JUMP_CUT;
@@ -251,7 +254,7 @@ function update(dt) {
   // shoot
   if ((K.has("KeyZ") || K.has("KeyJ") || K.has("KeyK")) && p.shotCd <= 0 &&
       shots.length < MAX_SHOTS && state === "play") {
-    shots.push({ x: p.x + p.f * 9, y: p.y - 11, vx: p.f * BSPD, w: 8, h: 4 });
+    shots.push({ x: p.x + p.f * 9, y: p.y - 11, vx: p.f * BSPD, w: 8, h: 4, centered: true });
     p.shotCd = SHOT_CD; p.muzzle = 0.07; sfx("game_shoot");
   }
   shots = shots.filter((b) => {
@@ -282,7 +285,7 @@ function update(dt) {
       e.a -= dt;
       const dx = p.x - e.x, dy = p.y - 10 - e.y;
       if (e.a <= 0 && Math.abs(dx) < 260 && Math.abs(dy) < 40) {
-        eshots.push({ x: e.x + Math.sign(dx) * 9, y: e.y - 2, vx: Math.sign(dx) * 210, w: 6, h: 5 });
+        eshots.push({ x: e.x + Math.sign(dx) * 9, y: e.y - 4, vx: Math.sign(dx) * 210, w: 6, h: 5, centered: true });
         e.a = 1.7;
       }
     }
@@ -487,7 +490,7 @@ function drawPanel() {
        ["[ENTER] RUN IT BACK", Math.floor(gt * 2) % 2 ? C.O : C.D, 9]]
     : [["X-SIM  //  STAGE X-01", C.A, 15],
        ["←→/AD RUN   SPACE JUMP   X DASH   Z BLASTER", C.W, 8],
-       ["WALL-KICK: JUMP WHILE SLIDING A WALL", C.W, 8],
+       ["WALL-KICK: HOLD INTO WALL + JUMP", C.W, 8],
        ["R RESTART   ESC EXIT SIM", C.D, 8],
        ["[ENTER] BEGIN THE HUNT", Math.floor(gt * 2) % 2 ? C.O : C.D, 10]];
   let y = VIEW_H / 2 - 34;

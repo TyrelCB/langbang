@@ -187,4 +187,14 @@ async def index():
     return FileResponse(os.path.join(WEB_DIR, "index.html"))
 
 
-app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+class _NoCacheStatic(StaticFiles):
+    """LAN dev tool — always revalidate so frontend edits show up on reload
+    instead of being served from a stale heuristic browser cache."""
+
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
+app.mount("/static", _NoCacheStatic(directory=WEB_DIR), name="static")
