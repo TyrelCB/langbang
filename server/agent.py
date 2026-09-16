@@ -47,11 +47,19 @@ register_harness_profile(
 
 _checkpointer: AsyncSqliteSaver | None = None
 _db: aiosqlite.Connection | None = None
+_edb: aiosqlite.Connection | None = None  # event-log connection (trajectory rows)
 
 
 async def init() -> None:
-    global _checkpointer, _db
+    global _checkpointer, _db, _edb
     _db = await aiosqlite.connect(config.DB_PATH)
+    await _db.execute("PRAGMA busy_timeout=10000")
+    # Trajectory rows get their OWN connection: run_chat's generator commits
+    # per event, and sharing the checkpointer's connection could commit a
+    # half-written checkpoint transaction that lands between the saver's
+    # inserts and its own commit. The DB is WAL, so writers serialize cleanly.
+    _edb = await aiosqlite.connect(config.DB_PATH)
+    await _edb.execute("PRAGMA busy_timeout=10000")
     _checkpointer = AsyncSqliteSaver(_db)
     await _checkpointer.setup()
     await _db.executescript(
@@ -63,6 +71,23 @@ async def init() -> None:
         """
     )
     await _db.commit()
+    await _edb.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS run_events(
+          seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          thread_id TEXT NOT NULL,
+          turn_id   TEXT NOT NULL,          -- one per /api/chat call
+          ts        REAL NOT NULL,
+          type      TEXT NOT NULL,          -- user | model | tool | error
+          name      TEXT,                   -- tool name / model id
+          dur       REAL,                   -- seconds (model/tool calls)
+          tok_in    INTEGER, tok_out INTEGER, cache_read INTEGER, ttft REAL,
+          meta      TEXT                    -- JSON previews (caps in _log callers)
+        );
+        CREATE INDEX IF NOT EXISTS ix_run_events_thread ON run_events(thread_id, seq);
+        """
+    )
+    await _edb.commit()
 
 
 class SGlangChatOpenAI(ChatOpenAI):
@@ -312,6 +337,102 @@ async def history(thread_id: str) -> list:
     return archived + live
 
 
+# ---- run trajectory (agentic visibility) ----
+
+async def _log(
+    thread_id: str,
+    turn_id: str,
+    etype: str,
+    name: str | None = None,
+    dur: float | None = None,
+    meta: dict | None = None,
+    tok_in: int | None = None,
+    tok_out: int | None = None,
+    cache_read: int | None = None,
+    ttft: float | None = None,
+) -> None:
+    """Append one trajectory row. Bookkeeping must never break the chat
+    stream, so every failure is swallowed (the transcript in `messages`
+    remains the source of truth)."""
+    try:
+        await _edb.execute(
+            "INSERT INTO run_events(thread_id,turn_id,ts,type,name,dur,"
+            "tok_in,tok_out,cache_read,ttft,meta) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                thread_id, turn_id, time.time(), etype, name, dur,
+                tok_in, tok_out, cache_read, ttft,
+                json.dumps(meta, ensure_ascii=False, default=str) if meta is not None else None,
+            ),
+        )
+        await _edb.commit()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _cap(x, n: int) -> str:
+    """Stringify + truncate for trajectory meta previews (kept small so the
+    event table stays bounded; full text lives in the chat transcript)."""
+    t = x if isinstance(x, str) else json.dumps(x, ensure_ascii=False, default=str)
+    return t[:n]
+
+
+async def trajectory(thread_id: str) -> dict:
+    """Trajectory rows + thread totals for the Trajectory tab / stats bar.
+
+    Events are the most recent window; totals aggregate the thread's FULL
+    history so the display cap never skews the stats bar. `tool_s` excludes
+    the `task` row — its dur already contains the sub-agent's inner model +
+    tool rows (counting both would double-count). Both llm_s and tool_s are
+    cumulative busy-times, not wall time.
+    """
+    cur = await _edb.execute(
+        "SELECT turn_id,seq,ts,type,name,dur,tok_in,tok_out,cache_read,ttft,meta"
+        " FROM run_events WHERE thread_id=? ORDER BY seq DESC LIMIT 4000",
+        (thread_id,),
+    )
+    events = []
+    for r in reversed(await cur.fetchall()):
+        d = dict(
+            zip(
+                ("turn_id", "seq", "ts", "type", "name", "dur",
+                 "tok_in", "tok_out", "cache_read", "ttft"),
+                r[:10],
+            )
+        )
+        try:
+            d["meta"] = json.loads(r[10]) if r[10] else None
+        except (TypeError, ValueError):
+            d["meta"] = None
+        events.append(d)
+    t = await (
+        await _edb.execute(
+            "SELECT COUNT(DISTINCT turn_id),"
+            " COALESCE(SUM(type IN ('model','tool')),0),"
+            " COALESCE(SUM(CASE WHEN type='model' THEN dur END),0),"
+            " COALESCE(SUM(CASE WHEN type='tool' AND name!='task' THEN dur END),0),"
+            " COALESCE(SUM(tok_in),0), COALESCE(SUM(tok_out),0), COALESCE(SUM(cache_read),0),"
+            " AVG(CASE WHEN type='model' THEN ttft END),"
+            " COALESCE(SUM(type='model'),0)"
+            " FROM run_events WHERE thread_id=?",
+            (thread_id,),
+        )
+    ).fetchone()
+    return {
+        "events": events,
+        "totals": {
+            "turns": t[0],
+            "steps": t[1],
+            "llm_s": round(t[2], 1),
+            "tool_s": round(t[3], 1),
+            "tok_in": t[4],
+            "tok_out": t[5],
+            "cache_read": t[6],
+            "ttft_avg": round(t[7], 2) if t[7] is not None else None,
+            "model_calls": t[8],
+        },
+    }
+
+
 # ---- thread bookkeeping ----
 
 async def create_thread(title: str = "New chat") -> dict:
@@ -367,6 +488,8 @@ async def delete_thread(tid: str) -> None:
     await _db.execute("DELETE FROM threads WHERE id=?", (tid,))
     await _db.execute("DELETE FROM archived_messages WHERE thread_id=?", (tid,))
     await _db.commit()
+    await _edb.execute("DELETE FROM run_events WHERE thread_id=?", (tid,))
+    await _edb.commit()
 
 
 async def _touch(thread_id: str, first_text: str) -> None:
@@ -391,9 +514,17 @@ async def _touch(thread_id: str, first_text: str) -> None:
 async def run_chat(
     thread_id: str, user_text: str, s: dict, images: list[str] | None = None
 ) -> AsyncIterator[dict]:
-    """Yield SSE-ready dicts: token | thinking | tool_start | tool_end | done | error."""
+    """Yield SSE-ready dicts: token | thinking | tool_start | tool_end |
+    todos | sub | usage | done | error. Trajectory rows are persisted to
+    `run_events` as the run progresses (persist-before-yield, so the
+    post-done refresh always sees what the client was already shown)."""
+    turn_id = uuid.uuid4().hex[:12]
+    t_run0 = time.time()
     try:
         await _touch(thread_id, user_text or "[image]")
+        await _log(
+            thread_id, turn_id, "user", meta={"text": _cap(user_text or "[image]", 800)}
+        )
         agent = await build_agent(s)
         deep = bool(s.get("deep_agent", True))
         # Deep mode grants headroom for write_todos bookkeeping rounds (each
@@ -420,6 +551,12 @@ async def run_chat(
         # per-call timings would corrupt ours. (`task` cards and the sub's
         # tool cards still come through.)
         sub_runs: set[str] = set()
+        # Trajectory bookkeeping: tool timings paired by run_id (also fixes
+        # interleaved parallel tools client-side — they're keyed, not tracked
+        # by a single pointer), plus start times of sub-agent model calls so
+        # their LLM seconds get persisted even though their SSE is suppressed.
+        tool_t0: dict[str, tuple[float, str | None, object]] = {}
+        sub_m_t0: dict[str, float] = {}
         async for ev in agent.astream_events(
             {"messages": [HumanMessage(content=content)]}, cfg, version="v2"
         ):
@@ -429,9 +566,25 @@ async def run_chat(
             elif kind == "on_tool_end" and str(ev["run_id"]) in sub_runs:
                 sub_runs.discard(str(ev["run_id"]))
             in_sub = bool(sub_runs & {str(p) for p in ev.get("parent_ids") or ()})
+            # Innermost live `task` this event belongs to. parent_ids is
+            # ordered root -> immediate parent, so scan reversed for the
+            # innermost match. The `task` tool's OWN events don't carry its
+            # run_id in parent_ids, so they correctly resolve to None (or to
+            # the enclosing task for a nested task) — the UI renders those
+            # as the sub card itself.
+            sub_id = next(
+                (
+                    p
+                    for p in reversed([str(x) for x in (ev.get("parent_ids") or ())])
+                    if p in sub_runs
+                ),
+                None,
+            )
             if kind == "on_chat_model_start":
                 if not in_sub:
                     t0, t_first = time.time(), None
+                else:
+                    sub_m_t0[str(ev["run_id"])] = time.time()
             elif kind == "on_chat_model_stream":
                 if in_sub:
                     continue
@@ -453,37 +606,101 @@ async def run_chat(
                         else {"type": "token", "text": reasoning}
                     )
             elif kind == "on_chat_model_end":
-                if in_sub:
-                    continue
                 # stream_usage=True makes sglang append a final usage chunk;
                 # langchain merges it into the assembled message's usage_metadata.
                 um = getattr(ev["data"].get("output"), "usage_metadata", None) or {}
                 inp = int(um.get("input_tokens") or 0)
                 outp = int(um.get("output_tokens") or 0)
-                if (inp or outp) and t0 is not None:
+                # sglang only reports cache_read with --enable-cache-report;
+                # absent/0 until then, and the UI hides the chip accordingly.
+                cache = (um.get("input_token_details") or {}).get("cache_read")
+                out_text = _cap(
+                    _text_only(getattr(ev["data"].get("output"), "content", "")), 500
+                )
+                if in_sub:
+                    # Persisted (so LLM seconds include sub-agent thinking),
+                    # but its stream stays suppressed from the UI.
+                    st = sub_m_t0.pop(str(ev["run_id"]), None)
+                    await _log(
+                        thread_id, turn_id, "model", name=s.get("model"),
+                        dur=round(time.time() - st, 3) if st else None,
+                        tok_in=inp or None, tok_out=outp or None, cache_read=cache,
+                        meta={"text": out_text, "sub": sub_id},
+                    )
+                    continue
+                if t0 is not None:
                     now = time.time()
                     ttft = (t_first if t_first else now) - t0
                     decode = max(now - (t_first if t_first else now), 1e-3)
-                    yield {
-                        "type": "usage",
-                        "input": inp,
-                        "output": outp,
-                        "ttft": round(ttft, 2),
-                        "prefill_tps": round(inp / max(ttft, 1e-3)),
-                        "decode_tps": round(outp / decode, 1),
-                        "seconds": round(now - t0, 1),
-                    }
+                    await _log(
+                        thread_id, turn_id, "model", name=s.get("model"),
+                        dur=round(now - t0, 3),
+                        tok_in=inp or None, tok_out=outp or None,
+                        cache_read=cache, ttft=round(ttft, 3),
+                        meta={"text": out_text, "sub": None},
+                    )
+                    if inp or outp:
+                        yield {
+                            "type": "usage",
+                            "input": inp,
+                            "output": outp,
+                            "ttft": round(ttft, 2),
+                            "prefill_tps": round(inp / max(ttft, 1e-3)),
+                            "decode_tps": round(outp / decode, 1),
+                            "seconds": round(now - t0, 1),
+                        }
                 t0, t_first = None, None
             elif kind == "on_tool_start":
+                rid = str(ev["run_id"])
+                tool_t0[rid] = (time.time(), sub_id, ev["data"].get("input"))
                 yield {
                     "type": "tool_start",
                     "name": ev["name"],
                     "input": _safe(ev["data"].get("input")),
+                    "run_id": rid,
+                    "sub": sub_id,
                 }
+                if ev["name"] == "write_todos":
+                    todos = (ev["data"].get("input") or {}).get("todos")
+                    if isinstance(todos, list):
+                        # UI renders the TO-DOS panel from this; the raw
+                        # tool card still streams too.
+                        yield {"type": "todos", "todos": todos}
+                if ev["name"] == "task":
+                    d = ev["data"].get("input") or {}
+                    yield {
+                        "type": "sub",
+                        "state": "start",
+                        "sub_id": rid,
+                        "desc": str(d.get("description") or "")[:120],
+                        "subagent_type": d.get("subagent_type"),
+                    }
             elif kind == "on_tool_end":
-                yield {"type": "tool_end", "name": ev["name"], "output": _tool_text(ev["data"].get("output"))}
-        yield {"type": "done"}
+                rid = str(ev["run_id"])
+                out_text = _tool_text(ev["data"].get("output"))
+                st0, sub0, inp0 = tool_t0.pop(rid, (None, sub_id, None))
+                dur = round(time.time() - st0, 3) if st0 else None
+                meta = {"in": _cap(inp0, 2000), "out": _cap(out_text, 2000), "sub": sub0}
+                if ev["name"] == "task":
+                    # The task row IS the sub-agent span: dur = whole
+                    # delegation, meta carries what was delegated.
+                    d = inp0 if isinstance(inp0, dict) else {}
+                    meta["desc"] = str(d.get("description") or "")[:120]
+                    meta["subagent_type"] = d.get("subagent_type")
+                await _log(thread_id, turn_id, "tool", name=ev["name"], dur=dur, meta=meta)
+                yield {
+                    "type": "tool_end",
+                    "name": ev["name"],
+                    "output": out_text,
+                    "run_id": rid,
+                    "sub": sub0,
+                    "dur": dur,
+                }
+                if ev["name"] == "task":
+                    yield {"type": "sub", "state": "end", "sub_id": rid, "dur": dur}
+        yield {"type": "done", "seconds": round(time.time() - t_run0, 1)}
     except Exception as e:  # noqa: BLE001 - stream errors to the UI
+        await _log(thread_id, turn_id, "error", meta={"message": str(e)[:500]})
         yield {"type": "error", "message": f"{type(e).__name__}: {e}"}
 
 

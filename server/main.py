@@ -82,6 +82,13 @@ async def messages(tid: str):
     return await agent.history(tid)
 
 
+@app.get("/api/threads/{tid}/trajectory")
+async def trajectory(tid: str):
+    """Run-tracker rows + totals for the Trajectory tab / stats bar. Unknown
+    thread → empty/zeros rather than 404 (matches the app's endpoint tone)."""
+    return await agent.trajectory(tid)
+
+
 # ---- chat search ----
 
 SEARCH_LIMIT = 50
