@@ -220,3 +220,21 @@ body.hide-reasoning .block.thinking { display: none; }
 /* search hit target */
 .flash { outline: 1px solid var(--orange); outline-offset: 2px; animation: flash 2.5s forwards; }
 @keyframes flash { 0%, 70% { outline-color: var(--orange); } 100% { outline-color: transparent; } }
+
+/* ---- X-SIM platformer overlay (game.js) ---- */
+#game-overlay {
+  position: fixed; inset: 0; background: rgba(2,6,12,.92);
+  display: flex; align-items: center; justify-content: center; z-index: 20;
+}
+#game-frame {
+  background: var(--bg2); border: 1px solid var(--cyan-dim);
+  clip-path: var(--clip); padding: 8px; width: min(96vw, 1010px);
+}
+#game-canvas {
+  display: block; width: 100%; background: #060a12;
+  image-rendering: pixelated;
+}
+#game-bar { display: flex; align-items: center; gap: 12px;
+  margin-top: 8px; font-size: 11px; letter-spacing: 1px; }
+.g-title { color: var(--orange); font-weight: 700; }
+.g-keys { color: var(--muted); flex: 1; }

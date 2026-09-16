@@ -66,6 +66,8 @@ points at them:
 - Web UI: dark Mega Man X HUD by default, streaming chat, visible
   thinking/tool-call cards, thread management, live config editor
 - Sound effects: wired up, assets deferred → see `SOUND_DESIGN.md`
+- X-SIM: built-in Mega Man X style platformer (⚔ button / `G`) for waiting on
+  agent runs — deep link with `?game=1`
 
 ## Run
 

@@ -10,5 +10,12 @@
   "tool_end":          { "file": "TODO-tool-end.ogg",          "when": "tool result arrives" },
   "error":             { "file": "TODO-error.ogg",             "when": "backend/stream error" },
   "thread_new":        { "file": "TODO-thread-new.ogg",        "when": "new chat created" },
-  "settings_saved":    { "file": "TODO-settings-saved.ogg",    "when": "config saved" }
+  "settings_saved":    { "file": "TODO-settings-saved.ogg",    "when": "config saved" },
+  "game_shoot":        { "file": "TODO-game-shoot.ogg",        "when": "X-SIM: blaster fires" },
+  "game_jump":         { "file": "TODO-game-jump.ogg",         "when": "X-SIM: jump / wall-kick" },
+  "game_dash":         { "file": "TODO-game-dash.ogg",         "when": "X-SIM: dash" },
+  "game_hurt":         { "file": "TODO-game-hurt.ogg",         "when": "X-SIM: player takes damage" },
+  "game_kill":         { "file": "TODO-game-kill.ogg",         "when": "X-SIM: enemy destroyed" },
+  "game_death":        { "file": "TODO-game-death.ogg",        "when": "X-SIM: player dies" },
+  "game_clear":        { "file": "TODO-game-clear.ogg",        "when": "X-SIM: stage door reached" }
 }

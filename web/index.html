@@ -25,6 +25,7 @@
     <header id="topbar">
       <div id="chat-title">— SELECT OR START A CHAT —</div>
       <div class="topbar-right">
+        <button id="btn-game" class="btn ghost" title="X-SIM platformer — G to open, ESC to bail back to chat">⚔ X-SIM</button>
         <button id="btn-reasoning" class="btn ghost" title="Show/hide model reasoning">◈ REASONING: ON</button>
         <div id="ctx-tag" title="Tokens the model re-reads on the next call (post-compaction)"></div>
         <div id="model-tag"></div>
@@ -78,11 +79,23 @@
       <div id="settings-error" class="error hidden"></div>
     </div>
   </div>
+
+  <div id="game-overlay" class="hidden">
+    <div id="game-frame">
+      <canvas id="game-canvas" width="1680" height="960"></canvas>
+      <div id="game-bar">
+        <span class="g-title">X-SIM // STAGE X-01</span>
+        <span class="g-keys">←→/AD RUN · SPACE JUMP · X DASH · Z BLASTER · WALL-KICK: JUMP OFF WALLS · R RESTART · ESC EXIT</span>
+        <button id="btn-game-close" class="btn ghost">✕ ESC</button>
+      </div>
+    </div>
+  </div>
 </div>
 <script src="/static/vendor/marked.min.js"></script>
 <script src="/static/vendor/purify.min.js"></script>
 <script src="/static/vendor/highlight.min.js"></script>
 <script src="/static/sfx.js"></script>
+<script src="/static/game.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>
