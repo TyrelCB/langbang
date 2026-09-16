@@ -434,6 +434,12 @@ function tickRun() {
     bar.appendChild(
       el("span", "sub-chip", `◈ DEEP DIVING ${fmtClock((Date.now() - sub.t0) / 1000)}`)
     );
+  // trajectory rows commit per-event server-side, so re-reading every few
+  // seconds keeps the tab live during the run (not just after it)
+  if (trajVisible && Date.now() - (run._statsAt || run.t0) > 3000) {
+    run._statsAt = Date.now();
+    refreshStats();
+  }
 }
 
 function renderTodos(todos) {
@@ -493,7 +499,12 @@ async function refreshStats() {
     if (trajVisible) renderTraj();
     return;
   }
-  const data = await api.trajectory(id);
+  let data;
+  try {
+    data = await api.trajectory(id);
+  } catch (e) {
+    return; // transient — a periodic refresh will pick the rows up next beat
+  }
   if (id !== threadId) return; // thread switched mid-fetch — stale read
   trajCache = data;
   const T = data.totals || {};
@@ -520,12 +531,15 @@ function showTab(which) {
   $("#tab-chat").classList.toggle("on", !trajVisible);
   $("#tab-traj").classList.toggle("on", trajVisible);
   if (!trajVisible) return;
-  if (trajCache) renderTraj();
-  else refreshStats(); // no rows cached yet for this thread — fetch, then render
+  // while a run streams, the cache is by definition stale — tickRun also
+  // re-reads every ~3s once this tab is visible
+  if (trajCache && !streaming) renderTraj();
+  else refreshStats();
 }
 
 function renderTraj() {
   const body = $("#traj-body");
+  const keepScroll = body.scrollTop; // live refresh rebuilds the DOM — hold the view
   body.innerHTML = "";
   const q = $("#traj-search").value.trim().toLowerCase();
   const events = (trajCache && trajCache.events) || [];
@@ -586,6 +600,7 @@ function renderTraj() {
     }
     body.appendChild(card);
   });
+  body.scrollTop = keepScroll;
 }
 
 // ---------- threads ----------
