@@ -11,7 +11,9 @@
   <aside id="sidebar">
     <div class="logo">LANG<span>BANG</span></div>
     <button id="btn-new" class="btn">+ NEW CHAT</button>
+    <input id="search" type="text" placeholder="⌕ SEARCH CHATS…" autocomplete="off">
     <div id="threads"></div>
+    <div id="search-results" class="hidden"></div>
     <div class="sidebar-footer">
       <button id="btn-settings" class="btn ghost">⚙ CONFIG</button>
       <button id="btn-sound" class="btn ghost" title="sound toggle">♪ SOUND: OFF</button>
@@ -24,6 +26,7 @@
       <div id="chat-title">— SELECT OR START A CHAT —</div>
       <div class="topbar-right">
         <button id="btn-reasoning" class="btn ghost" title="Show/hide model reasoning">◈ REASONING: ON</button>
+        <div id="ctx-tag" title="Tokens the model re-reads on the next call (post-compaction)"></div>
         <div id="model-tag"></div>
       </div>
     </header>

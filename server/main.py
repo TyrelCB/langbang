@@ -82,6 +82,51 @@ async def messages(tid: str):
     return await agent.history(tid)
 
 
+# ---- chat search ----
+
+SEARCH_LIMIT = 50
+
+
+@app.get("/api/search")
+async def search(q: str = ""):
+    """Case-insensitive substring scan over every thread's full transcript
+    (compaction archives included). `pos` is the message's index among
+    non-system messages — exactly the chat DOM child index the UI renders,
+    so a click can scroll straight to the hit."""
+    q = q.strip().lower()
+    if len(q) < 2:
+        return []
+    out = []
+    for t in await agent.list_threads():
+        if q in t["title"].lower():
+            out.append({"thread_id": t["id"], "title": t["title"], "pos": -1,
+                        "role": "title", "snippet": t["title"]})
+        pos = -1
+        for m in await agent.history(t["id"]):
+            if m["role"] == "system":
+                continue
+            if (
+                m["role"] == "ai"
+                and not str(m.get("content") or "").strip()
+                and not m.get("tool_calls")
+                and not m.get("thinking")
+            ):
+                continue  # renderHistory draws no node for these — keep pos aligned
+            pos += 1  # counts rendered msgs only == client chat DOM child index
+            text = await agent.search_text(m)
+            i = text.lower().find(q)
+            if i < 0:
+                continue
+            a = max(0, i - 40)
+            b = min(len(text), i + len(q) + 120)
+            snippet = ("… " if a else "") + " ".join(text[a:b].split()) + (" …" if b < len(text) else "")
+            out.append({"thread_id": t["id"], "title": t["title"], "pos": pos,
+                        "role": m["role"], "snippet": snippet})
+            if len(out) >= SEARCH_LIMIT:
+                return out
+    return out
+
+
 # ---- chat (SSE stream) ----
 
 MAX_IMAGES = 4

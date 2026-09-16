@@ -35,7 +35,13 @@ const api = {
   },
   async delThread(id) { await fetch("/api/threads/" + id, { method: "DELETE" }); },
   async messages(id) { return (await fetch(`/api/threads/${id}/messages`)).json(); },
+  async search(q) { return (await fetch("/api/search?q=" + encodeURIComponent(q))).json(); },
 };
+
+// token counts are approximate everywhere (chars/4 estimator, same as the
+// server's compaction trigger) — compact 12.3k display
+const fmtTok = (n) =>
+  n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
 
 // ---------- markdown ----------
 marked.use({ breaks: true, gfm: true });
@@ -146,6 +152,14 @@ function addMsg(role, text, images) {
     img.src = url;
     m.insertBefore(img, m.firstChild);
   }
+  $("#chat").appendChild(m);
+  scrollBottom();
+  return m;
+}
+
+function addMsgRaw(cls, text) {
+  // plain-text row (no markdown round-trip) — usage readouts etc.
+  const m = el("div", cls, text);
   $("#chat").appendChild(m);
   scrollBottom();
   return m;
@@ -290,6 +304,15 @@ async function send() {
         currentTool.open = false;
         currentTool = null;
       }
+    } else if (ev.type === "usage") {
+      // one line per model call (ReAct rounds and the compaction summarizer
+      // each report their own); prefill_tps is ttft-inclusive, so it's a
+      // lower bound on real prefill speed — label kept honest as "~".
+      addMsgRaw(
+        "usage",
+        `⚡ IN ${fmtTok(ev.input)} → OUT ${fmtTok(ev.output)} · TTFT ${ev.ttft}s · ` +
+          `PREFILL ~${fmtTok(ev.prefill_tps)}/s · DECODE ${ev.decode_tps}/s · ${ev.seconds}s`
+      );
     } else if (ev.type === "error") {
       SFX.play("error");
       addMsg("error", ev.message);
@@ -315,7 +338,9 @@ async function refreshThreads() {
   const box = $("#threads");
   box.innerHTML = "";
   for (const t of threads) {
-    const d = el("div", "thread" + (t.id === threadId ? " active" : ""), t.title);
+    const d = el("div", "thread" + (t.id === threadId ? " active" : ""));
+    d.appendChild(el("span", "ctx", t.context_tokens != null ? fmtTok(t.context_tokens) : ""));
+    d.appendChild(el("span", "t-name", t.title));
     const x = el("span", "x", "✕");
     x.onclick = async (e) => {
       e.stopPropagation();
@@ -327,6 +352,13 @@ async function refreshThreads() {
     d.onclick = () => openThread(t);
     box.appendChild(d);
   }
+  updateCtxTag();
+}
+
+// what the next model call will actually re-prefill for the open thread
+function updateCtxTag() {
+  const t = threads.find((x) => x.id === threadId);
+  $("#ctx-tag").textContent = t ? "CTX ~" + fmtTok(t.context_tokens) : "";
 }
 
 async function openThread(t) {
@@ -345,6 +377,53 @@ async function newThread() {
   SFX.play("thread_new");
   refreshThreads();
 }
+
+// ---------- chat search ----------
+let searchTimer = null;
+
+function showThreadList() {
+  $("#search-results").classList.add("hidden");
+  $("#threads").classList.remove("hidden");
+}
+
+async function runSearch() {
+  const q = $("#search").value.trim();
+  if (q.length < 2) { showThreadList(); return; }
+  const rs = await api.search(q);
+  if ($("#search").value.trim() !== q) return runSearch(); // stale — query moved meanwhile
+  const box = $("#search-results");
+  box.innerHTML = "";
+  $("#threads").classList.add("hidden");
+  box.classList.remove("hidden");
+  if (!rs.length) {
+    box.appendChild(el("div", "no-results", "// NO MATCHES"));
+    return;
+  }
+  for (const r of rs) {
+    const d = el("div", "thread result");
+    d.appendChild(el("div", "t-name", r.title + (r.role === "title" ? "  ⌕ TITLE" : "")));
+    if (r.pos >= 0) d.appendChild(el("div", "r-snip", r.snippet));
+    d.onclick = async () => {
+      await openThread({ id: r.thread_id, title: r.title });
+      if (r.pos < 0) return;
+      // server's pos counts exactly the nodes renderHistory draws
+      const n = $("#chat").children[r.pos];
+      if (!n) return;
+      n.scrollIntoView({ block: "center" });
+      n.classList.add("flash");
+      setTimeout(() => n.classList.remove("flash"), 2500);
+    };
+    box.appendChild(d);
+  }
+}
+
+$("#search").addEventListener("input", () => {
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(runSearch, 250);
+});
+$("#search").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { $("#search").value = ""; showThreadList(); }
+});
 
 // ---------- settings ----------
 async function openSettings() {
@@ -466,6 +545,9 @@ applyReasoningVis();
 checkHealth();
 setInterval(checkHealth, 15000);
 refreshThreads().then(() => {
-  const t = new URLSearchParams(location.search).get("thread");
+  const p = new URLSearchParams(location.search);
+  const t = p.get("thread");
   if (t) { const th = threads.find((x) => x.id === t); if (th) openThread(th); }
+  const q = p.get("q"); // shareable search deep-link
+  if (q) { $("#search").value = q; runSearch(); }
 });

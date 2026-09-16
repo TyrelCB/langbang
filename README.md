@@ -50,6 +50,19 @@ points at them:
   (enable, trigger, keep-count, summary budget) live in CONFIG. The turn that
   triggers compaction pays one extra summary call (prefill of the old prefix)
   before it gets cheaper forever.
+- **Token & speed readout** — every model call streams a `⚡ IN → OUT · TTFT ·
+  PREFILL ~t/s · DECODE t/s` line (usage chunks requested via
+  `stream_usage=True`; the prefill figure includes time-to-first-token, so
+  treat it as a lower bound). ReAct rounds and the compaction summarizer each
+  report their own line.
+- **Per-thread context size** — a `~tokens` chip on each sidebar thread
+  (same chars/4 estimator as compaction) and a topbar `CTX ~N` for the open
+  thread: what the *next* model call re-prefills (post-compaction state, not
+  the full UI transcript).
+- **Chat search** — `⌕ SEARCH CHATS` scans every thread's full transcript
+  (compaction archives, thinking and tool-call args included, capped at 50
+  hits); clicking a hit opens the thread and scrolls to the matching message
+  with a flash highlight. Deep-linkable with `?q=`.
 - Web UI: dark Mega Man X HUD by default, streaming chat, visible
   thinking/tool-call cards, thread management, live config editor
 - Sound effects: wired up, assets deferred → see `SOUND_DESIGN.md`

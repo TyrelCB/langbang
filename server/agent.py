@@ -79,8 +79,10 @@ def model(s: dict) -> ChatOpenAI:
         temperature=s["temperature"],
         max_tokens=s["max_tokens"],
         streaming=True,
+        # sglang only sends usage in a final stream chunk when asked; we need
+        # prompt/completion counts (and timing) for the per-turn speed readout.
+        stream_usage=True,
         extra_body=extra_body,
-        # sglang doesn't do usage on every stream chunk; keep defaults lean.
     )
 
 
@@ -247,12 +249,45 @@ async def create_thread(title: str = "New chat") -> dict:
     return {"id": tid, "title": title, "created_at": now, "updated_at": now}
 
 
+def prompt_overhead_tokens() -> int:
+    """Approx size of what every model call carries on top of thread history:
+    the system prompt + tools note (the tool schemas themselves add a bit
+    more, uncounted here). Same estimator as compaction, so the UI's CTX chip
+    and the compaction trigger speak the same units."""
+    s = config.load()
+    return count_tokens_approximately(
+        [SystemMessage(content=s["system_prompt"] + local_tools.TOOLS_NOTE)]
+    )
+
+
 async def list_threads() -> list:
     cur = await _db.execute("SELECT id,title,created_at,updated_at FROM threads ORDER BY updated_at DESC")
     rows = await cur.fetchall()
-    return [
-        {"id": r[0], "title": r[1], "created_at": r[2], "updated_at": r[3]} for r in rows
-    ]
+    base = prompt_overhead_tokens()
+    out = []
+    for r in rows:
+        # What the *next* model call would replay: live graph state (post-
+        # compaction), not the full archived transcript the UI shows.
+        ctx = base
+        tup = await _checkpointer.aget({"configurable": {"thread_id": r[0]}})
+        if tup:
+            cv = tup.get("channel_values") if isinstance(tup, dict) else tup.channel_values
+            ctx += count_tokens_approximately((cv or {}).get("messages", []))
+        out.append(
+            {"id": r[0], "title": r[1], "created_at": r[2], "updated_at": r[3],
+             "context_tokens": ctx}
+        )
+    return out
+
+
+async def search_text(m: dict) -> str:
+    """Flatten a history() message dict to searchable text."""
+    t = _text_only(m.get("content", ""))
+    if m.get("thinking"):
+        t += "\n" + str(m["thinking"])
+    for tc in m.get("tool_calls") or []:
+        t += "\n" + tc["name"] + " " + json.dumps(tc["args"], ensure_ascii=False)
+    return t
 
 
 async def delete_thread(tid: str) -> None:
@@ -297,11 +332,20 @@ async def run_chat(
             ] + [{"type": "text", "text": user_text or "Describe the image."}]
         else:
             content = user_text
+        # Per model-call timing, for the usage/speed line streamed to the UI.
+        # A turn can contain several model calls (one per ReAct round, plus the
+        # compaction summarizer); each gets its own usage event.
+        t0: float | None = None
+        t_first: float | None = None
         async for ev in agent.astream_events(
             {"messages": [HumanMessage(content=content)]}, cfg, version="v2"
         ):
             kind = ev["event"]
-            if kind == "on_chat_model_stream":
+            if kind == "on_chat_model_start":
+                t0, t_first = time.time(), None
+            elif kind == "on_chat_model_stream":
+                if t0 is not None and t_first is None:
+                    t_first = time.time()  # includes prefill + first-token latency
                 chunk = ev["data"]["chunk"]
                 text = chunk.content
                 if isinstance(text, str) and text:
@@ -317,6 +361,26 @@ async def run_chat(
                         if s.get("enable_thinking")
                         else {"type": "token", "text": reasoning}
                     )
+            elif kind == "on_chat_model_end":
+                # stream_usage=True makes sglang append a final usage chunk;
+                # langchain merges it into the assembled message's usage_metadata.
+                um = getattr(ev["data"].get("output"), "usage_metadata", None) or {}
+                inp = int(um.get("input_tokens") or 0)
+                outp = int(um.get("output_tokens") or 0)
+                if (inp or outp) and t0 is not None:
+                    now = time.time()
+                    ttft = (t_first if t_first else now) - t0
+                    decode = max(now - (t_first if t_first else now), 1e-3)
+                    yield {
+                        "type": "usage",
+                        "input": inp,
+                        "output": outp,
+                        "ttft": round(ttft, 2),
+                        "prefill_tps": round(inp / max(ttft, 1e-3)),
+                        "decode_tps": round(outp / decode, 1),
+                        "seconds": round(now - t0, 1),
+                    }
+                t0, t_first = None, None
             elif kind == "on_tool_start":
                 yield {
                     "type": "tool_start",
