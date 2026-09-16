@@ -176,6 +176,11 @@ function renderHistory(msgs) {
   $("#chat").innerHTML = "";
   for (const m of msgs) {
     if (m.role === "system") continue;
+    if (m.compacted) {
+      const b = addBlock("compact", `⟲ CONTEXT COMPACTED — ${m.compacted.count} EARLIER MSGS SUMMARIZED`);
+      b.querySelector("pre").textContent = textOf(m.content);
+      continue;
+    }
     if (m.role === "human") addMsg("user", textOf(m.content), imagesOf(m.content));
     else if (m.role === "ai") {
       if (m.thinking) {
@@ -344,7 +349,8 @@ async function newThread() {
 // ---------- settings ----------
 async function openSettings() {
   const s = await api.settings();
-  for (const k of ["base_url", "model", "temperature", "max_tokens", "max_react_iterations", "system_prompt"])
+  for (const k of ["base_url", "model", "temperature", "max_tokens", "max_react_iterations", "system_prompt",
+                   "compact_trigger_tokens", "compact_keep_messages", "compact_summary_tokens"])
     $("#set-" + k).value = s[k];
   const tb = $("#set-tools");
   tb.innerHTML = "";
@@ -358,6 +364,7 @@ async function openSettings() {
   $("#set-mcp").value = JSON.stringify(s.mcp_servers || {}, null, 2);
   $("#set-vision").checked = !!(s.capabilities || {}).vision;
   $("#set-thinking").checked = !!s.enable_thinking;
+  $("#set-compact").checked = !!s.compact_enabled;
   $("#settings-panel").classList.remove("hidden");
   SFX.play("click");
 }
@@ -381,6 +388,10 @@ async function saveSettings() {
     system_prompt: $("#set-system_prompt").value,
     capabilities: { vision: $("#set-vision").checked },
     enable_thinking: $("#set-thinking").checked,
+    compact_enabled: $("#set-compact").checked,
+    compact_trigger_tokens: parseInt($("#set-compact_trigger_tokens").value) || 0,
+    compact_keep_messages: parseInt($("#set-compact_keep_messages").value) || 20,
+    compact_summary_tokens: parseInt($("#set-compact_summary_tokens").value) || 800,
     local_tools,
     mcp_servers: mcp,
   });

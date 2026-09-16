@@ -5,9 +5,18 @@ import uuid
 from typing import AsyncIterator
 
 import aiosqlite
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langchain_core.messages.utils import count_tokens_approximately
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.config import get_config
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.prebuilt import create_react_agent
 
 from . import config, local_tools, mcp
@@ -25,6 +34,8 @@ async def init() -> None:
         """
         CREATE TABLE IF NOT EXISTS threads(
           id TEXT PRIMARY KEY, title TEXT, created_at REAL, updated_at REAL);
+        CREATE TABLE IF NOT EXISTS archived_messages(
+          seq INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT, msg TEXT);
         """
     )
     await _db.commit()
@@ -73,6 +84,111 @@ def model(s: dict) -> ChatOpenAI:
     )
 
 
+def summarizer(s: dict) -> ChatOpenAI:
+    """Cheap non-streaming call used to compress old context (no thinking)."""
+    return SGlangChatOpenAI(
+        model=s["model"],
+        base_url=s["base_url"],
+        api_key=s["api_key"],
+        temperature=0.3,
+        max_tokens=int(s.get("compact_summary_tokens", 800)),
+        streaming=False,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+
+
+_SUMMARY_INSTRUCTION = (
+    "You compress chat history. Write a dense, factual summary of the "
+    "conversation below. Preserve: the user's goals and constraints, key facts "
+    "and decisions, commands run with their results, file paths, open "
+    "questions, and anything the user explicitly asked to remember. "
+    "No preamble, no commentary — just the summary."
+)
+
+
+def _text_only(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, str):
+                parts.append(b)
+            elif isinstance(b, dict):
+                if b.get("type") == "text":
+                    parts.append(b.get("text", ""))
+                elif b.get("type") == "image_url":
+                    parts.append("[image]")  # never re-send base64 to summarizer
+        return "\n".join(parts)
+    return str(content)
+
+
+def _transcript(msgs: list) -> str:
+    """Flatten messages to plain text for the summarizer (bounded size)."""
+    lines = []
+    for m in msgs:
+        who = {"human": "USER", "ai": "ASSISTANT", "tool": "TOOL", "system": "SYSTEM"}.get(
+            m.type, m.type
+        )
+        text = _text_only(m.content).strip()
+        if isinstance(m, AIMessage) and m.tool_calls:
+            calls = "; ".join(
+                f"{tc['name']}({json.dumps(tc['args'], ensure_ascii=False)[:300]})"
+                for tc in m.tool_calls
+            )
+            text = (text + "\n" if text else "") + f"[called {calls}]"
+        if isinstance(m, ToolMessage):
+            text, who = text[:1500], f"TOOL[{m.name}]"
+        lines.append(f"{who}: {text[:1200]}")
+    return "\n\n".join(lines)
+
+
+def _compaction_hook(s: dict):
+    """pre_model_hook: fold old prefix into one summary when context gets long.
+
+    LangGraph replays the whole thread into every model call — on a single
+    Spark (~2k tok/s prefill) that means seconds of dead air per extra 10k
+    tokens, forever. This node runs before each model call; past the trigger
+    it archives the head to SQLite (UI still sees full transcript), and
+    rewrites graph state to [summary] + recent tail via REMOVE_ALL_MESSAGES.
+    """
+
+    async def pre_model_hook(state: dict):
+        msgs = state["messages"]
+        trigger = int(s.get("compact_trigger_tokens", 40000))
+        if trigger <= 0 or count_tokens_approximately(msgs) < trigger:
+            return None
+        keep = max(4, int(s.get("compact_keep_messages", 20)))
+        split = max(0, len(msgs) - keep)
+        # Never cut inside a tool round: walk back to a HumanMessage boundary
+        # (orphan ToolMessages without their AIMessage tool_calls 400 the API).
+        while split > 0 and not isinstance(msgs[split], HumanMessage):
+            split -= 1
+        head, tail = msgs[:split], msgs[split:]
+        if not head:  # one giant turn — nothing safe to fold away yet
+            return None
+        summary = await summarizer(s).ainvoke(
+            [
+                SystemMessage(content=_SUMMARY_INSTRUCTION),
+                HumanMessage(content=_transcript(head)),
+            ]
+        )
+        tid = (get_config() or {}).get("configurable", {}).get("thread_id", "")
+        for m in head:
+            await _db.execute(
+                "INSERT INTO archived_messages(thread_id,msg) VALUES(?,?)",
+                (tid, json.dumps(_msg_dict(m), ensure_ascii=False)),
+            )
+        await _db.commit()
+        note = HumanMessage(
+            content=str(summary.content).strip(),
+            additional_kwargs={"lb_compacted": {"count": len(head)}},
+        )
+        return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), note, *tail]}
+
+    return pre_model_hook
+
+
 async def build_agent(s: dict, checkpointer=None):
     enabled = s.get("local_tools") or {}
     tools = [
@@ -83,6 +199,7 @@ async def build_agent(s: dict, checkpointer=None):
         tools,
         checkpointer=checkpointer or _checkpointer,
         prompt=SystemMessage(content=s["system_prompt"] + local_tools.TOOLS_NOTE),
+        pre_model_hook=_compaction_hook(s) if s.get("compact_enabled", True) else None,
     )
 
 
@@ -97,16 +214,27 @@ def _msg_dict(m) -> dict:
     reasoning = (m.additional_kwargs or {}).get("reasoning_content")
     if reasoning:
         d["thinking"] = reasoning
+    compacted = (m.additional_kwargs or {}).get("lb_compacted")
+    if compacted:
+        d["compacted"] = compacted  # UI renders it as a ⟲ CONTEXT COMPACTED card
     return d
 
 
 async def history(thread_id: str) -> list:
     tup = await _checkpointer.aget({"configurable": {"thread_id": thread_id}})
-    if not tup:
-        return []
-    # Newer checkpointer returns a CheckpointTuple; older returns dict.
-    cv = tup.get("channel_values") if isinstance(tup, dict) else tup.channel_values
-    return [_msg_dict(m) for m in (cv or {}).get("messages", [])]
+    live = []
+    if tup:
+        # Newer checkpointer returns a CheckpointTuple; older returns dict.
+        cv = tup.get("channel_values") if isinstance(tup, dict) else tup.channel_values
+        live = [_msg_dict(m) for m in (cv or {}).get("messages", [])]
+    # Pre-compaction originals were dropped from graph state; replay them so
+    # the UI still shows the full transcript while the model sees the summary.
+    cur = await _db.execute(
+        "SELECT msg FROM archived_messages WHERE thread_id=? ORDER BY seq",
+        (thread_id,),
+    )
+    archived = [json.loads(r[0]) for r in await cur.fetchall()]
+    return archived + live
 
 
 # ---- thread bookkeeping ----
@@ -129,6 +257,7 @@ async def list_threads() -> list:
 
 async def delete_thread(tid: str) -> None:
     await _db.execute("DELETE FROM threads WHERE id=?", (tid,))
+    await _db.execute("DELETE FROM archived_messages WHERE thread_id=?", (tid,))
     await _db.commit()
 
 

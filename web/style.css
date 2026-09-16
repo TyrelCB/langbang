@@ -129,6 +129,7 @@ body.hide-reasoning .block.thinking { display: none; }
   border-left: 3px solid var(--cyan-dim); background: var(--bg2); }
 .block.tool summary { border-left-color: var(--orange); color: var(--orange); }
 .block.thinking summary { border-left-color: var(--cyan); color: var(--cyan); }
+.block.compact summary { border-left-color: var(--muted); color: var(--muted); }
 .block pre { margin: 0; padding: 8px; background: var(--bg2); overflow-x: auto; white-space: pre-wrap; }
 .block[open] summary { color: var(--text); }
 

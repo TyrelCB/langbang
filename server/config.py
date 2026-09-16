@@ -38,6 +38,15 @@ DEFAULTS = {
     # (1x1 pixel color tests) -> on by default. Images re-prefill every turn,
     # so keep attachments small/few.
     "capabilities": {"vision": True},
+    # Context compaction. LangGraph replays the whole thread into every model
+    # call (~1.5-2.5k tok/s prefill on the Spark = ~5s dead air per 10k
+    # tokens, and the 262k window is the hard stop). Past the trigger, a
+    # pre_model_hook folds everything before the kept tail into one
+    # model-written summary; archived originals stay in SQLite for the UI.
+    "compact_enabled": True,
+    "compact_trigger_tokens": 40000,
+    "compact_keep_messages": 20,
+    "compact_summary_tokens": 800,
     "local_tools": {
         "run_bash": True,
         "read_file": True,

@@ -40,6 +40,16 @@ points at them:
   topbar **◈ REASONING** button shows/hides those cards per browser
   (localStorage). Thinking costs extra decode tokens per turn — worth it on
   hard problems, wasteful as a default on a single Spark.
+- **Context auto-compaction** — on by default. LangGraph replays the whole
+  thread into every model call, which on a single Spark means seconds of dead
+  air per 10k history tokens. When a thread's (approximate) prompt size crosses
+  `compact_trigger_tokens` (default 40k), a `pre_model_hook` folds everything
+  before the last ~20 messages into one model-written summary; the archived
+  originals stay in SQLite so the UI still shows the full transcript, with a
+  collapsible `⟲ CONTEXT COMPACTED` card where the fold happened. All knobs
+  (enable, trigger, keep-count, summary budget) live in CONFIG. The turn that
+  triggers compaction pays one extra summary call (prefill of the old prefix)
+  before it gets cheaper forever.
 - Web UI: dark Mega Man X HUD by default, streaming chat, visible
   thinking/tool-call cards, thread management, live config editor
 - Sound effects: wired up, assets deferred → see `SOUND_DESIGN.md`
@@ -71,6 +81,6 @@ data/      SQLite store + settings.json (gitignored)
 ## Performance note (single-node Spark)
 
 The backing model runs on one DGX Spark (GB10): ~20–25 tok/s decode,
-~1.5–2.5k tok/s prefill. Keep system prompts and histories small; the agent
-is configured for short prompts and the UI shows token streaming so nothing
-feels frozen. Long MCP tool outputs are truncated in the UI.
+~1.5–2.5k tok/s prefill. Keep system prompts small and let auto-compaction
+(above) keep histories bounded; the UI shows token streaming so nothing feels
+frozen. Long MCP tool outputs are truncated at the source and in the UI.

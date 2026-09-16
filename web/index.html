@@ -52,6 +52,15 @@
       <div class="tools-box">
         <label class="chk"><input type="checkbox" id="set-thinking"> enable thinking — model drafts reasoning first (extra tokens per turn)</label>
       </div>
+      <div class="group-label">CONTEXT</div>
+      <div class="tools-box">
+        <label class="chk"><input type="checkbox" id="set-compact"> auto-compact long threads — summarize old messages before the model re-reads them</label>
+      </div>
+      <div class="row">
+        <label>Compact past ~tokens <input id="set-compact_trigger_tokens" type="number" step="1000" min="0" title="0 disables"></label>
+        <label>Keep newest msgs <input id="set-compact_keep_messages" type="number" step="1" min="4"></label>
+        <label>Summary tokens <input id="set-compact_summary_tokens" type="number" step="100" min="100"></label>
+      </div>
       <div class="group-label">MULTIMODAL</div>
       <div class="tools-box">
         <label class="chk"><input type="checkbox" id="set-vision"> model supports vision (image paste / attach)</label>
