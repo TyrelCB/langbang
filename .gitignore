@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 data/*.db*
 data/settings.json
+data/keys/
 .env
 web/sounds/*.mp3
 web/sounds/*.ogg

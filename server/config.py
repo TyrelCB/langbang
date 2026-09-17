@@ -66,6 +66,20 @@ DEFAULTS = {
         "list_dir": True,
         "crawl_url": True,
     },
+    # Voice. Defaults ride the same keyless Google endpoints telemarketing
+    # used (gTTS + SpeechRecognition.recognize_google) — unofficial/gray-ToS,
+    # occasional 429s possible; the "gcloud" providers (service-account key in
+    # data/keys/, never committed) are the supported escape hatch.
+    "voice": {
+        "tts_provider": "gtts",  # "gtts" | "gcloud"
+        "tts_lang": "en",
+        "tts_tld": "com",  # accent: com=US, co.uk=UK, co.in=IN
+        "stt_provider": "sr",  # "sr" | "gcloud"
+        "stt_lang": "en-US",
+        "gcloud_key_file": "",  # e.g. "data/keys/tts.json"; blank = keyless
+        "gcloud_tts_lang": "en-US",
+        "gcloud_tts_voice": "en-US-Wavenet-J",
+    },
 }
 
 

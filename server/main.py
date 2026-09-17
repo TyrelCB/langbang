@@ -4,12 +4,13 @@ import os
 import re
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import agent, config
+from . import agent, config, voice
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -185,6 +186,56 @@ async def chat(body: ChatIn):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ---- voice (TTS / STT) ----
+# Both providers block on network (gTTS/recognize_google hit Google over the
+# internet; gcloud uses gRPC) — run_in_threadpool keeps them off the event
+# loop so an in-flight /api/chat SSE stream never starves behind one.
+
+MAX_STT_BYTES = 10_000_000  # ~5 min of 16 kHz mono PCM16
+
+
+class TTSIn(BaseModel):
+    text: str
+
+
+@app.post("/api/tts")
+async def tts(body: TTSIn):
+    if len(body.text) > voice.MAX_TTS_CHARS:
+        raise HTTPException(400, f"text too long to speak (max {voice.MAX_TTS_CHARS} chars)")
+    clean = voice.speakable(body.text)
+    if not clean:
+        raise HTTPException(400, "nothing speakable in text")
+    s = config.load()
+    try:
+        audio, mime = await run_in_threadpool(voice.synthesize, clean, s)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:  # RuntimeError + anything: readable 502 for the UI
+        detail = str(e) or f"{type(e).__name__}"
+        raise HTTPException(502, detail)
+    return Response(content=audio, media_type=mime, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/stt")
+async def stt(request: Request):
+    """Raw 16 kHz mono PCM16 body (optionally RIFF-wrapped) -> {"text": ...}.
+    No multipart lib needed; mic UI is deferred (browser needs a secure
+    context) but this endpoint is what it will call."""
+    body = await request.body()
+    if not body:
+        raise HTTPException(400, "empty audio body")
+    if len(body) > MAX_STT_BYTES:
+        raise HTTPException(413, "audio too large (max 10 MB)")
+    s = config.load()
+    try:
+        text = await run_in_threadpool(voice.transcribe, body, s)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, str(e) or type(e).__name__)
+    return {"text": text}
 
 
 # ---- web UI ----

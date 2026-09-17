@@ -15,6 +15,16 @@ dependencies = [
     "httpx>=0.27",
     "aiosqlite>=0.20",
     "deepagents>=0.7.14",
+    "gtts>=2.5",
+    "speechrecognition>=3.10",
+]
+
+[project.optional-dependencies]
+# Only needed when CONFIG switches a voice provider to "gcloud" (voice.py
+# lazy-imports these; keyless gtts/sr paths need nothing extra).
+voice-gcloud = [
+    "google-cloud-texttospeech>=2.16",
+    "google-cloud-speech>=2.27",
 ]
 
 [tool.uv]
