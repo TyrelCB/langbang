@@ -85,6 +85,28 @@ uv run uvicorn server.main:app --port 8123
 # open http://localhost:8123
 ```
 
+## Voice (read-aloud + STT)
+
+Every finished assistant reply gets a 🔊 button; the topbar **VOICE: SPEAK**
+toggle reads each finished reply automatically. Markdown is stripped before
+synthesis (code blocks become a spoken placeholder), so code-heavy answers
+stay listenable.
+
+Defaults ride the **same keyless Google endpoints telemarketing used** — gTTS
+(Translate TTS) for speech and `SpeechRecognition.recognize_google` for
+transcription. Both are unofficial/gray-ToS: fine for a personal LAN tool,
+but occasional 429s under heavy use are possible. If that bites, CONFIG →
+VOICE switches either direction to Google Cloud behind a service-account key
+(`uv sync --extra voice-gcloud`, key file dropped under `data/keys/` — that
+directory is gitignored; never commit keys).
+
+The mic/voice-chat half is **ready server-side but not wired client-side**:
+`POST /api/stt` takes 16 kHz mono PCM16 WAV (or bare PCM) and returns text.
+Browser recording needs a secure context, so on `http://spark-ee93:8123`
+`getUserMedia` is refused — browse via HTTPS (self-signed cert +
+`uvicorn --ssl-keyfile/--ssl-certfile`) or an SSH tunnel
+(`ssh -L 8123:localhost:8123 tyrel@spark-ee93`) and the recorder UI can ship.
+
 ## ⚠ Security
 
 The built-in tools give the agent **unsandboxed shell and file access on the

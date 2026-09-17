@@ -320,3 +320,16 @@ body.hide-reasoning .block.thinking { display: none; }
   margin: 2px 0 6px; padding: 8px; font-size: 11px; white-space: pre-wrap;
   background: var(--panel); border: 1px solid var(--line); overflow-x: auto;
 }
+
+/* ---- voice: read-aloud (added with the voice feature) ---- */
+#btn-voice { font: inherit; font-size: 12px; letter-spacing: 1px; padding: 3px 10px; }
+#btn-voice.on { color: var(--cyan); border-color: var(--cyan-dim); }
+/* sits below the message body, reuses .cb-btn chip chrome */
+.speak-btn { display: block; margin-top: 6px; }
+.speak-btn.on { color: var(--cyan); border-color: var(--cyan); }
+/* first <select>s in the app — match .panel-inner input chrome */
+.panel-inner select {
+  width: 100%; font: inherit; margin-top: 4px; color: var(--text);
+  background: var(--panel); border: 1px solid var(--line); padding: 8px; outline: none;
+}
+.panel-inner select:focus { border-color: var(--cyan); }

@@ -29,6 +29,7 @@
         <button id="tab-traj" class="btn ghost tab" title="agent trajectory — steps, timing, sub-agents">≡ TRAJECTORY</button>
         <button id="btn-game" class="btn ghost" title="X-SIM platformer — G to open, ESC to bail back to chat">⚔ X-SIM</button>
         <button id="btn-reasoning" class="btn ghost" title="Show/hide model reasoning">◈ REASONING: ON</button>
+        <button id="btn-voice" class="btn ghost" title="Read finished replies aloud (per-message 🔊 works regardless)">🔊 VOICE: OFF</button>
         <div id="ctx-tag" title="Tokens the model re-reads on the next call (post-compaction)"></div>
         <div id="model-tag"></div>
       </div>
@@ -91,6 +92,35 @@
       <div class="group-label">DEEP AGENT</div>
       <div class="tools-box">
         <label class="chk"><input type="checkbox" id="set-deep_agent"> deep agent mode — planning (write_todos), sub-agent delegation (task), built-in file tools (replaces read_file/write_file below)</label>
+      </div>
+      <div class="group-label">VOICE</div>
+      <div class="tools-box">
+        <div class="row">
+          <label>TTS provider
+            <select id="set-voice-tts_provider">
+              <option value="gtts">gtts — free, no key</option>
+              <option value="gcloud">google cloud — key file</option>
+            </select>
+          </label>
+          <label>TTS lang <input id="set-voice-tts_lang" type="text" placeholder="en"></label>
+          <label>TTS accent <input id="set-voice-tts_tld" type="text" placeholder="com" title="gTTS accent via tld: com=US, co.uk=UK, co.in=IN"></label>
+        </div>
+        <div class="row">
+          <label>STT provider
+            <select id="set-voice-stt_provider">
+              <option value="sr">speech-recognition — free, no key</option>
+              <option value="gcloud">google cloud — key file</option>
+            </select>
+          </label>
+          <label>STT lang <input id="set-voice-stt_lang" type="text" placeholder="en-US"></label>
+        </div>
+        <div class="row">
+          <label>gcloud key file <input id="set-voice-gcloud_key_file" type="text" placeholder="data/keys/tts.json — blank = keyless providers only" size="38"></label>
+        </div>
+        <div class="row">
+          <label>gcloud TTS lang <input id="set-voice-gcloud_tts_lang" type="text" placeholder="en-US"></label>
+          <label>gcloud TTS voice <input id="set-voice-gcloud_tts_voice" type="text" placeholder="en-US-Wavenet-J"></label>
+        </div>
       </div>
       <div class="group-label">LOCAL TOOLS</div>
       <div id="set-tools" class="tools-box"></div>

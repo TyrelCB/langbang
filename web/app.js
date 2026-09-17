@@ -21,6 +21,10 @@ let run = null;        // live-run bundle {t0, iv, tools:Map, subs:Map, stats} w
 let trajCache = null;  // trajectory rows/totals for the current thread
 let trajVisible = false;
 
+// read-aloud state (which provider speaks is the server's CONFIG; we just
+// queue mp3 clips from /api/tts and play one at a time)
+let voiceMode = localStorage.getItem("lb-voice") === "speak" ? "speak" : "off";
+
 // ---------- API ----------
 const api = {
   async settings() { return (await fetch("/api/settings")).json(); },
@@ -232,7 +236,8 @@ function renderHistory(msgs) {
         const b = addBlock("thinking", "◈ THINKING");
         b.querySelector("pre").textContent = m.thinking;
       }
-      if (textOf(m.content).trim()) addMsg("assistant", textOf(m.content));
+      if (textOf(m.content).trim())
+        attachSpeak(addMsg("assistant", textOf(m.content)), textOf(m.content));
       for (const tc of m.tool_calls || []) {
         const b = addBlock("tool", `⚙ ${tc.name}`);
         b.querySelector("pre").textContent = "→ " + JSON.stringify(tc.args, null, 2);
@@ -249,6 +254,7 @@ async function send() {
   const text = $("#input").value.trim();
   const images = pendingImages;
   if ((!text && !images.length) || streaming) return;
+  stopSpeaking(); // a new run interrupts whatever was being read aloud
   if (!threadId) await newThread();
   $("#input").value = "";
   pendingImages = [];
@@ -289,6 +295,14 @@ async function send() {
       scrollBottom();
     }, 80);
   };
+  // MUST run before any finalize-then-append (attachSpeak): a pending render
+  // would fire after the append and setMarkdown() would wipe the new child
+  const flushRender = () => {
+    if (!renderTimer) return;
+    clearTimeout(renderTimer);
+    renderTimer = null;
+    if (asstMsg) setMarkdown(asstMsg, asstRaw);
+  };
 
   try {
     const res = await fetch("/api/chat", {
@@ -318,7 +332,11 @@ async function send() {
       SFX.play("error");
     }
   }
-  if (asstMsg) asstMsg.classList.remove("cursor");
+  if (asstMsg) {
+    flushRender();
+    asstMsg.classList.remove("cursor");
+    attachSpeak(asstMsg, asstRaw); // final answer bubble (partial on abort/error — speakable anyway)
+  }
   streaming = false;
   setBusy(false);
   clearInterval(run.iv);
@@ -347,7 +365,12 @@ async function send() {
     } else if (ev.type === "tool_start") {
       SFX.play("tool_start");
       // close the current answer bubble; the next one opens on its first token
-      if (asstMsg) { asstMsg.classList.remove("cursor"); asstMsg = null; }
+      if (asstMsg) {
+        flushRender();
+        asstMsg.classList.remove("cursor");
+        attachSpeak(asstMsg, asstRaw);
+        asstMsg = null;
+      }
       let card, host = $("#chat");
       if (ev.name === "task") {
         // sub-agent run: the card IS the live activity container — inner
@@ -404,6 +427,9 @@ async function send() {
       addMsg("error", ev.message);
     } else if (ev.type === "done") {
       SFX.play("message_received");
+      // read the FINAL answer bubble only — mid-run "let me check…" bubbles
+      // keep their manual 🔊 (auto-reading play-by-play is filler audio)
+      if (voiceMode === "speak" && asstRaw.trim()) speakRaw(asstRaw);
     }
     scrollBottom();
   }
@@ -712,7 +738,113 @@ $("#search").addEventListener("keydown", (e) => {
   if (e.key === "Escape") { $("#search").value = ""; showThreadList(); }
 });
 
+// ---------- voice (read-aloud) ----------
+// Synthesis happens server-side (/api/tts -> one mp3 per request, whole
+// reply at once); we keep a small objectURL queue and play one clip at a
+// time. A fresh speak interrupts whatever was playing — one voice, ever.
+const speakAudio = new Audio();
+let speakQ = [];      // pending object URLs
+let speakBusy = false;
+let speakOwner = null; // bubble whose 🔊 currently reads (■ STOP state)
+
+async function speakRaw(raw, owner = null) {
+  const text = raw.trim();
+  if (!text) return;
+  let res;
+  try {
+    res = await fetch("/api/tts", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+  } catch (e) {
+    return voiceFail("VOICE: server unreachable — " + e);
+  }
+  if (!res.ok) {
+    let msg = "HTTP " + res.status;
+    try { msg = (await res.json()).detail || msg; } catch {}
+    return voiceFail("VOICE: " + msg);
+  }
+  speakQ.push(URL.createObjectURL(await res.blob()));
+  speakOwner = owner;
+  pumpSpeak();
+}
+
+function pumpSpeak() {
+  if (speakBusy || !speakQ.length) return;
+  speakBusy = true;
+  speakAudio.src = speakQ.shift();
+  speakAudio.play().catch((e) => {
+    speakBusy = false; // autoplay/codec problem — voiceFail throttles repeats
+    voiceFail("VOICE: playback failed — " + e);
+  });
+}
+
+function stopSpeaking() {
+  for (const u of speakQ) URL.revokeObjectURL(u);
+  speakQ = [];
+  speakBusy = false;
+  speakAudio.pause();
+  speakAudio.removeAttribute("src");
+  speakAudio.load();
+  markSpeaking(null);
+}
+
+speakAudio.onended = speakAudio.onerror = () => {
+  speakBusy = false;
+  if (!speakQ.length) markSpeaking(null); // natural end (or dead clip skipped)
+  pumpSpeak();
+};
+
+function markSpeaking(msg) {
+  if (speakOwner && speakOwner._speakBtn) {
+    speakOwner._speakBtn.textContent = "🔊";
+    speakOwner._speakBtn.classList.remove("on");
+  }
+  speakOwner = msg;
+  if (msg && msg._speakBtn) {
+    msg._speakBtn.textContent = "■ STOP";
+    msg._speakBtn.classList.add("on");
+  }
+}
+
+let lastVoiceFail = 0;
+function voiceFail(msg) {
+  const now = Date.now();
+  if (now - lastVoiceFail < 3000) return; // one bubble per burst, not per retry
+  lastVoiceFail = now;
+  addMsg("error", msg);
+  SFX.play("error");
+}
+
+// 🔊 rides INSIDE the bubble (.msg) — never as a bare #chat child (the
+// search-jump feature keys off #chat child indices). setMarkdown() rewrites
+// innerHTML while streaming, so callers attach only at FINALIZATION.
+function attachSpeak(msg, raw) {
+  if (!raw || !raw.trim() || msg.querySelector(".speak-btn")) return;
+  const b = el("button", "cb-btn speak-btn", "🔊");
+  b.title = "Read this reply aloud";
+  b.onclick = (e) => {
+    e.stopPropagation();
+    const stopping = b.textContent === "■ STOP"; // read state BEFORE reset
+    stopSpeaking(); // also clears any other bubble that was reading
+    if (stopping) return;
+    markSpeaking(msg); // immediate ■ STOP feedback — synthesis may take seconds
+    speakRaw(raw, msg);
+  };
+  msg._speakBtn = b;
+  msg.appendChild(b);
+}
+
 // ---------- settings ----------
+// config.save() merges the TOP level only — nested dicts must be sent whole,
+// hence the spread-from-loaded base in saveSettings.
+const DEFAULT_VOICE = {
+  tts_provider: "gtts", tts_lang: "en", tts_tld: "com",
+  stt_provider: "sr", stt_lang: "en-US",
+  gcloud_key_file: "", gcloud_tts_lang: "en-US", gcloud_tts_voice: "en-US-Wavenet-J",
+};
+let loadedVoice = { ...DEFAULT_VOICE };
+
 async function openSettings() {
   const s = await api.settings();
   for (const k of ["base_url", "model", "temperature", "max_tokens", "max_react_iterations", "system_prompt",
@@ -732,6 +864,9 @@ async function openSettings() {
   $("#set-thinking").checked = !!s.enable_thinking;
   $("#set-compact").checked = !!s.compact_enabled;
   $("#set-deep_agent").checked = !!s.deep_agent;
+  loadedVoice = { ...DEFAULT_VOICE, ...(s.voice || {}) };
+  for (const k of Object.keys(DEFAULT_VOICE))
+    $("#set-voice-" + k).value = loadedVoice[k];
   $("#settings-panel").classList.remove("hidden");
   SFX.play("click");
 }
@@ -762,6 +897,18 @@ async function saveSettings() {
     compact_summary_tokens: parseInt($("#set-compact_summary_tokens").value) || 800,
     local_tools,
     mcp_servers: mcp,
+    // complete dict — the server shallow-merges top-level keys only
+    voice: {
+      ...loadedVoice,
+      tts_provider: $("#set-voice-tts_provider").value,
+      tts_lang: $("#set-voice-tts_lang").value.trim() || "en",
+      tts_tld: $("#set-voice-tts_tld").value.trim() || "com",
+      stt_provider: $("#set-voice-stt_provider").value,
+      stt_lang: $("#set-voice-stt_lang").value.trim() || "en-US",
+      gcloud_key_file: $("#set-voice-gcloud_key_file").value.trim(),
+      gcloud_tts_lang: $("#set-voice-gcloud_tts_lang").value.trim() || "en-US",
+      gcloud_tts_voice: $("#set-voice-gcloud_tts_voice").value.trim() || "en-US-Wavenet-J",
+    },
   });
   $("#settings-panel").classList.add("hidden");
   SFX.play("settings_saved");
@@ -840,6 +987,20 @@ $("#btn-reasoning").onclick = () => {
   applyReasoningVis();
 };
 applyReasoningVis();
+
+// read-aloud toggle (per browser; provider is server CONFIG)
+function applyVoiceMode() {
+  $("#btn-voice").textContent = "🔊 VOICE: " + (voiceMode === "speak" ? "SPEAK" : "OFF");
+  $("#btn-voice").classList.toggle("on", voiceMode === "speak");
+}
+$("#btn-voice").onclick = () => {
+  SFX.play("click");
+  voiceMode = voiceMode === "speak" ? "off" : "speak";
+  localStorage.setItem("lb-voice", voiceMode);
+  if (voiceMode === "off") stopSpeaking();
+  applyVoiceMode();
+};
+applyVoiceMode();
 
 checkHealth();
 setInterval(checkHealth, 15000);
