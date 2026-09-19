@@ -272,6 +272,7 @@ async function send() {
     tools: new Map(), // run_id -> card el; pairs start/end even when parallel
     subs: new Map(),  // task run_id -> {card, body, t0}
     stats: { steps: 0, llm_s: 0, tool_s: 0, in: 0, out: 0, ttfts: 0, ttft_n: 0 },
+    todosTouched: false, // did THIS run write the list? drives the stale badge
   };
   $("#sb-live").classList.remove("hidden");
   tickRun();
@@ -406,6 +407,7 @@ async function send() {
         card.open = false;
       }
     } else if (ev.type === "todos") {
+      if (run) run.todosTouched = true;
       renderTodos(ev.todos);
     } else if (ev.type === "usage") {
       // one line per model call (ReAct rounds and the compaction summarizer
@@ -427,6 +429,10 @@ async function send() {
       addMsg("error", ev.message);
     } else if (ev.type === "done") {
       SFX.play("message_received");
+      // run ended without ever writing the list while items sit open → the
+      // card shows a mid-run snapshot; say so (model finished, bookkeeping
+      // didn't follow — e.g. a resumed run that dove straight back to work)
+      if (run && !run.todosTouched) markTodosStale();
       // read the FINAL answer bubble only — mid-run "let me check…" bubbles
       // keep their manual 🔊 (auto-reading play-by-play is filler audio)
       if (voiceMode === "speak" && asstRaw.trim()) speakRaw(asstRaw);
@@ -494,6 +500,18 @@ function renderTodos(todos) {
 function hideTodos() {
   $("#todo-panel").classList.add("hidden");
   $("#todo-list").innerHTML = "";
+}
+
+// A run finished without touching write_todos while the visible list still
+// has open items → stamp the header; it's a true statement regardless of
+// whether the model forgot (resumed runs) or the turn was off-list entirely.
+function markTodosStale() {
+  const list = $("#todo-list");
+  if ($("#todo-panel").classList.contains("hidden")) return;
+  if (!list.querySelector(".todo-item:not(.done)")) return; // all closed already
+  const label = $("#todo-label");
+  if (label.querySelector(".todo-stale")) return; // already stamped
+  label.appendChild(el("span", "todo-stale", " · ⚠ NOT UPDATED THIS RUN"));
 }
 
 function applyTodosCollapsed() {

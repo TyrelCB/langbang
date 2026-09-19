@@ -333,3 +333,6 @@ body.hide-reasoning .block.thinking { display: none; }
   background: var(--panel); border: 1px solid var(--line); padding: 8px; outline: none;
 }
 .panel-inner select:focus { border-color: var(--cyan); }
+
+/* to-do card: run ended without reconciling an open list */
+.todo-stale { color: var(--orange); }

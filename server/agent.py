@@ -273,7 +273,11 @@ DEEP_NOTE = (
     "\n\nParallelism: independent work goes in ONE message — several `task` "
     "sub-agents for independent research streams, and multiple tool calls "
     "when one result doesn't feed the next; they run concurrently. Batch "
-    "write_todos status changes with the calls they describe."
+    "write_todos status changes with the calls they describe. Finish line: "
+    "an answer is not done until the todo list matches reality — before the "
+    "final reply call write_todos (no items left pending/in_progress that "
+    "are actually finished; after resuming an interrupted run, reconcile the "
+    "list first)."
 )
 
 
