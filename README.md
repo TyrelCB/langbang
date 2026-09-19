@@ -103,9 +103,29 @@ directory is gitignored; never commit keys).
 The mic/voice-chat half is **ready server-side but not wired client-side**:
 `POST /api/stt` takes 16 kHz mono PCM16 WAV (or bare PCM) and returns text.
 Browser recording needs a secure context, so on `http://spark-ee93:8123`
-`getUserMedia` is refused — browse via HTTPS (self-signed cert +
-`uvicorn --ssl-keyfile/--ssl-certfile`) or an SSH tunnel
-(`ssh -L 8123:localhost:8123 tyrel@spark-ee93`) and the recorder UI can ship.
+`getUserMedia` is refused.
+
+**Mic access options (deferred — revisit before building the recorder):**
+
+1. **Caddy + public zone + ACME DNS-01 (decided direction).** Caddy already
+   runs on spark-ee93; `tls dns <provider>` validates via the DNS API, so
+   nothing opens inbound (no port-forwards — the ⚠ Security rule stands).
+   Real wildcard cert → trusted on every machine with zero per-machine CA
+   imports. The `langbang` A record points at the LAN IP of whichever box
+   hosts the harness today: the record travels with the harness, which is
+   what makes it portable. uvicorn stays loopback-only behind Caddy.
+   DNS API token lives in a chmod-600 EnvironmentFile for the Caddy unit,
+   never in the repo.
+2. **Self-signed + `uvicorn --ssl-*`** — zero new moving parts, but a
+   per-machine CA import and a regen dance whenever the hostname changes.
+   Fine as a stopgap.
+3. **SSH tunnel (`ssh -L 8123:localhost:8123 tyrel@spark-ee93`)** — no TLS
+   work at all; the mic works because `http://localhost` is *already* a
+   secure context. That nuance also means: on whichever machine literally
+   hosts the process, voice chat needs no TLS.
+4. Never: a tunnel/port-forward that makes the URL internet-reachable —
+   an unauthenticated `run_bash` behind a padlock is still an
+   unauthenticated shell.
 
 ## ⚠ Security
 
