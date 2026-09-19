@@ -262,6 +262,101 @@ class _CompactionMiddleware(AgentMiddleware):
         return await self._hook(state)
 
 
+class _TodoReconcile(AgentMiddleware):
+    """Deterministic finish-line gate for the todo list.
+
+    Prompt advice (our DEEP_NOTE and the harness's own WRITE_TODOS_SYSTEM_
+    PROMPT) proved advisory in live runs: Qwen3.8-flash did work and answered
+    without ever reconciling write_todos, leaving the card stuck on a mid-run
+    snapshot. This middleware wraps every model call and, when the model
+    produces a FINAL answer (AIMessage without tool_calls) after doing real
+    tool work this turn while the todo list still has open items, re-runs the
+    call once with a hard reconciliation order appended. At most one retry
+    per run — middleware is constructed per build_agent() call, i.e. per
+    turn, so `_nudged` is per-run. A model that still refuses, or a retry
+    that errors, gets the original answer plus the UI's ⚠ NOT UPDATED THIS
+    RUN badge.
+
+    Two live-test-earned constraints: the nudge rides as a USER message
+    (sglang's Qwen template rejects mid-conversation system roles — 400
+    "System message must be at the beginning"), and only non-write_todos
+    tool work counts (a plan-only turn legitimately ends with everything
+    open — that's what planning is).
+
+    Discarding the intercepted response is safe: amodel_node persists only
+    what the wrap chain RETURNS (_execute_model_async is side-effect-free),
+    so the intercepted answer never reaches thread history — only the
+    retry's messages do. (Its streamed tokens stay briefly visible in the
+    live UI; harmless.)"""
+
+    def __init__(self):
+        super().__init__()
+        self._nudged = False
+
+    @staticmethod
+    def _did_work(messages) -> bool:
+        """Real (non-write_todos) tool results after this turn's last human
+        message. Scanning backwards stops at that human boundary, so earlier
+        turns don't count."""
+        for m in reversed(messages):
+            if isinstance(m, ToolMessage):
+                if (getattr(m, "name", None) or "") != "write_todos":
+                    return True
+            elif isinstance(m, HumanMessage):
+                return False
+        return False
+
+    async def awrap_model_call(self, request, handler):  # noqa: ANN001
+        resp = await handler(request)
+        if self._nudged:
+            return resp
+        # handler results arrive as ModelResponse | AIMessage |
+        # ExtendedModelResponse — or the factory's internal composed envelope,
+        # _ComposedExtendedModelResponse (.model_response). Unwrap duck-tight.
+        mr = resp if getattr(resp, "result", None) is not None else getattr(
+            resp, "model_response", None
+        )
+        msgs = getattr(mr, "result", None)
+        if msgs is None and isinstance(resp, AIMessage):  # bare-AIMessage return
+            msgs = [resp]
+        ai = next((m for m in reversed(msgs or []) if isinstance(m, AIMessage)), None)
+        if ai is None or ai.tool_calls:
+            return resp  # not a final answer — tool work still in flight
+        if not self._did_work(request.messages):
+            return resp  # nothing done this turn the list could reflect
+        open_items = [
+            t for t in (request.state or {}).get("todos") or []
+            if t.get("status") != "completed"
+        ]
+        if not open_items:
+            return resp
+        self._nudged = True
+        listed = "; ".join(
+            f"[{t.get('status')}] {t.get('content')}" for t in open_items[:15]
+        )
+        nudge = HumanMessage(content=(
+            "[todo-enforcer] Do NOT answer yet. Your todo list still has "
+            f"{len(open_items)} open item(s): {listed}. Call write_todos NOW "
+            "with the FULL list updated to match reality — completed for "
+            "what this run actually finished, in_progress for what you are "
+            "mid-way through, pending only for genuinely remaining work. "
+            "Only after that tool call may you give your answer."
+        ))
+        logger.warning(
+            "todo-reconcile: final answer intercepted, forcing one reconciliation (%d open items)",
+            len(open_items),
+        )  # warning-level on purpose: no logging handler is configured,
+        # so INFO would sink to nowhere (logging lastResort = WARNING+)
+        try:
+            return await handler(request.override(messages=[*request.messages, nudge]))
+        except Exception as e:  # noqa: BLE001 - never lose the user's answer
+            logger.warning(
+                "todo-reconcile: forced retry failed (%s); delivering original answer",
+                str(e)[:200],
+            )
+            return resp
+
+
 # Provided by the deepagents harness itself in deep mode (on the real FS, with
 # richer descriptions) — our same-named tools would collide on bind.
 DEEP_REPLACED_TOOLS = {"read_file", "write_file"}
@@ -306,6 +401,7 @@ async def build_agent(s: dict, checkpointer=None):
         mw = [TodoListMiddleware()]  # write_todos planning tool
         if s.get("compact_enabled", True):
             mw.append(_CompactionMiddleware(s))
+        mw.append(_TodoReconcile())  # deterministic finish-line gate
         return create_deep_agent(
             model(s),
             tools,
