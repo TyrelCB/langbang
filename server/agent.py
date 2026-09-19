@@ -25,6 +25,7 @@ from langchain_core.messages.utils import count_tokens_approximately
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.config import get_config
+from langgraph.errors import GraphRecursionError
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.prebuilt import create_react_agent
 
@@ -749,6 +750,26 @@ async def run_chat(
                 if ev["name"] == "task":
                     yield {"type": "sub", "state": "end", "sub_id": rid, "dur": dur}
         yield {"type": "done", "seconds": round(time.time() - t_run0, 1)}
+    except GraphRecursionError:
+        # LangGraph's own text ("set the recursion_limit config key", docs URL)
+        # is misleading here: the user-facing knob is MAX AGENT ITERATIONS, and
+        # crucially the checkpoint survives — a new message resumes for free.
+        await _log(
+            thread_id,
+            turn_id,
+            "error",
+            meta={"message": f"GraphRecursionError: limit {cfg['recursion_limit']} reached"},
+        )
+        yield {
+            "type": "error",
+            "message": (
+                f"AGENT BUDGET EXHAUSTED — {cfg['recursion_limit']} graph steps "
+                f"(max agent iterations: {s.get('max_react_iterations', 12)}) "
+                "without a stop. Work so far is saved: send 'continue' to "
+                "resume from where it stopped (fresh budget), or raise MAX "
+                "AGENT ITERATIONS in CONFIG."
+            ),
+        }
     except Exception as e:  # noqa: BLE001 - stream errors to the UI
         await _log(thread_id, turn_id, "error", meta={"message": str(e)[:500]})
         yield {"type": "error", "message": f"{type(e).__name__}: {e}"}
