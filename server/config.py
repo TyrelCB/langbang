@@ -39,6 +39,14 @@ DEFAULTS = {
     # inert in deep mode; run_bash remains the only shell — the harness's
     # `execute` tool is excluded in agent.py). Off = plain create_react_agent.
     "deep_agent": True,
+    # Skills (Agent Skills spec, agentskills.io) — deep mode only. Sources
+    # layer last-one-wins: the Hermes tree comes first (installed/updated by
+    # the `hermes` CLI; a deny rule keeps the agent from writing there) and
+    # the LangBang dir goes last — the agent's own, freely writable, so it
+    # can self-author skills and override a Hermes one by same name.
+    "skills_enabled": True,
+    "skills_hermes_dir": os.environ.get("LANGBANG_HERMES_SKILLS", "~/.hermes/skills"),
+    "skills_dir": "~/.langbang/skills",
     # Off by default: Qwen3-style hybrids answer silently unless asked, and
     # thinking adds a few hundred decode tokens per turn (~40-50 ms each on
     # a single Spark). Enable in CONFIG to stream reasoning into the

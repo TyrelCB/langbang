@@ -17,6 +17,16 @@ but built on the LangChain/LangGraph ecosystem:
   results get auto-evicted to disk). `run_bash` stays the only
   shell — the harness's extra `execute` tool is excluded. Turning the toggle
   off falls back to the plain LangGraph ReAct graph
+- **Skills** (Agent Skills spec; deep mode, CONFIG toggle): layers
+  `~/.hermes/skills` — your existing Hermes tree, categories included —
+  under a LangBang-owned `~/.langbang/skills` dir. Hermes stays the package
+  manager (its tree is loaded read-only; a deny rule blocks the harness file
+  tools from writing it — keep installing/updating via the `hermes` CLI);
+  the LangBang dir is fully writable, so the agent self-authors skills there
+  when a procedure proves reusable, and a LangBang skill shadows a same-name
+  Hermes one. Sources re-scan every turn (add/remove a SKILL.md and it's
+  live next turn); the model sees name+description and `read_file`s the full
+  SKILL.md when a task matches. `task` sub-agents don't get skills yet
 - **MCP servers** via `langchain-mcp-adapters` (stdio / SSE / streamable-HTTP)
 - **Shell mode**: a chat message starting with `!` runs the rest as a bash
   command on the server (same shell + output cap as `run_bash`) **without

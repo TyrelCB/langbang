@@ -10,11 +10,13 @@ from typing import AsyncIterator
 
 import aiosqlite
 from deepagents import (
+    FilesystemPermission,
     HarnessProfile,
     backends,
     create_deep_agent,
     register_harness_profile,
 )
+from deepagents.middleware.skills import SkillsMiddleware
 from langchain.agents.middleware import AgentMiddleware, TodoListMiddleware
 from langchain_core.messages import (
     AIMessage,
@@ -379,6 +381,123 @@ DEEP_NOTE = (
 )
 
 
+# Compact rewrite of the harness's SKILLS_SYSTEM_PROMPT: theirs is ~3x the
+# size (roughly 0.2s of Spark prefill per model call, every call) and talks
+# about "Deepagents"/"Agents" sources we don't have. SkillsMiddleware requires
+# all three {slots}. The Hermes-read-only / LangBang-writable split is the
+# contract _skill_sources + the FilesystemPermission deny-rule in build_agent
+# actually enforce.
+SKILLS_NOTE = """## Skills
+
+{skills_locations}{skills_load_warnings}
+
+**Available Skills:**
+
+{skills_list}
+
+Progressive disclosure: the list shows name + description only. When a task
+matches a skill, `read_file` the path shown under it (`limit=1000`) and
+follow it; use absolute paths for any helper files.
+
+Sources labeled **Hermes** belong to the `hermes` CLI's skill tree and are
+READ-ONLY for you — never write there; installing/updating them is the
+user's `hermes` job. The **Langbang** source is yours: when you work out a
+reusable multi-step procedure, save it as `<langbang dir>/<name>/SKILL.md`
+(folder name == frontmatter `name`; YAML frontmatter with `name` plus a
+`description` naming its trigger conditions), keep skills accurate — fix
+one when you catch it wrong, and improve an existing skill rather than
+duplicating it."""
+
+
+def _skill_sources(s: dict) -> list[tuple[str, str]]:
+    """Layered skill sources for SkillsMiddleware, last one wins: Hermes's
+    tree first, LangBang's own dir last (so a LangBang skill can override a
+    Hermes one by name).
+
+    The middleware scans ONE level (`<source>/<skill>/SKILL.md`), but Hermes
+    nests by category (`skills/<category>/<skill>/SKILL.md`), so every
+    immediate subdir becomes its own source; category-less dirs and dirs
+    without skill children are skipped silently by design. Dotted dirs
+    (.hub, .curator_backups) are Hermes bookkeeping — skipped, or stale
+    hub/backup copies would surface as ghost skills. All Hermes sources share
+    the "Hermes" label (see _FreshSkillsLocations collapse); the LangBang dir
+    is created eagerly — the prompt invites the agent to author into it."""
+    hermes = os.path.expanduser(s.get("skills_hermes_dir") or "~/.hermes/skills")
+    lb_dir = os.path.expanduser(s.get("skills_dir") or "~/.langbang/skills")
+    os.makedirs(lb_dir, exist_ok=True)
+    sources: list[tuple[str, str]] = []
+    if os.path.isdir(hermes):
+        sources.append((hermes, "Hermes"))
+        sources += [
+            (os.path.join(hermes, name), "Hermes")
+            for name in sorted(os.listdir(hermes))
+            if not name.startswith(".")
+            and os.path.isdir(os.path.join(hermes, name))
+        ]
+    sources.append((lb_dir, "Langbang"))
+    return sources
+
+
+def _uncached_skill_state(state: dict) -> dict:
+    """State copy without the skills cache keys — SkillsMiddleware skips its
+    scan whenever `skills_metadata` is present ('once per session'), but
+    LangBang threads persist for weeks while Hermes updates skills out of
+    band, so we re-scan every turn (a few dozen stats, noise next to the
+    model call it precedes)."""
+    return {k: v for k, v in state.items()
+            if k not in ("skills_metadata", "skills_load_errors")}
+
+
+def _skill_update(update):  # noqa: ANN202
+    """Parent returns skills_load_errors only when non-empty; force both keys
+    so the replace-on-write channels can't keep a stale list from an
+    earlier turn."""
+    update = dict(update or {})
+    update.setdefault("skills_metadata", [])
+    update.setdefault("skills_load_errors", [])
+    return update
+
+
+class _FreshSkillsMiddleware(SkillsMiddleware):
+    """SkillsMiddleware but the per-session metadata cache is defeated (see
+    _uncached_skill_state). v1 deliberately covers the main agent only —
+    `task` sub-agents get the vanilla harness, which here means no skills;
+    the `skills=` kwarg on create_deep_agent can't be used instead, it would
+    inject a second, vanilla SkillsMiddleware alongside this one."""
+
+    def _format_skills_locations(self) -> str:
+        """Collapse same-label sources to one line: the Hermes tree arrives
+        as ~26 category-dir sources, and listing every path would spend
+        ~400 prompt tokens on every single model call to say "look under
+        ~/.hermes/skills". Parent's convention kept: one `**Label
+        Skills**: `path`` line per label, "(higher priority)" on the last."""
+        order: list[str] = []
+        first: dict[str, str] = {}
+        count: dict[str, int] = {}
+        for path, label in zip(self.sources, self.source_labels, strict=True):
+            if label not in first:
+                first[label] = path
+                order.append(label)
+            count[label] = count.get(label, 0) + 1
+        lines = [
+            f"**{label} Skills**: `{first[label]}`"
+            + (f" (+{count[label] - 1} category dirs)" if count[label] > 1 else "")
+            + (" (higher priority)" if label == order[-1] else "")
+            for label in order
+        ]
+        return "\n".join(lines)
+
+    def before_agent(self, state, runtime, config):  # noqa: ANN001, ARG002
+        return _skill_update(
+            super().before_agent(_uncached_skill_state(state), runtime, config)
+        )
+
+    async def abefore_agent(self, state, runtime, config):  # noqa: ANN001, ARG002
+        return _skill_update(
+            await super().abefore_agent(_uncached_skill_state(state), runtime, config)
+        )
+
+
 def _fs_backend():
     """Real filesystem for the deep-agent file tools. No jail: the README
     already treats this server as an unsandboxed personal LAN tool (run_bash
@@ -405,6 +524,20 @@ async def build_agent(s: dict, checkpointer=None):
         if s.get("compact_enabled", True):
             mw.append(_CompactionMiddleware(s))
         mw.append(_TodoReconcile())  # deterministic finish-line gate
+        perms = []
+        if s.get("skills_enabled", True):
+            mw.append(_FreshSkillsMiddleware(
+                backend=_fs_backend(),
+                sources=_skill_sources(s),
+                system_prompt=SKILLS_NOTE,
+            ))
+            # make the prompt's "Hermes is read-only" promise real for the
+            # harness file tools. Advisory next to run_bash (the agent could
+            # overwrite skills via shell) — this fences honest mistakes, not
+            # the model's own shell, which is the trust posture anyway.
+            hermes = os.path.expanduser(s.get("skills_hermes_dir") or "~/.hermes/skills")
+            perms = [FilesystemPermission(
+                operations=["write"], paths=[hermes + "/**"], mode="deny")]
         return create_deep_agent(
             model(s),
             tools,
@@ -412,6 +545,7 @@ async def build_agent(s: dict, checkpointer=None):
             middleware=mw,
             backend=_fs_backend(),
             checkpointer=cp,
+            permissions=perms,
         )
     return create_react_agent(
         model(s),

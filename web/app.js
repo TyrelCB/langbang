@@ -942,6 +942,7 @@ async function openSettings() {
   $("#set-thinking").checked = !!s.enable_thinking;
   $("#set-compact").checked = !!s.compact_enabled;
   $("#set-deep_agent").checked = !!s.deep_agent;
+  $("#set-skills_enabled").checked = !!s.skills_enabled;
   loadedVoice = { ...DEFAULT_VOICE, ...(s.voice || {}) };
   for (const k of Object.keys(DEFAULT_VOICE))
     $("#set-voice-" + k).value = loadedVoice[k];
@@ -970,6 +971,7 @@ async function saveSettings() {
     enable_thinking: $("#set-thinking").checked,
     compact_enabled: $("#set-compact").checked,
     deep_agent: $("#set-deep_agent").checked,
+    skills_enabled: $("#set-skills_enabled").checked,
     compact_trigger_tokens: parseInt($("#set-compact_trigger_tokens").value) || 0,
     compact_keep_messages: parseInt($("#set-compact_keep_messages").value) || 20,
     compact_summary_tokens: parseInt($("#set-compact_summary_tokens").value) || 800,
