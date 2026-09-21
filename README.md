@@ -18,6 +18,10 @@ but built on the LangChain/LangGraph ecosystem:
   shell — the harness's extra `execute` tool is excluded. Turning the toggle
   off falls back to the plain LangGraph ReAct graph
 - **MCP servers** via `langchain-mcp-adapters` (stdio / SSE / streamable-HTTP)
+- **Shell mode**: a chat message starting with `!` runs the rest as a bash
+  command on the server (same shell + output cap as `run_bash`) **without
+  spending a model call** — the exchange is appended to the thread, so the
+  agent sees the output on its next turn (Claude Code's `!cmd`, same idea)
 
 ## Spark services wired in by default
 
@@ -133,7 +137,8 @@ The built-in tools give the agent **unsandboxed shell and file access on the
 machine running the server** (`run_bash` = `bash -lc`). There is no approval
 prompt — by design, this is a personal LAN tool. Do **not** expose
 `/api/chat` beyond localhost/LAN, and do not add auth-bypassing proxies in
-front of it. Anyone who can post to `/api/chat` can run commands as you.
+front of it. Anyone who can post to `/api/chat` (or `/api/shell`, the `!cmd`
+route) can run commands as you.
 
 ## Layout
 

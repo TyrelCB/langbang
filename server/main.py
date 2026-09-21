@@ -188,6 +188,28 @@ async def chat(body: ChatIn):
     )
 
 
+# ---- shell mode (`!cmd` from the chat box) ----
+
+
+class ShellIn(BaseModel):
+    thread_id: str
+    command: str
+
+
+@app.post("/api/shell")
+async def shell(body: ShellIn):
+    """User-initiated shell run: executes on this box in the same unsandboxed
+    shell as run_bash (see README ⚠ Security) and lands in the thread context
+    for the agent's NEXT turn — but never calls the model itself."""
+    cmd = body.command.strip()
+    if not cmd:
+        raise HTTPException(400, "empty command")
+    try:
+        return await agent.run_user_shell(body.thread_id, cmd)
+    except Exception as e:  # noqa: BLE001 - readable 502 like the voice routes
+        raise HTTPException(502, str(e) or type(e).__name__)
+
+
 # ---- voice (TTS / STT) ----
 # Both providers block on network (gTTS/recognize_google hit Google over the
 # internet; gcloud uses gRPC) — run_in_threadpool keeps them off the event

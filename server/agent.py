@@ -1,7 +1,9 @@
 """LangGraph agent + streaming runner + thread storage."""
+import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from typing import AsyncIterator
@@ -23,6 +25,7 @@ from langchain_core.messages import (
 )
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.config import get_config
 from langgraph.errors import GraphRecursionError
@@ -433,6 +436,9 @@ def _msg_dict(m) -> dict:
     compacted = (m.additional_kwargs or {}).get("lb_compacted")
     if compacted:
         d["compacted"] = compacted  # UI renders it as a ⟲ CONTEXT COMPACTED card
+    shell = (m.additional_kwargs or {}).get("lb_shell")
+    if shell:
+        d["shell"] = shell  # UI renders it as a $ command card (see run_user_shell)
     return d
 
 
@@ -467,6 +473,8 @@ async def _live_messages(thread_id: str) -> list:
     # Newer checkpointer returns a CheckpointTuple; older returns dict.
     cv = tup.get("channel_values") if isinstance(tup, dict) else tup.channel_values
     msgs = (cv or {}).get("messages")
+    if isinstance(msgs, _DeltaSnapshot):
+        msgs = None  # materialized snapshot blob, not a message list — replay it
     if msgs is None:
         try:
             g = await _read_agent()
@@ -873,6 +881,53 @@ async def run_chat(
     except Exception as e:  # noqa: BLE001 - stream errors to the UI
         await _log(thread_id, turn_id, "error", meta={"message": str(e)[:500]})
         yield {"type": "error", "message": f"{type(e).__name__}: {e}"}
+
+
+SHELL_TIMEOUT = 300  # wall clock for a user-typed `!cmd`, same cap as run_bash
+
+
+async def run_user_shell(thread_id: str, command: str) -> dict:
+    """Claude-Code-style `!cmd`: run the command in the same unsandboxed shell
+    as run_bash, WITHOUT invoking the model. The exchange is appended to the
+    thread's checkpoint state, so the agent reads the output on its next turn
+    (content carries the full text; the UI renders the structured `shell`
+    kwarg instead of a plain bubble). Returns {cmd, out, exit, dur} for the
+    client's card."""
+    turn_id = uuid.uuid4().hex[:12]
+    await _touch(thread_id, f"! {command}")
+    await _log(thread_id, turn_id, "user", meta={"text": _cap("! " + command, 800)})
+    t0 = time.time()
+    # same code path/format as the agent's own tool call (incl. the MAX_OUT
+    # trim, so model context cost of a `!cmd` equals the agent running it)
+    out = await asyncio.to_thread(
+        local_tools.run_bash.invoke, {"command": command, "timeout": SHELL_TIMEOUT}
+    )
+    dur = round(time.time() - t0, 3)
+    m = re.match(r"exit=(-?\d+)", out)
+    exit_code = int(m.group(1)) if m else None  # None on TIMEOUT/ERROR strings
+    await _log(
+        thread_id,
+        turn_id,
+        "tool",
+        name="shell",
+        dur=dur,
+        meta={"in": _cap(command, 2000), "out": _cap(out, 2000), "sub": None},
+    )
+    msg = HumanMessage(
+        # leading `$ ` line = what the agent sees first; body = run_bash format
+        content=f"$ {command}\n{out}",
+        additional_kwargs={
+            "lb_shell": {"cmd": command, "out": out, "exit": exit_code, "dur": dur}
+        },
+    )
+    # Append without invoking, as if the exchange had arrived as graph input:
+    # as_node="__start__" routes through the messages reducer (DeltaChannel
+    # included) and leaves next=<entry>, so the next real turn simply follows.
+    g = await _read_agent()
+    await g.aupdate_state(
+        {"configurable": {"thread_id": thread_id}}, {"messages": [msg]}, as_node="__start__"
+    )
+    return {"cmd": command, "out": out, "exit": exit_code, "dur": dur}
 
 
 def _safe(x):

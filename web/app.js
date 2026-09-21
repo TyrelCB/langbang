@@ -230,6 +230,11 @@ function renderHistory(msgs) {
       b.querySelector("pre").textContent = textOf(m.content);
       continue;
     }
+    if (m.shell) {
+      const b = shellBlock(m.shell.cmd);
+      shellSeal(b, m.shell);
+      continue;
+    }
     if (m.role === "human") addMsg("user", textOf(m.content), imagesOf(m.content));
     else if (m.role === "ai") {
       if (m.thinking) {
@@ -254,6 +259,14 @@ async function send() {
   const text = $("#input").value.trim();
   const images = pendingImages;
   if ((!text && !images.length) || streaming) return;
+  // `!cmd` = shell mode (Claude Code style): run on the server, no model call
+  if (!images.length && text.startsWith("!")) {
+    const cmd = text.slice(1).trim();
+    if (!cmd) return;
+    $("#input").value = "";
+    await runShell(cmd);
+    return;
+  }
   stopSpeaking(); // a new run interrupts whatever was being read aloud
   if (!threadId) await newThread();
   $("#input").value = "";
@@ -448,6 +461,53 @@ function setBusy(b) {
 
 function stopGeneration() {
   if (aborter) aborter.abort();
+}
+
+// ---------- shell mode (`!cmd`): run on the server, no model call ----------
+function shellBlock(cmd) {
+  const b = addBlock("shell", `$ ${cmd} …`);
+  b.open = true; // user ran it to see the result — never hide the output
+  return b;
+}
+
+function shellSeal(b, { cmd, out, exit, dur }) {
+  b.querySelector("summary").textContent =
+    `$ ${cmd} · exit=${exit ?? "?"} · ${fmtShort(dur || 0)}`;
+  b.querySelector("pre").textContent = out;
+}
+
+async function runShell(cmd) {
+  if (!threadId) await newThread();
+  streaming = true; // reuse the chat gate: no model run may interleave a shell
+  aborter = new AbortController();
+  setBusy(true);
+  SFX.play("tool_start");
+  const card = shellBlock(cmd);
+  try {
+    const res = await fetch("/api/shell", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ thread_id: threadId, command: cmd }),
+      signal: aborter.signal,
+    });
+    if (!res.ok) throw new Error((await res.text()).slice(0, 300) || String(res.status));
+    shellSeal(card, await res.json());
+    SFX.play("tool_end");
+  } catch (e) {
+    if (e.name === "AbortError") {
+      // STOP only abandons the view: the server-side command runs to
+      // completion and is saved to the thread — a reload shows its card
+      card.querySelector("summary").textContent = "✕ $ " + cmd;
+    } else {
+      SFX.play("error");
+      card.remove();
+      addMsg("error", "SHELL FAILED: " + e.message);
+    }
+  }
+  streaming = false;
+  aborter = null;
+  setBusy(false);
+  await refreshThreads(); // context grew — CTX chip and thread order may move
+  refreshStats();
 }
 
 // ---------- agentic visibility: live run bar, to-dos, totals, trajectory ----------
