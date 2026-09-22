@@ -48,6 +48,11 @@
       </div>
       <div id="todo-list"></div>
     </div>
+    <!-- jump-to-bottom lives OUTSIDE #chat: search-jump keys off #chat child
+         indices, so the pill must not become one -->
+    <button id="jump-bottom" class="hidden" title="Jump to the newest content (Ctrl+End)">
+      Jump to bottom (ctrl+End) <span class="arr">↓</span>
+    </button>
     <div id="attach-strip"></div>
     <footer id="composer">
       <button id="btn-attach" class="btn ghost hidden" title="Attach image">📎 ATTACH</button>

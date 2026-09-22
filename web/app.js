@@ -212,9 +212,51 @@ function addBlock(kind, label) {
 }
 
 function scrollBottom() {
+  // sticky: stream appends only follow while the user is parked at the
+  // bottom — scrolling up pins the view (and raises the jump pill)
   const c = $("#chat");
-  c.scrollTop = c.scrollHeight;
+  if (c._pinned) c.scrollTop = c.scrollHeight;
+  updateJumpPill();
 }
+
+// ---------- jump to bottom ----------
+// one pill serves both scroll panes (#chat / #traj-body, whichever tab shows)
+const JUMP_NEAR = 140; // px from bottom still counted as "at bottom"
+function activePane() {
+  return trajVisible ? $("#traj-body") : $("#chat");
+}
+function updateJumpPill() {
+  const c = activePane();
+  const far =
+    c.scrollHeight - c.scrollTop - c.clientHeight >
+    Math.max(320, 0.6 * c.clientHeight);
+  $("#jump-bottom").classList.toggle("hidden", !far);
+}
+function jumpBottom() {
+  const c = activePane();
+  c.scrollTop = c.scrollHeight;
+  c._pinned = true; // jumping down = "follow again"
+  updateJumpPill();
+}
+for (const sel of ["#chat", "#traj-body"]) {
+  const c = $(sel);
+  c._pinned = true;
+  c.addEventListener("scroll", () => {
+    c._pinned = c.scrollHeight - c.scrollTop - c.clientHeight < JUMP_NEAR;
+    updateJumpPill();
+  });
+}
+$("#jump-bottom").onclick = () => {
+  SFX.play("click");
+  jumpBottom();
+};
+document.addEventListener("keydown", (e) => {
+  if (e.ctrlKey && e.key === "End") {
+    e.preventDefault();
+    SFX.play("click");
+    jumpBottom();
+  }
+});
 
 function textOf(content) {
   if (Array.isArray(content))
@@ -224,6 +266,7 @@ function textOf(content) {
 
 function renderHistory(msgs) {
   $("#chat").innerHTML = "";
+  $("#chat")._pinned = true; // opening a thread always shows its newest message
   for (const m of msgs) {
     if (m.role === "system") continue;
     if (m.compacted) {
@@ -273,6 +316,7 @@ async function send() {
   $("#input").value = "";
   pendingImages = [];
   renderAttachStrip();
+  $("#chat")._pinned = true; // sending always reveals your own message
   addMsg("user", text, images);
   SFX.play("message_sent");
   streaming = true;
@@ -464,9 +508,15 @@ async function send() {
   }
 }
 
+let chargeT = null; // X-buster: STOP charges while a run is live
 function setBusy(b) {
-  $("#btn-send").textContent = b ? "■ STOP" : "SEND ▶";
-  $("#btn-send").classList.toggle("stop", b);
+  const btn = $("#btn-send");
+  btn.textContent = b ? "■ STOP" : "SEND ▶";
+  btn.classList.toggle("stop", b);
+  clearTimeout(chargeT);
+  btn.classList.remove("charged");
+  // a run still streaming after 4s = full charge: glow goes steady-hot
+  if (b) chargeT = setTimeout(() => btn.classList.add("charged"), 4000);
 }
 
 function stopGeneration() {
@@ -492,6 +542,7 @@ async function runShell(cmd) {
   aborter = new AbortController();
   setBusy(true);
   SFX.play("tool_start");
+  $("#chat")._pinned = true; // same reveal rule as send()
   const card = shellBlock(cmd);
   try {
     const res = await fetch("/api/shell", {
@@ -648,6 +699,7 @@ function showTab(which) {
   $("#trajectory").classList.toggle("hidden", !trajVisible);
   $("#tab-chat").classList.toggle("on", !trajVisible);
   $("#tab-traj").classList.toggle("on", trajVisible);
+  updateJumpPill(); // pill follows whichever pane is now visible
   if (!trajVisible) return;
   // while a run streams, the cache is by definition stale — tickRun also
   // re-reads every ~3s once this tab is visible
@@ -719,6 +771,7 @@ function renderTraj() {
     body.appendChild(card);
   });
   body.scrollTop = keepScroll;
+  updateJumpPill(); // rebuild changed content height — pill may need to appear
 }
 
 // ---------- threads ----------
