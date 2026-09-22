@@ -226,6 +226,36 @@ body.hide-reasoning .block.thinking { display: none; }
 .panel-inner label code { color: var(--orange); background: var(--panel); padding: 0 4px; }
 .hidden { display: none !important; }
 .error { color: var(--danger); margin-top: 8px; }
+
+/* scheduled tasks panel — reuses the CONFIG panel/card chrome, narrower */
+#sched-panel { position: fixed; inset: 0; background: rgba(2,6,12,.8); display: flex;
+  align-items: center; justify-content: center; z-index: 10; }
+.sched-inner { width: min(760px, 94vw); }
+#sched-list { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+.sched-empty { color: var(--muted); letter-spacing: 1px; padding: 8px 2px; }
+.sched-card { border: 1px solid var(--line); background: var(--panel); padding: 10px 12px;
+  clip-path: var(--clip); }
+.sched-card.off { opacity: .55; }
+.sched-card.running { border-color: var(--orange); }
+.sched-head { display: flex; align-items: center; gap: 10px; }
+.sched-title { flex: 1; min-width: 0; text-align: left; background: none; border: none;
+  color: var(--text); font: inherit; letter-spacing: 1px; cursor: pointer; padding: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sched-title:hover { color: var(--cyan); }
+.panel-inner .sched-en { display: flex; align-items: center; gap: 5px; margin: 0;
+  color: var(--muted); cursor: pointer; letter-spacing: 1px; }
+.panel-inner .sched-en input { width: auto; margin: 0; accent-color: var(--cyan); }
+.sched-sub { color: var(--cyan); font-size: 12px; letter-spacing: 1px; margin-top: 4px; }
+.sched-sub.dim { color: var(--muted); }
+.sched-actions { display: flex; gap: 8px; margin-top: 8px; }
+.btn.sm { padding: 3px 10px; font-size: 11px; }
+#sched-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 10px; }
+.chip { background: none; border: 1px solid var(--cyan-dim); color: var(--cyan);
+  font: inherit; font-size: 11px; letter-spacing: 1px; padding: 3px 10px; cursor: pointer;
+  clip-path: var(--clip); }
+.chip:hover { border-color: var(--cyan); background: var(--panel); }
+.sched-preview { min-height: 16px; font-size: 12px; letter-spacing: 1px; color: var(--cyan); }
+.sched-preview.bad { color: var(--danger); }
 .cursor::after { content: "▌"; color: var(--cyan); animation: blink .8s steps(1) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 

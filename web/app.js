@@ -47,6 +47,24 @@ const api = {
   async messages(id) { return (await fetch(`/api/threads/${id}/messages`)).json(); },
   async trajectory(id) { return (await fetch(`/api/threads/${id}/trajectory`)).json(); },
   async search(q) { return (await fetch("/api/search?q=" + encodeURIComponent(q))).json(); },
+  async schedules() { return (await fetch("/api/schedules")).json(); },
+  async newSchedule(t) {
+    return (await fetch("/api/schedules", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(t),
+    })).json();
+  },
+  async putSchedule(id, patch) {
+    return (await fetch("/api/schedules/" + id, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch),
+    })).json();
+  },
+  async delSchedule(id) { await fetch("/api/schedules/" + id, { method: "DELETE" }); },
+  async runSchedule(id) {
+    return (await fetch("/api/schedules/" + id + "/run", { method: "POST" })).json();
+  },
+  async cronNext(cron) {
+    return (await fetch("/api/schedules/next?cron=" + encodeURIComponent(cron))).json();
+  },
 };
 
 // token counts are approximate everywhere (chars/4 estimator, same as the
@@ -1063,6 +1081,170 @@ async function saveSettings() {
   SFX.play("settings_saved");
   checkHealth();
 }
+
+// ---------- scheduled tasks ----------
+const SCHED_PRESETS = [
+  ["*/15 * * * *", "15 min"], ["0 * * * *", "hourly"], ["0 9 * * *", "daily 9:00"],
+  ["0 9 * * 1-5", "weekdays 9:00"], ["0 9 * * 1", "mondays 9:00"],
+];
+let schedEditing = null; // null = creating; id = editing that task
+let schedTimer = null; // panel-open poll: RUNNING badge / next_run stay live
+let schedPrevT = null;
+
+const schedWhen = (ts) =>
+  ts ? new Date(ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
+
+async function openSchedules() {
+  SFX.play("click");
+  schedEditing = null;
+  schedShowEditor(false);
+  await refreshSchedules();
+  $("#sched-panel").classList.remove("hidden");
+  clearInterval(schedTimer);
+  schedTimer = setInterval(refreshSchedules, 5000);
+}
+function closeSchedules() {
+  $("#sched-panel").classList.add("hidden");
+  clearInterval(schedTimer);
+}
+
+async function refreshSchedules() {
+  if ($("#sched-panel").classList.contains("hidden")) return;
+  const list = await api.schedules();
+  const box = $("#sched-list");
+  box.innerHTML = "";
+  if (!list.length) {
+    box.appendChild(el("div", "sched-empty", "No tasks yet. + NEW TASK below."));
+    return;
+  }
+  for (const s of list) {
+    const card = el("div", "sched-card" + (s.running ? " running" : "") + (s.enabled ? "" : " off"));
+
+    const head = el("div", "sched-head");
+    const title = el("button", "sched-title", s.title);
+    title.title = "Open this task's run-history thread";
+    title.onclick = () => {
+      closeSchedules();
+      openThread(threads.find((x) => x.id === s.thread_id) || { id: s.thread_id, title: s.title });
+    };
+    head.appendChild(title);
+    const enLab = el("label", "sched-en");
+    const en = document.createElement("input");
+    en.type = "checkbox";
+    en.checked = !!s.enabled;
+    en.onchange = async () => { await api.putSchedule(s.id, { enabled: en.checked }); refreshSchedules(); };
+    enLab.append(en, document.createTextNode(" enabled"));
+    head.appendChild(enLab);
+    card.appendChild(head);
+
+    card.appendChild(el("div", "sched-sub", "⏰ " + s.human + "  ·  " + s.cron));
+    card.appendChild(
+      el("div", "sched-sub dim",
+         (s.running ? "◉ RUNNING · " : "") +
+         (s.enabled ? "next " + schedWhen(s.next_run) : "paused") +
+         " · last " + schedWhen(s.last_run)));
+
+    const act = el("div", "sched-actions");
+    const run = el("button", "btn ghost sm", "▶ RUN");
+    run.title = "Fire one run now (does not shift the cron rhythm)";
+    run.onclick = async () => { SFX.play("click"); await api.runSchedule(s.id); setTimeout(refreshSchedules, 1200); };
+    const edit = el("button", "btn ghost sm", "EDIT");
+    edit.onclick = () => { SFX.play("click"); schedEdit(s); };
+    const del = el("button", "btn ghost sm", "✕ DELETE");
+    del.title = "Delete the task and its run-history thread";
+    del.onclick = async () => { SFX.play("click"); await api.delSchedule(s.id); refreshSchedules(); };
+    act.append(run, edit, del);
+    card.appendChild(act);
+    box.appendChild(card);
+  }
+}
+
+function schedShowEditor(on) {
+  $("#sched-editor").classList.toggle("hidden", !on);
+  $("#btn-sched-save").classList.toggle("hidden", !on);
+}
+
+function schedEdit(s) {
+  schedEditing = s.id;
+  $("#sched-editor-title").textContent = "EDIT TASK";
+  $("#sched-title").value = s.title;
+  $("#sched-prompt").value = s.prompt;
+  $("#sched-cron").value = s.cron;
+  schedShowEditor(true);
+  schedPreviewNow();
+  $("#sched-editor").scrollIntoView({ block: "nearest" });
+}
+
+function schedNew() {
+  SFX.play("click");
+  schedEditing = null;
+  $("#sched-editor-title").textContent = "NEW TASK";
+  $("#sched-title").value = "";
+  $("#sched-prompt").value = "";
+  $("#sched-cron").value = "";
+  $("#sched-preview").textContent = "";
+  schedShowEditor(true);
+  $("#sched-title").focus();
+}
+
+async function saveScheduleTask() {
+  const err = $("#sched-error");
+  err.classList.add("hidden");
+  const body = {
+    title: $("#sched-title").value.trim(),
+    prompt: $("#sched-prompt").value.trim(),
+    cron: $("#sched-cron").value.trim(),
+  };
+  if (!body.title || !body.prompt || !body.cron) {
+    err.textContent = "Title, prompt and cron are all required.";
+    err.classList.remove("hidden");
+    return;
+  }
+  const res = schedEditing ? await api.putSchedule(schedEditing, body) : await api.newSchedule(body);
+  if (!res || res.detail || !res.id) {
+    err.textContent = (res && res.detail) || "save failed";
+    err.classList.remove("hidden");
+    return;
+  }
+  schedEditing = null;
+  schedShowEditor(false);
+  SFX.play("settings_saved");
+  refreshSchedules();
+}
+
+async function schedPreviewNow() {
+  const cron = $("#sched-cron").value.trim();
+  const pv = $("#sched-preview");
+  clearTimeout(schedPrevT);
+  if (!cron) { pv.textContent = ""; pv.classList.remove("bad"); return; }
+  const r = await api.cronNext(cron);
+  if (!r.ok) {
+    pv.textContent = "✕ " + r.error;
+    pv.classList.add("bad");
+  } else {
+    pv.textContent = "☑ " + r.human + " · next " + schedWhen(r.next);
+    pv.classList.remove("bad");
+  }
+}
+
+for (const [cron, label] of SCHED_PRESETS) {
+  const b = el("button", "chip", label);
+  b.title = cron;
+  b.onclick = () => {
+    SFX.play("click");
+    $("#sched-cron").value = cron;
+    schedPreviewNow();
+  };
+  $("#sched-chips").appendChild(b);
+}
+$("#sched-cron").addEventListener("input", () => {
+  clearTimeout(schedPrevT);
+  schedPrevT = setTimeout(schedPreviewNow, 350);
+});
+$("#btn-schedules").onclick = openSchedules;
+$("#btn-sched-close").onclick = () => { SFX.play("click"); closeSchedules(); };
+$("#btn-sched-new").onclick = schedNew;
+$("#btn-sched-save").onclick = saveScheduleTask;
 
 // ---------- boot ----------
 async function checkHealth() {

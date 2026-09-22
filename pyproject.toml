@@ -17,6 +17,7 @@ dependencies = [
     "deepagents>=0.7.14",
     "gtts>=2.5",
     "speechrecognition>=3.10",
+    "croniter>=6.2.4",
 ]
 
 [project.optional-dependencies]

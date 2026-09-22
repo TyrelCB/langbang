@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import agent, config, voice
+from . import agent, config, schedule, voice
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -20,6 +20,8 @@ app = FastAPI(title="LangBang")
 @app.on_event("startup")
 async def _startup():
     await agent.init()
+    await schedule.init()
+    schedule.start_loop()
 
 
 # ---- settings & health ----
@@ -95,6 +97,71 @@ async def trajectory(tid: str):
     """Run-tracker rows + totals for the Trajectory tab / stats bar. Unknown
     thread → empty/zeros rather than 404 (matches the app's endpoint tone)."""
     return await agent.trajectory(tid)
+
+
+# ---- scheduled tasks ----
+
+
+class SchedIn(BaseModel):
+    title: str
+    prompt: str
+    cron: str
+
+
+class SchedPatch(BaseModel):
+    title: str | None = None
+    prompt: str | None = None
+    cron: str | None = None
+    enabled: bool | None = None
+
+
+def _sched_view(row: dict) -> dict:
+    return {**row, "human": schedule.humanize(row["cron"])}
+
+
+@app.get("/api/schedules")
+async def list_schedules():
+    return [_sched_view(r) for r in await schedule.list_schedules()]
+
+
+@app.get("/api/schedules/next")
+async def schedule_next(cron: str = ""):
+    """Live editor preview for a cron string."""
+    return schedule.preview(cron.strip())
+
+
+@app.post("/api/schedules")
+async def new_schedule(body: SchedIn):
+    try:
+        row = await schedule.create(body.title, body.prompt, body.cron)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return _sched_view(row)
+
+
+@app.put("/api/schedules/{sid}")
+async def put_schedule(sid: str, body: SchedPatch):
+    try:
+        row = await schedule.update(sid, body.model_dump(exclude_none=True))
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    if not row:
+        raise HTTPException(404, "no such schedule")
+    return _sched_view(row)
+
+
+@app.delete("/api/schedules/{sid}")
+async def del_schedule(sid: str):
+    if not await schedule.delete(sid):
+        raise HTTPException(404, "no such schedule")
+    return {"ok": True}
+
+
+@app.post("/api/schedules/{sid}/run")
+async def run_schedule(sid: str):
+    if not await schedule.run_now(sid):
+        raise HTTPException(404, "no such schedule")
+    return {"ok": True}
 
 
 # ---- chat search ----

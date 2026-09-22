@@ -32,6 +32,14 @@ but built on the LangChain/LangGraph ecosystem:
   command on the server (same shell + output cap as `run_bash`) **without
   spending a model call** — the exchange is appended to the thread, so the
   agent sees the output on its next turn (Claude Code's `!cmd`, same idea)
+- **Scheduled tasks** (⏰ SCHEDULES): cron-driven agent turns that run with no
+  client — each task owns a dedicated thread where every firing posts its
+  prompt as a real user turn, so run history accumulates and the agent's
+  context carries over between runs. Editor: 5-field cron + preset chips +
+  live preview (`GET /api/schedules/next`). Runs are serialized one at a time;
+  fires missed while the server was down are skipped, never replayed;
+  "▶ RUN" fires one off without shifting the cron rhythm. Deleting a task
+  takes its notebook thread with it.
 
 ## Spark services wired in by default
 

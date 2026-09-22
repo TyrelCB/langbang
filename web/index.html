@@ -16,6 +16,7 @@
     <div id="search-results" class="hidden"></div>
     <div class="sidebar-footer">
       <button id="btn-settings" class="btn ghost">⚙ CONFIG</button>
+      <button id="btn-schedules" class="btn ghost" title="cron-scheduled agent runs">⏰ SCHEDULES</button>
       <button id="btn-sound" class="btn ghost" title="sound toggle">♪ SOUND: OFF</button>
       <div id="health" class="health">LINK: …</div>
     </div>
@@ -161,6 +162,27 @@
         <button id="btn-save" class="btn accent">SAVE</button>
       </div>
       <div id="settings-error" class="error hidden"></div>
+    </div>
+  </div>
+
+  <div id="sched-panel" class="hidden">
+    <div class="panel-inner sched-inner">
+      <h2>SCHEDULED TASKS</h2>
+      <div id="sched-list"></div>
+      <section class="cfg-card wide hidden" id="sched-editor">
+        <h3 id="sched-editor-title">NEW TASK</h3>
+        <label>Title <input id="sched-title" type="text" placeholder="Morning news" autocomplete="off"></label>
+        <label>Prompt — sent to the agent on every run <textarea id="sched-prompt" rows="3" placeholder="Pull world headlines, summarize into 5 bullets, save as a note."></textarea></label>
+        <label>Cron <input id="sched-cron" type="text" placeholder="0 9 * * *" autocomplete="off" spellcheck="false"></label>
+        <div id="sched-chips"></div>
+        <div id="sched-preview" class="sched-preview"></div>
+      </section>
+      <div class="row end">
+        <button id="btn-sched-new" class="btn ghost">+ NEW TASK</button>
+        <button id="btn-sched-close" class="btn ghost">CLOSE</button>
+        <button id="btn-sched-save" class="btn accent">SAVE</button>
+      </div>
+      <div id="sched-error" class="error hidden"></div>
     </div>
   </div>
 
