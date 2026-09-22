@@ -43,6 +43,7 @@ const api = {
     })).json();
   },
   async delThread(id) { await fetch("/api/threads/" + id, { method: "DELETE" }); },
+  async touchThread(id) { await fetch("/api/threads/" + id + "/touch", { method: "POST" }); },
   async messages(id) { return (await fetch(`/api/threads/${id}/messages`)).json(); },
   async trajectory(id) { return (await fetch(`/api/threads/${id}/trajectory`)).json(); },
   async search(q) { return (await fetch("/api/search?q=" + encodeURIComponent(q))).json(); },
@@ -740,10 +741,12 @@ async function openThread(t) {
   SFX.play("click");
   threadId = t.id;
   $("#chat-title").textContent = t.title.toUpperCase();
+  const bumped = api.touchThread(t.id); // resuming = current: sorts it to the top
   const msgs = await api.messages(t.id);
   renderHistory(msgs);
   replayTodos(msgs); // last write_todos call re-draws the panel on switch/reload
   refreshStats();
+  await bumped; // order may already have moved — refresh AFTER the bump lands
   refreshThreads();
 }
 

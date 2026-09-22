@@ -802,6 +802,13 @@ async def _touch(thread_id: str, first_text: str) -> None:
     await _db.commit()
 
 
+async def touch_thread(thread_id: str) -> None:
+    """Resume-bump: opening a thread counts as current, so it sorts to the
+    top of the sidebar. Unknown/deleted ids are a no-op — never resurrect."""
+    await _db.execute("UPDATE threads SET updated_at=? WHERE id=?", (time.time(), thread_id))
+    await _db.commit()
+
+
 # ---- streaming runner ----
 
 async def run_chat(

@@ -78,6 +78,13 @@ async def del_thread(tid: str):
     return {"ok": True}
 
 
+@app.post("/api/threads/{tid}/touch")
+async def touch_thread(tid: str):
+    """Resume-bump: opening a thread moves it to the top of the sidebar."""
+    await agent.touch_thread(tid)
+    return {"ok": True}
+
+
 @app.get("/api/threads/{tid}/messages")
 async def messages(tid: str):
     return await agent.history(tid)
