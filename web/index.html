@@ -69,41 +69,61 @@
   <div id="settings-panel" class="hidden">
     <div class="panel-inner">
       <h2>CONFIGURATION</h2>
-      <label>Backend URL <input id="set-base_url" type="text"></label>
-      <label>Model <input id="set-model" type="text"></label>
-      <div class="row">
-        <label>Temperature <input id="set-temperature" type="number" step="0.1" min="0" max="2"></label>
-        <label>Max tokens <input id="set-max_tokens" type="number" step="256" min="256"></label>
-        <label>Max agent iterations <input id="set-max_react_iterations" type="number" step="1" min="1" max="200"></label>
-      </div>
-      <label>System prompt <textarea id="set-system_prompt" rows="3"></textarea></label>
-      <div class="group-label">REASONING</div>
-      <div class="tools-box">
-        <label class="chk"><input type="checkbox" id="set-thinking"> enable thinking — model drafts reasoning first (extra tokens per turn)</label>
-      </div>
-      <div class="group-label">CONTEXT</div>
-      <div class="tools-box">
-        <label class="chk"><input type="checkbox" id="set-compact"> auto-compact long threads — summarize old messages before the model re-reads them</label>
-      </div>
-      <div class="row">
-        <label>Compact past ~tokens <input id="set-compact_trigger_tokens" type="number" step="1000" min="0" title="0 disables"></label>
-        <label>Keep newest msgs <input id="set-compact_keep_messages" type="number" step="1" min="4"></label>
-        <label>Summary tokens <input id="set-compact_summary_tokens" type="number" step="100" min="100"></label>
-      </div>
-      <div class="group-label">MULTIMODAL</div>
-      <div class="tools-box">
-        <label class="chk"><input type="checkbox" id="set-vision"> model supports vision (image paste / attach)</label>
-      </div>
-      <div class="group-label">DEEP AGENT</div>
-      <div class="tools-box">
-        <label class="chk"><input type="checkbox" id="set-deep_agent"> deep agent mode — planning (write_todos), sub-agent delegation (task), built-in file tools (replaces read_file/write_file below)</label>
-      </div>
-      <div class="group-label">SKILLS</div>
-      <div class="tools-box">
-        <label class="chk"><input type="checkbox" id="set-skills_enabled"> load skills — Hermes tree (~/.hermes/skills, read-only) + ~/.langbang/skills (agent can author here); deep agent mode only</label>
-      </div>
-      <div class="group-label">VOICE</div>
-      <div class="tools-box">
+      <div class="cfg-grid">
+      <section class="cfg-card wide">
+        <h3>MODEL</h3>
+        <div class="row">
+          <label>Backend URL <input id="set-base_url" type="text"></label>
+          <label>Model <input id="set-model" type="text"></label>
+        </div>
+        <div class="row">
+          <label>Temperature <input id="set-temperature" type="number" step="0.1" min="0" max="2"></label>
+          <label>Max tokens <input id="set-max_tokens" type="number" step="256" min="256"></label>
+          <label>Max agent iterations <input id="set-max_react_iterations" type="number" step="1" min="1" max="200"></label>
+        </div>
+        <label>System prompt <textarea id="set-system_prompt" rows="3"></textarea></label>
+      </section>
+      <section class="cfg-card">
+        <h3>REASONING</h3>
+        <div class="tools-box col">
+          <label class="chk"><input type="checkbox" id="set-thinking"> enable thinking — model drafts reasoning first (extra tokens per turn)</label>
+        </div>
+      </section>
+      <section class="cfg-card">
+        <h3>CONTEXT</h3>
+        <div class="tools-box col">
+          <label class="chk"><input type="checkbox" id="set-compact"> auto-compact long threads — summarize old messages before the model re-reads them</label>
+        </div>
+        <div class="row">
+          <label>Compact past ~tokens <input id="set-compact_trigger_tokens" type="number" step="1000" min="0" title="0 disables"></label>
+          <label>Keep newest msgs <input id="set-compact_keep_messages" type="number" step="1" min="4"></label>
+          <label>Summary tokens <input id="set-compact_summary_tokens" type="number" step="100" min="100"></label>
+        </div>
+      </section>
+      <section class="cfg-card">
+        <h3>MULTIMODAL</h3>
+        <div class="tools-box col">
+          <label class="chk"><input type="checkbox" id="set-vision"> model supports vision (image paste / attach)</label>
+        </div>
+      </section>
+      <section class="cfg-card">
+        <h3>DEEP AGENT</h3>
+        <div class="tools-box col">
+          <label class="chk"><input type="checkbox" id="set-deep_agent"> deep agent mode — planning (write_todos), sub-agent delegation (task), built-in file tools (replaces read_file/write_file below)</label>
+        </div>
+      </section>
+      <section class="cfg-card">
+        <h3>SKILLS</h3>
+        <div class="tools-box col">
+          <label class="chk"><input type="checkbox" id="set-skills_enabled"> load skills — Hermes tree (~/.hermes/skills, read-only) + ~/.langbang/skills (agent can author here); deep agent mode only</label>
+        </div>
+      </section>
+      <section class="cfg-card">
+        <h3>LOCAL TOOLS</h3>
+        <div id="set-tools" class="tools-box"></div>
+      </section>
+      <section class="cfg-card wide">
+        <h3>VOICE</h3>
         <div class="row">
           <label>TTS provider
             <select id="set-voice-tts_provider">
@@ -130,10 +150,12 @@
           <label>gcloud TTS lang <input id="set-voice-gcloud_tts_lang" type="text" placeholder="en-US"></label>
           <label>gcloud TTS voice <input id="set-voice-gcloud_tts_voice" type="text" placeholder="en-US-Wavenet-J"></label>
         </div>
+      </section>
+      <section class="cfg-card wide">
+        <h3>MCP SERVERS</h3>
+        <label>(JSON — add <code>"disabled": true</code> to park one) <textarea id="set-mcp" rows="6" spellcheck="false"></textarea></label>
+      </section>
       </div>
-      <div class="group-label">LOCAL TOOLS</div>
-      <div id="set-tools" class="tools-box"></div>
-      <label>MCP servers (JSON — add <code>"disabled": true</code> to park one) <textarea id="set-mcp" rows="8" spellcheck="false"></textarea></label>
       <div class="row end">
         <button id="btn-cancel" class="btn ghost">CANCEL</button>
         <button id="btn-save" class="btn accent">SAVE</button>
