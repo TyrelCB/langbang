@@ -289,6 +289,13 @@ async function send() {
     todosTouched: false, // did THIS run write the list? drives the stale badge
   };
   $("#sb-live").classList.remove("hidden");
+  // In-pane liveness card: on a big context the first token can take 30s+
+  // (prefill), and a chat pane that shows nothing reads as "broken". Lives
+  // until the first stream event of any kind (handleEvent) or teardown.
+  const ctxTok = (threads.find((x) => x.id === threadId) || {}).context_tokens || 0;
+  run.waitLabel = "⏳ AWAITING MODEL" + (ctxTok ? ` — CTX ~${fmtTok(ctxTok)}` : "");
+  run.waiting = addBlock("waiting", run.waitLabel + " …");
+  run.waiting.open = true;
   tickRun();
 
   let asstMsg = null; // created lazily on first visible token — no empty cursor boxes
@@ -347,6 +354,7 @@ async function send() {
       SFX.play("error");
     }
   }
+  if (run.waiting) run.waiting.remove(); // zero-event ends (error/abort) never hit handleEvent
   if (asstMsg) {
     flushRender();
     asstMsg.classList.remove("cursor");
@@ -370,6 +378,7 @@ async function send() {
   refreshStats();
 
   function handleEvent(ev) {
+    if (run && run.waiting) { run.waiting.remove(); run.waiting = null; } // first sign of life
     if (ev.type === "token") {
       if (ev.text.trim()) ensureAsst(); // whitespace-only content never opens a bubble
       if (asstMsg) { asstRaw += ev.text; scheduleRender(); }
@@ -522,6 +531,10 @@ function tickRun() {
   if (s.ttft_n) parts.push(`TTFT ${Math.round((1000 * s.ttfts) / s.ttft_n)}ms`);
   if (s.in || s.out) parts.push(`IN ${fmtTok(s.in)} · OUT ${fmtTok(s.out)}`);
   bar.textContent = parts.join("  │  "); // wipes stale chips too
+  // waiting card carries the visible clock until the model speaks
+  if (run.waiting?.isConnected)
+    run.waiting.querySelector("summary").textContent =
+      `${run.waitLabel} · WAITED ${fmtClock((Date.now() - run.t0) / 1000)} …`;
   // one live timer chip per active sub-agent (reads as ×N when parallel)
   for (const sub of run.subs.values())
     bar.appendChild(

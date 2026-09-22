@@ -135,6 +135,10 @@ body.hide-reasoning .block.thinking { display: none; }
 .block.shell summary { border-left-color: var(--green); color: var(--green); }
 .block pre { margin: 0; padding: 8px; background: var(--bg2); overflow-x: auto; white-space: pre-wrap; }
 .block[open] summary { color: var(--text); }
+/* waiting card — sits after [open] so its orange survives while expanded */
+.block.waiting summary { border-left-color: var(--orange); color: var(--orange);
+  animation: lb-pulse 1.6s ease-in-out infinite; }
+@keyframes lb-pulse { 50% { opacity: 0.55; } }
 
 /* attach strip (pending images above composer) */
 #attach-strip { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px; }

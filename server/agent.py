@@ -54,6 +54,19 @@ register_harness_profile(
 
 logger = logging.getLogger("langbang.agent")
 
+_bg: set = set()  # fire-and-forget tasks kept referenced until done
+
+
+def _spawn(coro):
+    try:
+        t = asyncio.get_running_loop().create_task(coro)
+    except RuntimeError:  # loop already gone (interpreter shutdown) — drop it
+        coro.close()
+        return None
+    _bg.add(t)
+    t.add_done_callback(_bg.discard)
+    return t
+
 _checkpointer: AsyncSqliteSaver | None = None
 _db: aiosqlite.Connection | None = None
 _edb: aiosqlite.Connection | None = None  # event-log connection (trajectory rows)
@@ -1022,6 +1035,18 @@ async def run_chat(
     except Exception as e:  # noqa: BLE001 - stream errors to the UI
         await _log(thread_id, turn_id, "error", meta={"message": str(e)[:500]})
         yield {"type": "error", "message": f"{type(e).__name__}: {e}"}
+    except (asyncio.CancelledError, GeneratorExit):
+        # Client gone: a tab refresh, STOP click, or proxy cut cancels the
+        # response task and the run dies with it mid-air. Both inherit
+        # BaseException, so the arm above never saw them — the thread kept
+        # only a lone user row and looked like the message vanished into a
+        # void. Breadcrumb the trajectory; fire-and-forget, because awaiting
+        # anything here either re-raises (CancelledError) or is illegal
+        # (GeneratorExit inside a closing generator).
+        _spawn(_log(thread_id, turn_id, "error", meta={
+            "message": "RUN CANCELLED — client disconnected mid-run (refresh or STOP)",
+        }))
+        raise
 
 
 SHELL_TIMEOUT = 300  # wall clock for a user-typed `!cmd`, same cap as run_bash
