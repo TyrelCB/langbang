@@ -73,6 +73,13 @@ DEFAULTS = {
         "write_file": True,
         "list_dir": True,
         "crawl_url": True,
+        # LangBang's own scheduler, agent-facing (server/schedule.py)
+        "create_scheduled_task": True,
+        "list_scheduled_tasks": True,
+        "update_scheduled_task": True,
+        "set_scheduled_task_enabled": True,
+        "run_scheduled_task_now": True,
+        "delete_scheduled_task": True,
     },
     # Voice. Defaults ride the same keyless Google endpoints telemarketing
     # used (gTTS + SpeechRecognition.recognize_google) — unofficial/gray-ToS,
@@ -91,6 +98,14 @@ DEFAULTS = {
 }
 
 
+def _backfill(merged: dict) -> dict:
+    # top-level merge can't introduce sub-keys added since a settings file
+    # was written — CONFIG builds its LOCAL TOOLS checkboxes from this dict,
+    # so old files must still see the new tools (default: enabled)
+    merged["local_tools"] = {**DEFAULTS["local_tools"], **(merged.get("local_tools") or {})}
+    return merged
+
+
 def load() -> dict:
     with _lock:
         try:
@@ -98,12 +113,12 @@ def load() -> dict:
                 merged = {**DEFAULTS, **json.load(f)}
         except FileNotFoundError:
             merged = dict(DEFAULTS)
-        return merged
+        return _backfill(merged)
 
 
 def save(settings: dict) -> dict:
     with _lock:
-        merged = {**DEFAULTS, **settings}
+        merged = _backfill({**DEFAULTS, **settings})
         tmp = SETTINGS_PATH + ".tmp"
         with open(tmp, "w") as f:
             json.dump(merged, f, indent=2)

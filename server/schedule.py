@@ -216,6 +216,9 @@ def humanize(cron: str) -> str:
         return "every minute"
     if m.startswith("*/") and H == "*" and dom == "*" and dow == "*":
         return f"every {m[2:]} min"
+    if m.isdigit() and H.startswith("*/") and dom == "*" and mon == "*" and dow == "*":
+        hm = f"{int(m):02d}:00"
+        return f"every {H[2:]} hours at {hm}"
     if hm and H == "*" and dom == "*" and dow == "*":
         return f"hourly at :{m.zfill(2)}"
     if hm and dom == "*" and mon == "*" and dow == "1-5":

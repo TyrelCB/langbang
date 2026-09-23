@@ -39,7 +39,10 @@ but built on the LangChain/LangGraph ecosystem:
   live preview (`GET /api/schedules/next`). Runs are serialized one at a time;
   fires missed while the server was down are skipped, never replayed;
   "▶ RUN" fires one off without shifting the cron rhythm. Deleting a task
-  takes its notebook thread with it.
+  takes its notebook thread with it. The agent manages the same surface via
+  tools (`create/list/update/set_scheduled_task_enabled/run_scheduled_task_now/
+  delete_scheduled_task` in CONFIG → LOCAL TOOLS), so "check X every 4 hours"
+  said in chat becomes a real LangBang schedule — not crontab improvisation.
 
 ## Spark services wired in by default
 
