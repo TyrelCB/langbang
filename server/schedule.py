@@ -108,7 +108,12 @@ async def _fire(row: dict, manual: bool = False) -> None:
         logger.info("schedule %r firing in thread %s", row["title"], row["thread_id"])
         try:
             s = config.load()  # live config per run, same contract as /api/chat
-            async for _ev in agent.run_chat(row["thread_id"], row["prompt"], s):
+            # stamp the run so its thread bubble shows WHEN (a schedule's
+            # thread accumulates many runs; this says which output is which)
+            async for _ev in agent.run_chat(
+                row["thread_id"], row["prompt"], s,
+                sched={"ts": time.time(), "manual": bool(manual)},
+            ):
                 pass
         except Exception:  # noqa: BLE001
             logger.exception("schedule %r run crashed", row["title"])

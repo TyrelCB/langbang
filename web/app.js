@@ -342,6 +342,17 @@ function textOf(content) {
   return typeof content === "string" ? content : JSON.stringify(content);
 }
 
+function schedStrip(s) {
+  // run stamp for a scheduled turn (server attaches lb_sched kwargs to the
+  // HumanMessage — see schedule._fire). The strip lives INSIDE the user
+  // bubble: #chat child indices must stay 1:1 with rendered messages or the
+  // search-jump pos mapping (server counts, client children[pos]) drifts.
+  const t = new Date(s.ts * 1000), p = (n) => String(n).padStart(2, "0");
+  return el("div", "sched-strip", "⏰ SCHEDULED RUN" + (s.manual ? " · MANUAL" : "") +
+    " · " + t.getFullYear() + "-" + p(t.getMonth() + 1) + "-" + p(t.getDate()) +
+    " " + p(t.getHours()) + ":" + p(t.getMinutes()) + ":" + p(t.getSeconds()));
+}
+
 function renderHistory(msgs) {
   $("#chat").innerHTML = "";
   $("#chat")._pinned = true; // opening a thread always shows its newest message
@@ -357,8 +368,10 @@ function renderHistory(msgs) {
       shellSeal(b, m.shell);
       continue;
     }
-    if (m.role === "human") addMsg("user", textOf(m.content), imagesOf(m.content));
-    else if (m.role === "ai") {
+    if (m.role === "human") {
+      const b = addMsg("user", textOf(m.content), imagesOf(m.content));
+      if (m.sched) b.prepend(schedStrip(m.sched));
+    } else if (m.role === "ai") {
       if (m.thinking) {
         const b = addBlock("thinking", "◈ THINKING");
         b.querySelector("pre").textContent = m.thinking;

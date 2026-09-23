@@ -105,6 +105,9 @@ body.hide-reasoning .block.thinking { display: none; }
 .msg.user { align-self: flex-end; border-color: var(--orange); }
 .msg.assistant { align-self: flex-start; border-color: var(--cyan-dim); }
 .msg.error { align-self: center; border-color: var(--danger); color: var(--danger); }
+/* run stamp inside a scheduled turn's user bubble (see schedStrip in app.js) */
+.sched-strip { font-size: 11px; letter-spacing: 1px; color: var(--cyan);
+  border-bottom: 1px dashed var(--line); padding-bottom: 5px; margin-bottom: 7px; }
 
 /* markdown content inside messages */
 .msg > :first-child { margin-top: 0; }

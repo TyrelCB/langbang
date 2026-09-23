@@ -586,6 +586,9 @@ def _msg_dict(m) -> dict:
     shell = (m.additional_kwargs or {}).get("lb_shell")
     if shell:
         d["shell"] = shell  # UI renders it as a $ command card (see run_user_shell)
+    sched = (m.additional_kwargs or {}).get("lb_sched")
+    if sched:
+        d["sched"] = sched  # UI stamps the bubble ⏰ SCHEDULED RUN (see schedule._fire)
     return d
 
 
@@ -825,7 +828,11 @@ async def touch_thread(thread_id: str) -> None:
 # ---- streaming runner ----
 
 async def run_chat(
-    thread_id: str, user_text: str, s: dict, images: list[str] | None = None
+    thread_id: str,
+    user_text: str,
+    s: dict,
+    images: list[str] | None = None,
+    sched: dict | None = None,
 ) -> AsyncIterator[dict]:
     """Yield SSE-ready dicts: token | thinking | tool_start | tool_end |
     todos | sub | usage | done | error. Trajectory rows are persisted to
@@ -871,7 +878,18 @@ async def run_chat(
         tool_t0: dict[str, tuple[float, str | None, object]] = {}
         sub_m_t0: dict[str, float] = {}
         async for ev in agent.astream_events(
-            {"messages": [HumanMessage(content=content)]}, cfg, version="v2"
+            {
+                "messages": [
+                    HumanMessage(
+                        content=content,
+                        # scheduled-run stamp {ts, manual}: survives the
+                        # messages reducer/checkpoint, surfaced by _msg_dict
+                        additional_kwargs={"lb_sched": sched} if sched else {},
+                    )
+                ]
+            },
+            cfg,
+            version="v2",
         ):
             kind = ev["event"]
             if kind == "on_tool_start" and ev["name"] == "task":
