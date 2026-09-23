@@ -10,10 +10,14 @@ backend, so the design's relative levels live in the manifest `gain` field
 (`web/sfx.js` applies it). `thinking-loop` is a best-effort loop: full 3 s
 with 10 ms edge fades, not a true crossfade seam.
 
-Generation is a /tmp script pattern (submit `audio_sfx` jobs →
-`media_job_wait` → fetch `/files/...`), not a committed tool — regenerate by
-rebuilding it against SOUND_DESIGN.md's table; job durations must be >= 1.0 s
-(API minimum; short cues are trimmed down from 1 s renders).
+Regeneration is a committed tool: `server/sfxgen.py` holds the machine cue
+table (this doc is the human brief) and runs the full path — `audio_sfx` job →
+`media_job_wait` → fetch `/files/...` → trim/normalize → ogg, writing
+atomically into `web/sounds/`. Two front doors: CONFIG → SOUNDBOARD (▶
+audition, ↻ REGEN re-renders one cue with a fresh seed and swaps it into the
+live client cache) and `python -m server.sfxgen <slot> [--fresh]` for
+deliberate CLI passes. Job durations must be >= 1.0 s (API minimum; short cues
+are trimmed down from 1 s renders).
 
 ## Style brief
 Mega Man X (SNES) menu/UI audio: short, punchy, 16-bit "digital rock".

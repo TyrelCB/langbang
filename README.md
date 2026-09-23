@@ -68,7 +68,8 @@ points at them:
   incl. `audio_sfx` (stable-audio-sfx backend). Registered parked
   (`disabled`) by default so its tool schemas don't ride every prefill —
   enable it in CONFIG → MCP SERVERS when you want media gen from chat. It
-  rendered this app's own sound pack (see `SOUND_DESIGN.md`)
+  rendered this app's own sound pack and backs CONFIG → SOUNDBOARD cue
+  regeneration even while parked (see `SOUND_DESIGN.md`, `server/sfxgen.py`)
 - **LangSmith** tracing — set `LANGCHAIN_API_KEY` + `LANGCHAIN_TRACING_V2=true`
   in the environment and it activates automatically via langchain-core
 - **Vision / multimodal** — paste or attach images in the composer, gated by
@@ -117,7 +118,9 @@ points at them:
 - Web UI: dark Mega Man X HUD by default, streaming chat, visible
   thinking/tool-call cards, thread management, live config editor
 - Sound effects: Mega Man X-style cues in `web/sounds/` (generated via
-  `audio_sfx` on the all-media MCP server) — `♪ SOUND` button toggles them
+  `audio_sfx` on the all-media MCP server) — `♪ SOUND` button toggles them;
+  CONFIG → SOUNDBOARD auditions any cue and ↻ REGEN re-renders just that one
+  (committed prompt, fresh seed) live, without a restart or reload
 - X-SIM: built-in Mega Man X style platformer (⚔ button / `G`) for waiting on
   agent runs — deep link with `?game=1`
 
