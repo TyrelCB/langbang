@@ -2,9 +2,11 @@
 import json
 import os
 import re
+import shutil
+import uuid
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -216,6 +218,49 @@ async def search(q: str = ""):
         if len(out) >= SEARCH_LIMIT:
             return out[:SEARCH_LIMIT]
     return out
+
+
+# ---- file attachments (non-image; the agent opens them from disk) ----
+
+MAX_FILES = 6
+MAX_FILE_BYTES = 20 * 1024 * 1024
+UPLOADS_DIR = os.path.join(config.DATA_DIR, "uploads")
+
+
+@app.post("/api/upload")
+async def upload(files: list[UploadFile] = File(...)):
+    """Store attached files under data/uploads/<token>/ and return their
+    read_file-able paths. Non-image attachments never travel inline to the
+    model: the chat message carries the server-side path instead, and the
+    agent opens the file with its file tools (or ffprobe etc. via run_bash)."""
+    if not 1 <= len(files) <= MAX_FILES:
+        raise HTTPException(400, f"1..{MAX_FILES} files per message")
+    token = uuid.uuid4().hex[:12]
+    out_dir = os.path.join(UPLOADS_DIR, token)
+    out = []
+    try:
+        for f in files:
+            # browser-supplied basename only; strip separators/traversal so the
+            # write can never escape the (already-unique) token dir
+            raw = (f.filename or "").replace("\\", "/").rsplit("/", 1)[-1]
+            name = re.sub(r"[^\w.\- ]+", "_", raw).strip() or "file"
+            dest = os.path.join(out_dir, name)
+            os.makedirs(out_dir, exist_ok=True)
+            size = 0
+            with open(dest, "wb") as fh:
+                while chunk := await f.read(1 << 20):
+                    size += len(chunk)
+                    if size > MAX_FILE_BYTES:
+                        raise HTTPException(
+                            413,
+                            f"{name} too large (max {MAX_FILE_BYTES // 1048576} MB)",
+                        )
+                    fh.write(chunk)
+            out.append({"name": name, "path": dest, "size": size})
+    except HTTPException:
+        shutil.rmtree(out_dir, ignore_errors=True)  # leave no half-written batch
+        raise
+    return {"files": out}
 
 
 # ---- chat (SSE stream) ----

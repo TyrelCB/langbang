@@ -65,6 +65,12 @@ points at them:
   vision-capable on the Spark → on by default. Max 4 images / ~5 MB each per
   message; note images re-prefill on every history replay, so attachments are
   expensive on a single Spark — keep them few and small.
+- **File attachments** — 📎 ATTACH takes any file (json/mp4/mp3/…): recognized
+  images ride the base64 vision path when vision is on; everything else
+  uploads to `data/uploads/<token>/` (`POST /api/upload`, ≤6 files / ≤20 MB
+  each) and the message gains an `[attached file] … read it from: <path>`
+  line — the agent opens it with its file tools or `run_bash` (ffprobe on a
+  video, parse a ComfyUI workflow json…). Attach works with vision off.
 - **Reasoning (thinking)** — off by default; CONFIG toggle "enable thinking"
   sends `chat_template_kwargs.enable_thinking` to sglang/vLLM, whose separated
   `reasoning_content` deltas are recovered via a small `ChatOpenAI` subclass

@@ -13,8 +13,14 @@ let streaming = false;
 let aborter = null;
 let supportsVision = false;
 let pendingImages = []; // data URLs awaiting send
+let pendingFiles = []; // {file} non-image attachments, uploaded at send time
+let uploading = false; // blocks re-Enter while attachment bytes are in flight
 const MAX_IMAGES = 4;
 const MAX_IMG_BYTES = 6 * 1024 * 1024;
+// non-image attachments upload to data/uploads/ on send; caps mirror main.py
+const MAX_FILES = 6;
+const MAX_FILE_BYTES = 20 * 1024 * 1024;
+const IMG_TYPE_RE = new RegExp("^image/(png|jpeg|webp|gif)$");
 
 // agentic-visibility state
 let run = null;        // live-run bundle {t0, iv, tools:Map, subs:Map, stats} while streaming
@@ -152,10 +158,14 @@ function enhanceCodeBlocks(root) {
   });
 }
 
+const fmtBytes = (n) =>
+  n >= 1048576 ? (n / 1048576).toFixed(1) + " MB"
+    : n >= 1024 ? Math.round(n / 1024) + " kB" : n + " B";
+
 // ---------- images: paste / attach ----------
 function addImage(file) {
   if (!file || !supportsVision) return;
-  if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) return;
+  if (!IMG_TYPE_RE.test(file.type)) return;
   if (pendingImages.length >= MAX_IMAGES) return;
   if (file.size > MAX_IMG_BYTES) return;
   const fr = new FileReader();
@@ -164,6 +174,31 @@ function addImage(file) {
     renderAttachStrip();
   };
   fr.readAsDataURL(file);
+}
+
+// ---------- non-image attachments: upload on send, agent reads from disk ---
+function addFile(file) {
+  if (!file) return;
+  if (pendingFiles.length >= MAX_FILES) {
+    addMsg("error", `⚠ max ${MAX_FILES} files per message — ${file.name} dropped`);
+    return;
+  }
+  if (file.size > MAX_FILE_BYTES) {
+    addMsg("error", `⚠ ${file.name} too large (max ${MAX_FILE_BYTES / 1048576} MB) — dropped`);
+    return;
+  }
+  pendingFiles.push({ file });
+  renderAttachStrip();
+}
+
+// picker routing: recognized images ride the base64 vision path (when the
+// model has vision); everything else — and images without vision — becomes a
+// file attachment the agent opens from disk with its tools
+function ingestFiles(list) {
+  for (const f of list || []) {
+    if (IMG_TYPE_RE.test(f.type) && supportsVision) addImage(f);
+    else addFile(f);
+  }
 }
 
 function renderAttachStrip() {
@@ -176,6 +211,17 @@ function renderAttachStrip() {
     const x = el("span", "x", "✕");
     x.onclick = () => { pendingImages.splice(i, 1); renderAttachStrip(); };
     chip.append(img, x);
+    strip.appendChild(chip);
+  });
+  pendingFiles.forEach((p, i) => {
+    const chip = el("div", "attach file");
+    chip.append(
+      el("span", "fname", "📄 " + p.file.name),
+      el("span", "fsize", fmtBytes(p.file.size)),
+    );
+    const x = el("span", "x", "✕");
+    x.onclick = () => { pendingFiles.splice(i, 1); renderAttachStrip(); };
+    chip.append(x);
     strip.appendChild(chip);
   });
 }
@@ -320,9 +366,9 @@ function renderHistory(msgs) {
 async function send() {
   const text = $("#input").value.trim();
   const images = pendingImages;
-  if ((!text && !images.length) || streaming) return;
+  if ((!text && !images.length && !pendingFiles.length) || streaming || uploading) return;
   // `!cmd` = shell mode (Claude Code style): run on the server, no model call
-  if (!images.length && text.startsWith("!")) {
+  if (!images.length && !pendingFiles.length && text.startsWith("!")) {
     const cmd = text.slice(1).trim();
     if (!cmd) return;
     $("#input").value = "";
@@ -331,11 +377,39 @@ async function send() {
   }
   stopSpeaking(); // a new run interrupts whatever was being read aloud
   if (!threadId) await newThread();
+  // upload attachments first; their server-side paths go INTO the message
+  // body (that's what the agent — and the persisted history — sees). On
+  // failure the draft survives untouched: fix the network, press SEND again.
+  let msgText = text;
+  if (pendingFiles.length) {
+    uploading = true;
+    setBusy(true); // button reads busy while bytes are in flight
+    try {
+      const fd = new FormData();
+      pendingFiles.forEach((p) => fd.append("files", p.file));
+      const r = await fetch("/api/upload", { method: "POST", body: fd });
+      if (!r.ok) {
+        throw new Error((await r.json().catch(() => ({}))).detail || "HTTP " + r.status);
+      }
+      const lines = (await r.json()).files.map(
+        (f) => `[attached file] ${f.name} (${fmtBytes(f.size)}) — read it from: ${f.path}`,
+      );
+      msgText = [text, ...lines].filter(Boolean).join("\n\n");
+    } catch (e) {
+      addMsg("error", "⚠ attachment upload failed: " + e.message);
+      setBusy(false);
+      uploading = false;
+      return;
+    }
+    setBusy(false);
+    uploading = false;
+  }
   $("#input").value = "";
   pendingImages = [];
+  pendingFiles = [];
   renderAttachStrip();
   $("#chat")._pinned = true; // sending always reveals your own message
-  addMsg("user", text, images);
+  addMsg("user", msgText, images);
   SFX.play("message_sent");
   streaming = true;
   aborter = new AbortController();
@@ -391,7 +465,7 @@ async function send() {
   try {
     const res = await fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ thread_id: threadId, text, images }),
+      body: JSON.stringify({ thread_id: threadId, text: msgText, images }),
       signal: aborter.signal,
     });
     const reader = res.body.getReader();
@@ -1254,7 +1328,8 @@ async function checkHealth() {
   el2.className = "health " + (h.backend_up ? "up" : "down");
   $("#model-tag").textContent = h.model;
   supportsVision = !!h.supports_vision;
-  $("#btn-attach").classList.toggle("hidden", !supportsVision);
+  // attach stays offered without vision: non-image files (and images as
+  // plain files) ride the upload path — the agent opens them from disk
   if (!supportsVision && pendingImages.length) { pendingImages = []; renderAttachStrip(); }
 }
 
@@ -1283,7 +1358,7 @@ $("#input").addEventListener("paste", (e) => {
 });
 $("#btn-attach").onclick = () => { SFX.play("click"); $("#file-img").click(); };
 $("#file-img").onchange = (e) => {
-  [...e.target.files].forEach(addImage);
+  ingestFiles(e.target.files);
   e.target.value = ""; // allow re-selecting the same file
 };
 $("#tab-chat").onclick = () => { SFX.play("click"); showTab("chat"); };
