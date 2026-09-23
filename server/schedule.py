@@ -16,6 +16,7 @@ import asyncio
 import logging
 import time
 import uuid
+from datetime import datetime
 
 from croniter import croniter
 
@@ -84,7 +85,12 @@ async def _loop() -> None:
 # ---- firing ----
 
 def _next_run(cron: str, frm: float | None = None) -> float:
-    return croniter(cron, frm or time.time()).get_next(float)
+    # croniter matches fields against the clock of whatever base it's given:
+    # a float epoch is read as UTC, so '0 9 * * *' would fire 09:00 UTC, not
+    # 09:00 local (crontab semantics are local wall-clock). Hand it naive
+    # local datetimes in and out; .timestamp() converts back to epoch.
+    base = datetime.fromtimestamp(frm) if frm else datetime.now()
+    return croniter(cron, base).get_next(datetime).timestamp()
 
 
 async def _fire(row: dict, manual: bool = False) -> None:
