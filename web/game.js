@@ -2,8 +2,11 @@
 // Self-contained: canvas, fixed 16px tiles, one hand-built stage (X-01).
 // Open with the ⚔ X-SIM button (topbar) or G when the composer isn't focused;
 // ESC closes instantly so you can watch the chat stream. Deep-link: ?game=1.
-// Sound plays through the same SFX slots as chat (notation only for now —
-// game_* slots live in SOUND_DESIGN.md / sounds/manifest.json, no assets).
+// Sound plays through the same SFX slots as chat: game_* cues in
+// web/sounds/ (regenerate any of them from CONFIG → SOUNDBOARD). SFX is a
+// global lexical binding from sfx.js — NOT a window property; call it
+// directly (window.SFX would be undefined and mute the game). SFX.play
+// obeys the ♪ SOUND toggle, so the game mutes with it like every other cue.
 (() => {
 "use strict";
 
@@ -76,7 +79,7 @@ let timeS = 0, dieT = 0, bestT = null;
 
 try { bestT = parseFloat(localStorage.getItem("lb-game-best")) || null; } catch {}
 
-const sfx = (n) => { try { window.SFX && SFX.play(n); } catch {} };
+const sfx = (n) => { try { SFX.play(n); } catch {} };
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const fmtT = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(2).padStart(5, "0")}`;
 
