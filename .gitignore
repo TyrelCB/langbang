@@ -8,3 +8,4 @@ data/keys/
 web/sounds/*.mp3
 web/sounds/*.wav
 data/perf.log
+data/uploads/
