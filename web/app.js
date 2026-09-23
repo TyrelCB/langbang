@@ -46,6 +46,14 @@ const api = {
       body: JSON.stringify({ config }),
     })).json();
   },
+  async soundsSlots() { return (await fetch("/api/sounds/slots")).json(); },
+  async sfxRegen(slot) {
+    return (await fetch("/api/sounds/regen", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slot }),
+    })).json();
+  },
+  async sfxRegenStatus(slot) { return (await fetch("/api/sounds/regen/" + slot)).json(); },
   async health() { return (await fetch("/api/health")).json(); },
   async threads() { return (await fetch("/api/threads")).json(); },
   async newThread(title) {
@@ -1111,6 +1119,10 @@ async function openSettings() {
   mcpRenderTest(null, $("#mcp-test-result"));
   $("#mcp-import-msg").classList.add("hidden");
   mcpRenderList();
+  renderSoundboard(); // empty board while the slot list is in flight
+  try { sndSlots = await api.soundsSlots(); } catch { sndSlots = []; }
+  renderSoundboard();
+  sndStatusSweep();
   $("#set-vision").checked = !!(s.capabilities || {}).vision;
   $("#set-thinking").checked = !!s.enable_thinking;
   $("#set-compact").checked = !!s.compact_enabled;
@@ -1445,6 +1457,139 @@ $("#mcp-import-file").onchange = (e) => {
   };
   rd.readAsText(f);
 };
+
+// ---------- soundboard (CONFIG → SOUNDBOARD) ----------
+// One row per cue in sfxgen.CUES (GET /api/sounds/slots). ▶ PLAY auditions a
+// cue with ♪ SOUND off (SFX.play force flag); ↻ REGEN POSTs a fire-and-poll
+// re-render (committed prompt, fresh seed). The render is a background task
+// server-side — it can sit minutes in the all-media queue — so the client
+// polls status every 2s instead of holding the POST open. On success the live
+// sfx.js buffer is swapped (SFX.reload), so the next play anywhere hears the
+// new take without a page reload.
+const SND_GEN_MSG = "… GENERATING — queued behind other media jobs (~1 min)";
+let sndSlots = [];   // slots_view() rows; refreshed every CONFIG open
+const sndRows = {};  // slot -> {row, sub, line, btn}; rebuilt per render
+const sndTimers = {};// slot -> status-poll interval, while a regen runs
+
+function sndSub(s) { return [s.when || s.slot, s.file, fmtBytes(s.bytes)].join(" · "); }
+
+function sndLine(slot, kind, text) {
+  // kind: "" clear | "gen" neutral | "ok" | "bad"
+  const r = sndRows[slot];
+  if (!r) return;
+  if (!kind) { r.line.textContent = ""; r.line.className = "mcp-test hidden"; return; }
+  r.line.textContent = text;
+  r.line.className = "mcp-test" + (kind === "gen" ? "" : " " + kind);
+}
+
+function sndBusy(slot, on) {
+  const r = sndRows[slot];
+  if (!r) return;
+  r.btn.disabled = on;
+  r.btn.textContent = on ? "… REGEN" : "↻ REGEN";
+}
+
+function renderSoundboard() {
+  const box = $("#soundboard-list");
+  box.innerHTML = "";
+  for (const k of Object.keys(sndRows)) delete sndRows[k];
+  if (!sndSlots.length) {
+    box.appendChild(el("div", "mcp-empty", "No cues loaded."));
+    return;
+  }
+  const mk = (txt, title, fn, clickSfx) => {
+    const b = el("button", "btn ghost sm", txt);
+    b.title = title;
+    b.onclick = () => { if (clickSfx) SFX.play("click"); fn(b); };
+    return b;
+  };
+  for (const s of sndSlots) {
+    const row = el("div", "mcp-row" + (s.exists ? "" : " off"));
+    row.title = s.prompt; // the exact generation brief this slot re-renders from
+    const head = el("div", "mcp-head");
+    head.appendChild(el("span", "mcp-name", s.slot));
+    const sub = el("div", "mcp-sub" + (s.exists ? "" : " dim"), sndSub(s));
+    const line = el("div", "mcp-test hidden");
+    const acts = el("div", "mcp-actions");
+    const btn = mk("↻ REGEN",
+      "re-render this cue on the all-media server (committed prompt, fresh seed)",
+      () => sndRegen(s.slot), true);
+    acts.append(
+      mk("▶ PLAY", "audition this cue — works even with ♪ SOUND off",
+         () => SFX.play(s.slot, true), false), // no click cue on top of the audition
+      btn,
+    );
+    row.append(head, sub, line, acts);
+    box.appendChild(row);
+    sndRows[s.slot] = { row, sub, line, btn };
+  }
+  // this tab is mid-regen on some slots (CONFIG closed and reopened): re-attach
+  // busy visuals to the fresh DOM; the pollers already run and will update them
+  for (const slot of Object.keys(sndTimers)) { sndBusy(slot, true); sndLine(slot, "gen", SND_GEN_MSG); }
+}
+
+function sndPoll(slot, ours) {
+  if (sndTimers[slot]) return; // one poller per slot (sweep may start it too)
+  sndTimers[slot] = setInterval(async () => {
+    let st;
+    try { st = await api.sfxRegenStatus(slot); } catch { return; } // transient; keep polling
+    if (st && st.running) {
+      // re-assert visuals each tick: keeps the row honest even when the poller
+      // was started by the open-sweep or an "already regenerating" POST
+      sndBusy(slot, true);
+      sndLine(slot, "gen", SND_GEN_MSG);
+      return;
+    }
+    clearInterval(sndTimers[slot]);
+    delete sndTimers[slot];
+    sndBusy(slot, false);
+    if (!st) return;
+    if (st.ok) {
+      sndLine(slot, "ok", "✓ new take — seed " + st.seed + ", " + st.duration_s +
+        "s (" + fmtBytes(st.bytes) + ")");
+      SFX.reload(slot); // swap the live buffer: next play = new take, no reload needed
+      if (ours) SFX.play(slot, true); // auto-audition only when we pressed REGEN
+      const s = sndSlots.find((x) => x.slot === slot);
+      if (s) { s.bytes = st.bytes; s.exists = true; }
+      const r = sndRows[slot];
+      if (s && r) { r.sub.textContent = sndSub(s); r.row.classList.remove("off"); }
+    } else if (st.error) sndLine(slot, "bad", "✕ " + st.error);
+    else sndLine(slot, "", "");
+  }, 2000);
+}
+
+async function sndRegen(slot) {
+  sndBusy(slot, true);
+  sndLine(slot, "gen", SND_GEN_MSG);
+  let res;
+  try { res = await api.sfxRegen(slot); }
+  catch (e) { res = { ok: false, error: "request failed: " + e.message }; }
+  if (!res.ok) {
+    sndBusy(slot, false);
+    sndLine(slot, "bad", "✕ " + res.error);
+    // "already regenerating" means a job IS running — let the poller prove it
+  }
+  sndPoll(slot, res.ok);
+}
+
+// CONFIG just opened: ask the server about every slot so rows resume a running
+// regen started earlier (or from another tab), and show the last take's result.
+function sndStatusSweep() {
+  for (const s of sndSlots) {
+    api.sfxRegenStatus(s.slot).then((st) => {
+      const r = sndRows[s.slot];
+      if (!r) return;
+      if (st.running) {
+        sndBusy(s.slot, true);
+        sndLine(s.slot, "gen", SND_GEN_MSG);
+        sndPoll(s.slot, false);
+      } else if (st.ok) {
+        sndLine(s.slot, "ok", "✓ new take — seed " + st.seed + ", " +
+          st.duration_s + "s (" + fmtBytes(st.bytes) + ")");
+      } else if (st.error) sndLine(s.slot, "bad", "✕ " + st.error);
+    }).catch(() => {});
+  }
+}
 
 // ---------- scheduled tasks ----------
 const SCHED_PRESETS = [

@@ -221,6 +221,7 @@ body.hide-reasoning .block.thinking { display: none; }
 .panel-inner input:focus, .panel-inner textarea:focus { border-color: var(--cyan); }
 .row { display: flex; gap: 12px; } .row.end { justify-content: flex-end; margin-top: 8px; }
 .group-label { color: var(--cyan); letter-spacing: 2px; font-size: 12px; margin: 4px 0 6px; }
+.hint { color: var(--muted); font-size: 11px; letter-spacing: 1px; line-height: 1.6; margin: 2px 0 8px; }
 .tools-box { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-bottom: 14px; }
 .tools-box.col { flex-direction: column; }
 .tools-box:last-child { margin-bottom: 0; }
@@ -262,7 +263,7 @@ body.hide-reasoning .block.thinking { display: none; }
 .sched-preview.bad { color: var(--danger); }
 
 /* mcp server manager (CONFIG card) — same card chrome, sched-row look */
-#mcp-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+#mcp-list, #soundboard-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
 .mcp-empty { color: var(--muted); letter-spacing: 1px; padding: 4px 2px; }
 .mcp-row { border: 1px solid var(--line); background: var(--bg2); padding: 8px 10px;
   clip-path: var(--clip); }

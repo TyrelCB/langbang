@@ -188,6 +188,13 @@
           <input id="mcp-import-file" type="file" accept=".json,application/json" class="hidden">
         </div>
       </section>
+      <section class="cfg-card wide">
+        <div class="group-label">SOUNDBOARD</div>
+        <div class="hint">▶ auditions a cue even with ♪ SOUND off; ↻ REGEN re-renders it
+          from the all-media server with a fresh seed (~1 min, queues behind other media
+          jobs) and swaps it in live. Regeneration recipes live in server/sfxgen.py.</div>
+        <div id="soundboard-list"></div>
+      </section>
       </div>
       <div class="row end">
         <button id="btn-cancel" class="btn ghost">CANCEL</button>

@@ -1,8 +1,8 @@
-// LangBang SFX manager. Audio assets are NOT generated yet (Spark is VRAM-tight
-// on 2026-09-14 — sound generation is deferred; see SOUND_DESIGN.md for the
-// Mega Man X style brief). This module plays files from web/sounds/ when they
-// exist and stays silent otherwise. Wire-up is done: drop the files in and flip
-// the manifest entries from TODO to filenames.
+// LangBang SFX manager: plays web/sounds/ cues from manifest.json, gated by
+// the ♪ SOUND toggle (localStorage lb-sound). Assets were generated from the
+// Mega Man X style brief in SOUND_DESIGN.md; regenerate one cue from CONFIG →
+// SOUNDBOARD (or `python -m server.sfxgen <slot>`). Unknown/missing slots
+// stay silent — never break chat.
 const SFX = (() => {
   const enabled = () => localStorage.getItem("lb-sound") === "on";
   const cache = new Map();
@@ -15,8 +15,10 @@ const SFX = (() => {
     } catch { manifest = {}; }
   }
 
-  async function play(name) {
-    if (!enabled()) return;
+  // play("click") obeys the ♪ SOUND toggle; play("click", true) always sounds
+  // (the CONFIG soundboard auditions cues with the toggle off)
+  async function play(name, force) {
+    if (!enabled() && !force) return;
     const file = manifest && manifest[name] && manifest[name].file;
     if (!file || String(file).startsWith("TODO")) return;
     try {
@@ -38,6 +40,10 @@ const SFX = (() => {
     } catch { /* stay silent, never break chat */ }
   }
 
+  // drop the in-memory buffer so the next play() refetches — the soundboard
+  // calls this after regenerating a cue, making the new take live without reload
+  function reload(name) { cache.delete(name); }
+
   loadManifest();
-  return { play };
+  return { play, reload };
 })();
