@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import agent, config, mcp, schedule, voice
+from . import agent, config, mcp, schedule, sfxgen, voice
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -69,6 +69,29 @@ async def mcp_test(body: McpTestIn):
     # Always 200: ok/error are data, rendered inline by the CONFIG UI.
     # Same trust domain as run_bash — this can spawn stdio commands.
     return await mcp.probe_server(body.config)
+
+
+# ---- soundboard (CONFIG → SOUNDBOARD) ----
+
+@app.get("/api/sounds/slots")
+async def sounds_slots():
+    return sfxgen.slots_view()
+
+
+class SfxRegenIn(BaseModel):
+    slot: str
+    seed: int | None = None
+
+
+@app.post("/api/sounds/regen")
+async def sfx_regen(body: SfxRegenIn):
+    # Fire-and-poll: the all-media queue can sit on minutes; never hold the POST.
+    return sfxgen.regen_start(body.slot.strip(), seed=body.seed)
+
+
+@app.get("/api/sounds/regen/{slot}")
+async def sfx_regen_status(slot: str):
+    return sfxgen.regen_status(slot)
 
 
 # ---- threads ----
