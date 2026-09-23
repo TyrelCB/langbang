@@ -40,3 +40,22 @@ async def get_tools(servers: dict) -> list:
                 raise RuntimeError(f"MCP tool load failed: {e}") from e
         _fingerprint = fp
         return _tools
+
+
+async def probe_server(cfg: dict, timeout: float = 15.0) -> dict:
+    """One-off connect + tool listing against a single server config, for the
+    CONFIG UI's Test connection. Throwaway client — never touches the cache,
+    so testing a broken server can't poison live chat tool loads."""
+    cfg = {k: v for k, v in (cfg or {}).items() if k != "disabled"}
+    client = MultiServerMCPClient({"__probe__": cfg})
+    try:
+        tools = await asyncio.wait_for(
+            client.get_tools(server_name="__probe__"), timeout)
+        return {"ok": True, "tools": [t.name for t in tools]}
+    except asyncio.TimeoutError:
+        return {"ok": False, "error": f"connection timed out ({timeout:.0f}s)"}
+    except Exception as e:  # noqa: BLE001 - the error text IS the feature
+        # anyio TaskGroups wrap the real failure one level down — "unhandled
+        # errors in a TaskGroup" alone is useless in the UI, unwrap it.
+        cause = e.exceptions[0] if isinstance(e, BaseExceptionGroup) and e.exceptions else e
+        return {"ok": False, "error": str(cause) or type(cause).__name__}

@@ -154,7 +154,39 @@
       </section>
       <section class="cfg-card wide">
         <h3>MCP SERVERS</h3>
-        <label>(JSON — add <code>"disabled": true</code> to park one) <textarea id="set-mcp" rows="6" spellcheck="false"></textarea></label>
+        <div id="mcp-list"></div>
+        <div id="mcp-import-msg" class="hidden"></div>
+        <div id="mcp-editor" class="mcp-editor hidden">
+          <div class="row">
+            <label>Name <input id="mcp-name" type="text" autocomplete="off" spellcheck="false" placeholder="my-tools"></label>
+            <label>Transport
+              <select id="mcp-transport">
+                <option value="streamable_http">streamable http</option>
+                <option value="sse">sse</option>
+                <option value="stdio">stdio — command on the server host</option>
+              </select>
+            </label>
+          </div>
+          <label id="mcp-url-row">URL <input id="mcp-url" type="text" autocomplete="off" spellcheck="false" placeholder="http://host:port/mcp"></label>
+          <div id="mcp-stdio-rows" class="hidden">
+            <label>Command <input id="mcp-command" type="text" autocomplete="off" spellcheck="false" placeholder="/path/to/python /path/to/server.py"></label>
+            <div class="group-label">ARGUMENTS</div>
+            <div id="mcp-args"></div>
+            <button id="btn-mcp-arg" class="btn ghost sm">+ ARG</button>
+          </div>
+          <div class="row">
+            <button id="btn-mcp-test" class="btn ghost sm">▶ TEST CONNECTION</button>
+          </div>
+          <div id="mcp-test-result" class="hidden"></div>
+          <div id="mcp-error" class="error hidden"></div>
+        </div>
+        <div class="row">
+          <button id="btn-mcp-add" class="btn ghost sm">+ ADD SERVER</button>
+          <button id="btn-mcp-import" class="btn ghost sm">⇪ IMPORT FROM FILE</button>
+          <button id="btn-mcp-editor-save" class="btn accent sm hidden">SAVE SERVER</button>
+          <button id="btn-mcp-editor-cancel" class="btn ghost sm hidden">CANCEL EDIT</button>
+          <input id="mcp-import-file" type="file" accept=".json,application/json" class="hidden">
+        </div>
       </section>
       </div>
       <div class="row end">

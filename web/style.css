@@ -260,6 +260,31 @@ body.hide-reasoning .block.thinking { display: none; }
 .chip:hover { border-color: var(--cyan); background: var(--panel); }
 .sched-preview { min-height: 16px; font-size: 12px; letter-spacing: 1px; color: var(--cyan); }
 .sched-preview.bad { color: var(--danger); }
+
+/* mcp server manager (CONFIG card) — same card chrome, sched-row look */
+#mcp-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.mcp-empty { color: var(--muted); letter-spacing: 1px; padding: 4px 2px; }
+.mcp-row { border: 1px solid var(--line); background: var(--bg2); padding: 8px 10px;
+  clip-path: var(--clip); }
+.mcp-row.off { opacity: .55; }
+.mcp-head { display: flex; align-items: center; gap: 10px; }
+.mcp-head .chk { display: flex; align-items: center; gap: 6px; margin: 0; cursor: pointer;
+  letter-spacing: 1px; color: var(--text); min-width: 0; }
+.mcp-head .chk input[type="checkbox"] { width: auto; margin: 0; accent-color: var(--cyan); }
+.mcp-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-sub { color: var(--cyan); font-size: 12px; letter-spacing: 1px; margin-top: 4px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-sub.dim { color: var(--muted); }
+.mcp-actions { display: flex; gap: 8px; margin-top: 6px; }
+.mcp-test { font-size: 12px; letter-spacing: 1px; margin: 6px 0 0; overflow-wrap: anywhere; }
+.mcp-test.ok { color: var(--cyan); }
+.mcp-test.bad { color: var(--danger); }
+.mcp-editor { border-top: 1px solid var(--line); margin: 10px 0 12px; padding-top: 10px; }
+#mcp-args { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.mcp-arg-row { display: flex; gap: 8px; }
+.mcp-arg-row input { flex: 1; min-width: 0; }
+#btn-mcp-arg { margin-bottom: 4px; }
+#mcp-import-msg { margin-bottom: 10px; }
 .cursor::after { content: "▌"; color: var(--cyan); animation: blink .8s steps(1) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 

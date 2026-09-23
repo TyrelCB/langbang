@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import agent, config, schedule, voice
+from . import agent, config, mcp, schedule, voice
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -58,6 +58,17 @@ class SettingsIn(BaseModel):
 @app.put("/api/settings")
 async def put_settings(body: SettingsIn):
     return config.save({**config.load(), **body.patch})
+
+
+class McpTestIn(BaseModel):
+    config: dict
+
+
+@app.post("/api/mcp/test")
+async def mcp_test(body: McpTestIn):
+    # Always 200: ok/error are data, rendered inline by the CONFIG UI.
+    # Same trust domain as run_bash — this can spawn stdio commands.
+    return await mcp.probe_server(body.config)
 
 
 # ---- threads ----
@@ -392,7 +403,7 @@ class _NoCacheStatic(StaticFiles):
 
     async def get_response(self, path, scope):
         resp = await super().get_response(path, scope)
-        resp.headers["Cache-Control"] = "no-cache"
+        resp.headers["Cache-Control"] = "no-store"
         return resp
 
 

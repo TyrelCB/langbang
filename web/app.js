@@ -40,6 +40,12 @@ const api = {
       body: JSON.stringify({ patch }),
     })).json();
   },
+  async mcpTest(config) {
+    return (await fetch("/api/mcp/test", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config }),
+    })).json();
+  },
   async health() { return (await fetch("/api/health")).json(); },
   async threads() { return (await fetch("/api/threads")).json(); },
   async newThread(title) {
@@ -1098,7 +1104,13 @@ async function openSettings() {
     lab.append(cb, document.createTextNode(" " + name));
     tb.appendChild(lab);
   }
-  $("#set-mcp").value = JSON.stringify(s.mcp_servers || {}, null, 2);
+  mcpDraft = JSON.parse(JSON.stringify(s.mcp_servers || {}));
+  mcpEditing = null;
+  for (const k of Object.keys(mcpTestState)) delete mcpTestState[k];
+  mcpShowEditor(false);
+  mcpRenderTest(null, $("#mcp-test-result"));
+  $("#mcp-import-msg").classList.add("hidden");
+  mcpRenderList();
   $("#set-vision").checked = !!(s.capabilities || {}).vision;
   $("#set-thinking").checked = !!s.enable_thinking;
   $("#set-compact").checked = !!s.compact_enabled;
@@ -1114,9 +1126,12 @@ async function openSettings() {
 async function saveSettings() {
   const err = $("#settings-error");
   err.classList.add("hidden");
-  let mcp;
-  try { mcp = JSON.parse($("#set-mcp").value); }
-  catch { err.textContent = "MCP JSON is invalid."; err.classList.remove("hidden"); return; }
+  // mid-editor edits live only in mcpDraft fields — don't silently drop them
+  if (!$("#mcp-editor").classList.contains("hidden")) {
+    err.textContent = "MCP editor is open — SAVE SERVER or CANCEL EDIT first.";
+    err.classList.remove("hidden");
+    return;
+  }
   const local_tools = {};
   document.querySelectorAll("#set-tools input").forEach((cb) => {
     local_tools[cb.dataset.tool] = cb.checked;
@@ -1137,7 +1152,7 @@ async function saveSettings() {
     compact_keep_messages: parseInt($("#set-compact_keep_messages").value) || 20,
     compact_summary_tokens: parseInt($("#set-compact_summary_tokens").value) || 800,
     local_tools,
-    mcp_servers: mcp,
+    mcp_servers: mcpDraft,
     // complete dict — the server shallow-merges top-level keys only
     voice: {
       ...loadedVoice,
@@ -1155,6 +1170,281 @@ async function saveSettings() {
   SFX.play("settings_saved");
   checkHealth();
 }
+
+// ---------- mcp server manager ----------
+// settings.mcp_servers is {name: cfg} — the dict KEY is the server identity,
+// "disabled": true parks one (server mcp._active strips the flag). mcpDraft
+// is a staged deep copy living while CONFIG is open; rows/editor/import all
+// mutate it and nothing reaches the server until CONFIG SAVE, which must send
+// the COMPLETE dict (config.save shallow-merges top-level keys only).
+let mcpDraft = {};
+let mcpEditing = null;    // original key under edit; null = editor closed/adding
+let mcpArgs = [];         // stdio argument strings while the editor is open
+const mcpTestState = {};  // name -> {ok, tools|error}; display-only, not persisted
+
+const mcpTarget = (cfg) =>
+  cfg.transport === "stdio"
+    ? [cfg.command || "", ...(Array.isArray(cfg.args) ? cfg.args : [])].join(" ")
+    : cfg.url || "";
+
+function mcpShowEditor(on) {
+  $("#mcp-editor").classList.toggle("hidden", !on);
+  $("#btn-mcp-editor-save").classList.toggle("hidden", !on);
+  $("#btn-mcp-editor-cancel").classList.toggle("hidden", !on);
+  $("#btn-mcp-add").classList.toggle("hidden", on);
+  $("#btn-mcp-import").classList.toggle("hidden", on);
+}
+
+function mcpRenderTest(res, into) {
+  if (!res) {
+    into.textContent = "";
+    into.className = "mcp-test hidden";
+    return;
+  }
+  into.classList.remove("hidden");
+  if (res.ok) {
+    const shown = res.tools.slice(0, 8).join(", ");
+    into.textContent = "✓ " + res.tools.length + " tools: " + shown +
+      (res.tools.length > 8 ? " +" + (res.tools.length - 8) + " more" : "");
+    into.className = "mcp-test ok";
+  } else {
+    into.textContent = "✕ " + res.error;
+    into.className = "mcp-test bad";
+  }
+}
+
+async function mcpRunTest(cfg, btn, into) {
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "… TESTING";
+  mcpRenderTest(null, into);
+  let res;
+  try { res = await api.mcpTest(cfg); }
+  catch (e) { res = { ok: false, error: "request failed: " + e.message }; }
+  btn.disabled = false;
+  btn.textContent = label;
+  mcpRenderTest(res, into);
+  return res;
+}
+
+function mcpRenderArgs() {
+  const box = $("#mcp-args");
+  box.innerHTML = "";
+  mcpArgs.forEach((a, i) => {
+    const row = el("div", "mcp-arg-row");
+    const inp = el("input");
+    inp.type = "text"; inp.value = a; inp.spellcheck = false;
+    inp.oninput = () => { mcpArgs[i] = inp.value; };
+    const del = el("button", "btn ghost sm", "✕");
+    del.onclick = () => { SFX.play("click"); mcpArgs.splice(i, 1); mcpRenderArgs(); };
+    row.append(inp, del);
+    box.appendChild(row);
+  });
+}
+
+function mcpRenderList() {
+  const box = $("#mcp-list");
+  box.innerHTML = "";
+  const names = Object.keys(mcpDraft);
+  if (!names.length) {
+    box.appendChild(el("div", "mcp-empty", "No MCP servers. ADD SERVER below."));
+    return;
+  }
+  const mkBtn = (txt, title, fn) => {
+    const b = el("button", "btn ghost sm", txt);
+    b.title = title;
+    b.onclick = () => { SFX.play("click"); fn(b); };
+    return b;
+  };
+  for (const name of names) {
+    const cfg = mcpDraft[name];
+    const off = !!cfg.disabled;
+    const row = el("div", "mcp-row" + (off ? " off" : ""));
+    const head = el("div", "mcp-head");
+    const lab = el("label", "chk");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !off;
+    cb.title = "enabled";
+    cb.onchange = () => {
+      if (cb.checked) delete mcpDraft[name].disabled;
+      else mcpDraft[name].disabled = true;
+      mcpRenderList();
+    };
+    lab.append(cb, el("span", "mcp-name", name));
+    head.appendChild(lab);
+    const sub = el("div", "mcp-sub" + (off ? " dim" : ""), mcpTarget(cfg) || "—");
+    const testLine = el("div", "mcp-test hidden");
+    mcpRenderTest(mcpTestState[name], testLine);
+    const acts = el("div", "mcp-actions");
+    acts.append(
+      mkBtn("↻", "test connection", (b) =>
+        mcpRunTest(cfg, b, testLine).then((res) => { mcpTestState[name] = res; })),
+      mkBtn("✎ EDIT", "edit", () => mcpOpenEditor(name)),
+      mkBtn("🗑 DELETE", "delete", () => {
+        delete mcpDraft[name];
+        delete mcpTestState[name];
+        mcpRenderList();
+      }),
+    );
+    row.append(head, sub, testLine, acts);
+    box.appendChild(row);
+  }
+}
+
+function mcpSyncTransportRows() {
+  const stdio = $("#mcp-transport").value === "stdio";
+  $("#mcp-url-row").classList.toggle("hidden", stdio);
+  $("#mcp-stdio-rows").classList.toggle("hidden", !stdio);
+}
+
+function mcpFormCfg() {
+  // transport-specific fields only; commit() merges these over a passthrough
+  // copy of the original config, so unknown keys (env, headers…) survive
+  const transport = $("#mcp-transport").value;
+  if (transport === "stdio") {
+    return {
+      transport,
+      command: $("#mcp-command").value.trim(),
+      args: mcpArgs.map((s) => s.trim()).filter((s) => s),
+    };
+  }
+  return { transport, url: $("#mcp-url").value.trim() };
+}
+
+function mcpNormalizeCfg(c) {
+  let transport = c.transport || "";
+  if (!transport) {
+    transport = c.type === "http" || c.type === "streamable_http" ? "streamable_http"
+      : c.type === "sse" ? "sse" : c.command ? "stdio" : "streamable_http";
+  }
+  const out = { transport };
+  if (transport === "stdio") {
+    out.command = c.command || "";
+    if (Array.isArray(c.args)) out.args = c.args;
+    if (c.env) out.env = c.env;
+    if (c.cwd) out.cwd = c.cwd;
+  } else {
+    out.url = c.url || "";
+    if (c.headers) out.headers = c.headers;
+    if (c.timeout !== undefined) out.timeout = c.timeout;
+  }
+  if (c.disabled) out.disabled = true;
+  return out;
+}
+
+function mcpOpenEditor(key) {
+  mcpEditing = key;
+  const cfg = key ? mcpDraft[key] : { transport: "streamable_http" };
+  $("#mcp-error").classList.add("hidden");
+  $("#mcp-name").value = key || "";
+  $("#mcp-transport").value = cfg.transport === "sse" || cfg.transport === "stdio" ? cfg.transport : "streamable_http";
+  $("#mcp-url").value = cfg.url || "";
+  $("#mcp-command").value = cfg.command || "";
+  mcpArgs = Array.isArray(cfg.args) ? [...cfg.args] : [];
+  mcpRenderArgs();
+  mcpSyncTransportRows();
+  mcpRenderTest(key ? mcpTestState[key] : null, $("#mcp-test-result"));
+  mcpShowEditor(true);
+  $("#btn-mcp-editor-save").textContent = key ? "SAVE SERVER" : "ADD SERVER";
+  $("#mcp-name").focus();
+  $("#mcp-editor").scrollIntoView({ block: "nearest" });
+}
+
+function mcpCommit() {
+  const err = $("#mcp-error");
+  err.classList.add("hidden");
+  const fail = (msg) => { err.textContent = msg; err.classList.remove("hidden"); };
+  const name = $("#mcp-name").value.trim();
+  if (!name) return fail("Name is required.");
+  const allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._- ";
+  if ([...name].some((c) => !allowed.includes(c)))
+    return fail("Name: letters, digits, space, . _ - only.");
+  if (name !== $("#mcp-name").value) return fail("Name can't start or end with a space.");
+  if (name !== mcpEditing && mcpDraft[name])
+    return fail('A server named "' + name + '" already exists.');
+  const form = mcpFormCfg();
+  if (form.transport === "stdio" ? !form.command : !form.url)
+    return fail(form.transport === "stdio" ? "Command is required." : "URL is required.");
+  const out = { ...(mcpEditing ? mcpDraft[mcpEditing] : {}) };
+  delete out.url;
+  delete out.command;
+  delete out.args;
+  Object.assign(out, form);
+  if (mcpEditing && mcpEditing !== name) {
+    delete mcpDraft[mcpEditing];
+    delete mcpTestState[mcpEditing]; // a stale ✓ must not follow the config
+  }
+  mcpDraft[name] = out;
+  mcpEditing = null;
+  mcpShowEditor(false);
+  mcpRenderList();
+}
+
+$("#btn-mcp-add").onclick = () => { SFX.play("click"); mcpOpenEditor(null); };
+$("#btn-mcp-editor-save").onclick = () => { SFX.play("click"); mcpCommit(); };
+$("#btn-mcp-editor-cancel").onclick = () => {
+  SFX.play("click");
+  mcpEditing = null;
+  mcpShowEditor(false);
+};
+$("#btn-mcp-arg").onclick = () => { SFX.play("click"); mcpArgs.push(""); mcpRenderArgs(); };
+$("#mcp-transport").onchange = () => {
+  mcpSyncTransportRows();
+  mcpRenderTest(null, $("#mcp-test-result"));
+};
+$("#btn-mcp-test").onclick = async () => {
+  SFX.play("click");
+  const form = mcpFormCfg();
+  if (form.transport === "stdio" ? !form.command : !form.url) {
+    mcpRenderTest({
+      ok: false,
+      error: "fill in " + (form.transport === "stdio" ? "the command" : "the URL") + " first",
+    }, $("#mcp-test-result"));
+    return;
+  }
+  const res = await mcpRunTest(form, $("#btn-mcp-test"), $("#mcp-test-result"));
+  if (mcpEditing) mcpTestState[mcpEditing] = res;
+};
+$("#btn-mcp-import").onclick = () => { SFX.play("click"); $("#mcp-import-file").click(); };
+$("#mcp-import-file").onchange = (e) => {
+  const f = e.target.files[0];
+  e.target.value = ""; // allow re-selecting the same file
+  if (!f) return;
+  const msg = $("#mcp-import-msg");
+  const show = (txt, good) => {
+    msg.textContent = txt;
+    msg.className = "mcp-test " + (good ? "ok" : "bad");
+  };
+  const rd = new FileReader();
+  rd.onload = () => {
+    let obj;
+    try { obj = JSON.parse(rd.result); }
+    catch { show("✕ import: not valid JSON", false); return; }
+    // Claude-Desktop style {mcpServers:{...}} or a bare name→config dict
+    const map = obj && obj.mcpServers && typeof obj.mcpServers === "object"
+      ? obj.mcpServers : obj;
+    const bad = !map || typeof map !== "object" || Array.isArray(map) ||
+      !Object.keys(map).length ||
+      Object.values(map).some(
+        (c) => !c || typeof c !== "object" || !(c.transport || c.type || c.command || c.url));
+    if (bad) {
+      show('✕ import: expected { "mcpServers": { … } } or a bare name→config dict', false);
+      return;
+    }
+    const names = Object.keys(map);
+    const over = names.filter((n) => mcpDraft[n]);
+    // Claude Desktop uses type:"stdio"|"http"; the adapter needs "transport"
+    // and REJECTS unknown keys — normalize + whitelist instead of verbatim copy
+    for (const n of names) mcpDraft[n] = mcpNormalizeCfg(map[n]);
+    names.forEach((n) => { delete mcpTestState[n]; });
+    show("✓ imported " + names.length + " server" + (names.length > 1 ? "s" : "") +
+      ": " + names.join(", ") + (over.length ? " (" + over.length + " overwritten)" : "") +
+      " — press SAVE to apply", true);
+    mcpRenderList();
+  };
+  rd.readAsText(f);
+};
 
 // ---------- scheduled tasks ----------
 const SCHED_PRESETS = [
