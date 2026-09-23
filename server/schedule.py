@@ -217,9 +217,9 @@ def humanize(cron: str) -> str:
     if m.startswith("*/") and H == "*" and dom == "*" and dow == "*":
         return f"every {m[2:]} min"
     if m.isdigit() and H.startswith("*/") and dom == "*" and mon == "*" and dow == "*":
-        hm = f"{int(m):02d}:00"
-        return f"every {H[2:]} hours at {hm}"
-    if hm and H == "*" and dom == "*" and dow == "*":
+        # m is MINUTES past the hour — '26 */4' fires 00:26, 04:26, …
+        return f"every {H[2:]} hours at :{m.zfill(2)}"
+    if m.isdigit() and H == "*" and dom == "*" and dow == "*":
         return f"hourly at :{m.zfill(2)}"
     if hm and dom == "*" and mon == "*" and dow == "1-5":
         return f"weekdays at {hm}"
