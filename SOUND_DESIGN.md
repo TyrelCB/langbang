@@ -1,9 +1,19 @@
 # LangBang Sound Design — Mega Man X Terminal HUD
 
-**Status: NOT GENERATED.** On 2026-09-14 the single Spark node is VRAM-tight
-(Qwen3.8-Next-Flash NVFP4 holds the GPU). Audio generation is deferred.
-The frontend is already wired: `web/sfx.js` + `web/sounds/manifest.json` play
-any file that appears — just drop assets in and flip their `TODO-` entries.
+**Status: GENERATED (2026-09-23).** All 19 cues render from the `audio_sfx`
+tool on the all-media MCP server (`spark-ee93:8005`, stable-audio-sfx
+backend): fixed seeds, then ffmpeg auto-trim to the audible content (last
+frame above render-peak − 35 dB, + 30 ms pad, 15 ms fade-out),
+peak-normalization (−3 dB; thinking −12 dB bed), ogg vorbis q3 @ 44.1 kHz
+stereo. Bundle ~216 KB (budget < 500 KB). Renders are full-scale at the
+backend, so the design's relative levels live in the manifest `gain` field
+(`web/sfx.js` applies it). `thinking-loop` is a best-effort loop: full 3 s
+with 10 ms edge fades, not a true crossfade seam.
+
+Generation is a /tmp script pattern (submit `audio_sfx` jobs →
+`media_job_wait` → fetch `/files/...`), not a committed tool — regenerate by
+rebuilding it against SOUND_DESIGN.md's table; job durations must be >= 1.0 s
+(API minimum; short cues are trimmed down from 1 s renders).
 
 ## Style brief
 Mega Man X (SNES) menu/UI audio: short, punchy, 16-bit "digital rock".
@@ -37,9 +47,8 @@ Sample-accurate starts, tail decay < 80ms (keeps chat snappy).
 The `game_*` slots belong to the built-in X-SIM platformer (web/game.js) —
 same rule: imitate the Mega Man X *genre*, never rip game audio.
 
-## Generation plan (later)
-- Prefer SFX-oriented synth/sampler: chiptune SFX generator or
-  Stable Audio / MusicGen short-prompt renders, batch of 19, ogg @ 44.1kHz.
-- Keep total bundle < 500KB; loop `thinking` from <= 64KB.
+## Ground rules (still hold for any regeneration)
 - Mega Man X is copyrighted — imitate the *genre* (SNES UI chiptune), do not
-  rip assets.
+  rip assets. Prompts describe the sound, never the franchise.
+- Keep total bundle < 500 KB; chat cues stay snappy (short audible tail —
+  auto-trim enforces this).

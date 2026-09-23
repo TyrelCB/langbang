@@ -27,7 +27,14 @@ but built on the LangChain/LangGraph ecosystem:
   Hermes one. Sources re-scan every turn (add/remove a SKILL.md and it's
   live next turn); the model sees name+description and `read_file`s the full
   SKILL.md when a task matches. `task` sub-agents don't get skills yet
-- **MCP servers** via `langchain-mcp-adapters` (stdio / SSE / streamable-HTTP)
+- **MCP servers** via `langchain-mcp-adapters` (stdio / SSE / streamable-HTTP),
+  managed as structured rows in CONFIG (no raw JSON): per-server enable
+  toggle, ↻ Test connection (live tool listing via a throwaway probe client —
+  `POST /api/mcp/test`), edit with rename + collision guard, delete, and
+  Import config from file (accepts Claude Desktop `mcpServers` and bare-dict
+  shapes). A parked server (`disabled`) keeps its entry but contributes no
+  tool schemas; saves apply on the next chat turn (config fingerprint is
+  re-checked every run — no restart)
 - **Shell mode**: a chat message starting with `!` runs the rest as a bash
   command on the server (same shell + output cap as `run_bash`) **without
   spending a model call** — the exchange is appended to the thread, so the
@@ -57,6 +64,11 @@ points at them:
   `crawl_url` local tool instead (override target with
   `LANGBANG_CRAWL4AI_URL`). Note the workbench blocks private-network crawl
   targets (SSRF guard) — crawl public URLs only.
+- **`all-media`** (streamable-HTTP MCP at `:8005/mcp`): 28 media-gen tools
+  incl. `audio_sfx` (stable-audio-sfx backend). Registered parked
+  (`disabled`) by default so its tool schemas don't ride every prefill —
+  enable it in CONFIG → MCP SERVERS when you want media gen from chat. It
+  rendered this app's own sound pack (see `SOUND_DESIGN.md`)
 - **LangSmith** tracing — set `LANGCHAIN_API_KEY` + `LANGCHAIN_TRACING_V2=true`
   in the environment and it activates automatically via langchain-core
 - **Vision / multimodal** — paste or attach images in the composer, gated by
@@ -104,7 +116,8 @@ points at them:
   with a flash highlight. Deep-linkable with `?q=`.
 - Web UI: dark Mega Man X HUD by default, streaming chat, visible
   thinking/tool-call cards, thread management, live config editor
-- Sound effects: wired up, assets deferred → see `SOUND_DESIGN.md`
+- Sound effects: Mega Man X-style cues in `web/sounds/` (generated via
+  `audio_sfx` on the all-media MCP server) — `♪ SOUND` button toggles them
 - X-SIM: built-in Mega Man X style platformer (⚔ button / `G`) for waiting on
   agent runs — deep link with `?game=1`
 
