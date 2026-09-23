@@ -6,6 +6,5 @@ data/settings.json
 data/keys/
 .env
 web/sounds/*.mp3
-web/sounds/*.ogg
 web/sounds/*.wav
 data/perf.log

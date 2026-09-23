@@ -29,7 +29,11 @@ const SFX = (() => {
       const buf = await ctx.decodeAudioData(cache.get(name).slice(0));
       const src = ctx.createBufferSource();
       src.buffer = buf;
-      src.connect(ctx.destination);
+      // optional per-slot gain (manifest "gain") keeps the mix from the design
+      // doc even though every render was level-normalized at generation time
+      const gain = ctx.createGain();
+      gain.gain.value = Number(manifest[name].gain) || 1;
+      src.connect(gain).connect(ctx.destination);
       src.start();
     } catch { /* stay silent, never break chat */ }
   }

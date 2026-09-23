@@ -1,22 +1,99 @@
 {
-  "_comment": "Sound slots for LangBang (Mega Man X style). file=TODO means not generated yet — see SOUND_DESIGN.md. Drop ogg/mp3 into web/sounds/ and replace TODO.",
-  "boot":              { "file": "TODO-boot.ogg",              "when": "page load / app boot" },
-  "click":             { "file": "TODO-click.ogg",             "when": "button click" },
-  "hover":             { "file": "TODO-hover.ogg",             "when": "thread hover" },
-  "message_sent":      { "file": "TODO-message-sent.ogg",      "when": "user transmits" },
-  "thinking":          { "file": "TODO-thinking-loop.ogg",     "when": "stream start (loop while generating)" },
-  "message_received":  { "file": "TODO-message-received.ogg",  "when": "assistant message completes" },
-  "tool_start":        { "file": "TODO-tool-start.ogg",        "when": "tool call begins" },
-  "tool_end":          { "file": "TODO-tool-end.ogg",          "when": "tool result arrives" },
-  "error":             { "file": "TODO-error.ogg",             "when": "backend/stream error" },
-  "thread_new":        { "file": "TODO-thread-new.ogg",        "when": "new chat created" },
-  "settings_saved":    { "file": "TODO-settings-saved.ogg",    "when": "config saved" },
-  "game_shoot":        { "file": "TODO-game-shoot.ogg",        "when": "X-SIM: blaster fires" },
-  "game_jump":         { "file": "TODO-game-jump.ogg",         "when": "X-SIM: jump / wall-kick" },
-  "game_dash":         { "file": "TODO-game-dash.ogg",         "when": "X-SIM: dash" },
-  "game_hurt":         { "file": "TODO-game-hurt.ogg",         "when": "X-SIM: player takes damage" },
-  "game_kill":         { "file": "TODO-game-kill.ogg",         "when": "X-SIM: enemy destroyed" },
-  "game_death":        { "file": "TODO-game-death.ogg",        "when": "X-SIM: player dies" },
-  "game_charge_full":    { "file": "TODO-game-charge-full.ogg", "when": "X-SIM: charge reaches max (shimmer ping)" },
-  "game_clear":        { "file": "TODO-game-clear.ogg",        "when": "X-SIM: stage door reached" }
+  "_comment": "Sound slots for LangBang (Mega Man X style). Assets generated 2026-09-23 via all-media MCP audio_sfx on spark-ee93 (stable-audio-sfx backend); see SOUND_DESIGN.md. gain = per-slot playback multiplier.",
+  "boot": {
+    "file": "boot.ogg",
+    "when": "page load / app boot",
+    "gain": 0.9
+  },
+  "click": {
+    "file": "click.ogg",
+    "when": "button click",
+    "gain": 0.8
+  },
+  "hover": {
+    "file": "hover.ogg",
+    "when": "thread hover",
+    "gain": 0.4
+  },
+  "message_sent": {
+    "file": "message-sent.ogg",
+    "when": "user transmits",
+    "gain": 0.8
+  },
+  "thinking": {
+    "file": "thinking-loop.ogg",
+    "when": "stream start (loop while generating)",
+    "gain": 0.35,
+    "note": "loop is best-effort: 10 ms edge fades, not a true crossfade seam"
+  },
+  "message_received": {
+    "file": "message-received.ogg",
+    "when": "assistant message completes",
+    "gain": 0.8
+  },
+  "tool_start": {
+    "file": "tool-start.ogg",
+    "when": "tool call begins",
+    "gain": 0.65
+  },
+  "tool_end": {
+    "file": "tool-end.ogg",
+    "when": "tool result arrives",
+    "gain": 0.65
+  },
+  "error": {
+    "file": "error.ogg",
+    "when": "backend/stream error",
+    "gain": 0.85
+  },
+  "thread_new": {
+    "file": "thread-new.ogg",
+    "when": "new chat created",
+    "gain": 0.7
+  },
+  "settings_saved": {
+    "file": "settings-saved.ogg",
+    "when": "config saved",
+    "gain": 0.8
+  },
+  "game_shoot": {
+    "file": "game-shoot.ogg",
+    "when": "X-SIM: blaster fires",
+    "gain": 0.75
+  },
+  "game_jump": {
+    "file": "game-jump.ogg",
+    "when": "X-SIM: jump / wall-kick",
+    "gain": 0.6
+  },
+  "game_dash": {
+    "file": "game-dash.ogg",
+    "when": "X-SIM: dash",
+    "gain": 0.75
+  },
+  "game_hurt": {
+    "file": "game-hurt.ogg",
+    "when": "X-SIM: player takes damage",
+    "gain": 0.85
+  },
+  "game_kill": {
+    "file": "game-kill.ogg",
+    "when": "X-SIM: enemy destroyed",
+    "gain": 0.85
+  },
+  "game_death": {
+    "file": "game-death.ogg",
+    "when": "X-SIM: player dies",
+    "gain": 0.9
+  },
+  "game_charge_full": {
+    "file": "game-charge-full.ogg",
+    "when": "X-SIM: charge reaches max (shimmer ping)",
+    "gain": 0.7
+  },
+  "game_clear": {
+    "file": "game-clear.ogg",
+    "when": "X-SIM: stage door reached",
+    "gain": 0.85
+  }
 }
