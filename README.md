@@ -117,12 +117,25 @@ points at them:
   (compaction archives, thinking and tool-call args included, capped at 50
   hits); clicking a hit opens the thread and scrolls to the matching message
   with a flash highlight. Deep-linkable with `?q=`.
+- **Thread titles** — every sidebar row carries ✎ (manual inline rename), ⚡
+  (LLM auto-title from the conversation) and ⟲ (restore the *initial* title —
+  the first message's seed or the scheduled task's name). Nothing is locked:
+  ⚡ may re-title over a manual name any time.
+- **✦ RECAP** — topbar button asks the model for a cold-resume brief of the
+  open thread (goal / established facts / current state / open items) shown
+  in a modal — one call over a head+tail transcript slice, so 400-message
+  threads recap in seconds.
+- **Empty-thread hygiene** — `+ NEW CHAT` only materializes a sidebar row
+  once the first message is sent, and an hourly server sweep deletes
+  message-less `New chat` rows untouched for over an hour.
 - Web UI: dark Mega Man X HUD by default, streaming chat, visible
   thinking/tool-call cards, thread management, live config editor
 - Sound effects: Mega Man X-style cues in `web/sounds/` (generated via
   `audio_sfx` on the all-media MCP server) — `♪ SOUND` button toggles them;
   CONFIG → SOUNDBOARD auditions any cue and ↻ REGEN re-renders just that one
-  (committed prompt, fresh seed) live, without a restart or reload
+  (committed prompt, fresh seed) live, without a restart or reload. All cues
+  share one AudioContext (resumed on first input), so rAF-driven game cues
+  are as audible as click-driven chat ones
 - X-SIM: built-in Mega Man X style platformer (⚔ button / `G`) for waiting on
   agent runs — deep link with `?game=1`
 
