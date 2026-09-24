@@ -8,6 +8,21 @@ const SFX = (() => {
   const cache = new Map();
   let manifest = null;
 
+  // ONE AudioContext for the page's whole life. Chrome caps contexts per
+  // page, and — the real killer — a context constructed OUTSIDE a user
+  // gesture (game.js rAF loop: jump/kill/hurt/death/clear) starts
+  // "suspended" and src.start() on it is silent. Chat cues used to dodge
+  // this only by accident (they fired inside click handlers). resume() plus
+  // the gesture kick below keeps the single context RUNNING for everyone.
+  let ctx = null;
+  const audioCtx = () => {
+    if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (ctx.state === "suspended") ctx.resume().catch(() => {});
+    return ctx;
+  };
+  for (const ev of ["pointerdown", "keydown"])
+    window.addEventListener(ev, () => audioCtx(), { once: true, capture: true });
+
   async function loadManifest() {
     try {
       const r = await fetch("/static/sounds/manifest.json");
@@ -27,15 +42,15 @@ const SFX = (() => {
         if (!r.ok) return;
         cache.set(name, await r.arrayBuffer());
       }
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const buf = await ctx.decodeAudioData(cache.get(name).slice(0));
-      const src = ctx.createBufferSource();
+      const ac = audioCtx();
+      const buf = await ac.decodeAudioData(cache.get(name).slice(0));
+      const src = ac.createBufferSource();
       src.buffer = buf;
       // optional per-slot gain (manifest "gain") keeps the mix from the design
       // doc even though every render was level-normalized at generation time
-      const gain = ctx.createGain();
+      const gain = ac.createGain();
       gain.gain.value = Number(manifest[name].gain) || 1;
-      src.connect(gain).connect(ctx.destination);
+      src.connect(gain).connect(ac.destination);
       src.start();
     } catch { /* stay silent, never break chat */ }
   }
@@ -45,5 +60,5 @@ const SFX = (() => {
   function reload(name) { cache.delete(name); }
 
   loadManifest();
-  return { play, reload };
+  return { play, reload, get _ctx() { return ctx; } }; // _ctx for CDP assertions
 })();
