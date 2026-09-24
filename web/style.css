@@ -108,6 +108,9 @@ body.hide-reasoning .block.thinking { display: none; }
 /* run stamp inside a scheduled turn's user bubble (see schedStrip in app.js) */
 .sched-strip { font-size: 11px; letter-spacing: 1px; color: var(--cyan);
   border-bottom: 1px dashed var(--line); padding-bottom: 5px; margin-bottom: 7px; }
+/* compact provenance tag on each AI bubble inside a scheduled run's segment */
+.run-chip { font-size: 10px; letter-spacing: 1px; color: var(--cyan); opacity: .75;
+  text-align: right; margin: -3px 0 4px; }
 
 /* markdown content inside messages */
 .msg > :first-child { margin-top: 0; }

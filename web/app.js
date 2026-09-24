@@ -353,15 +353,29 @@ function schedStrip(s) {
     " " + p(t.getHours()) + ":" + p(t.getMinutes()) + ":" + p(t.getSeconds()));
 }
 
+function runChip(s) {
+  // tiny provenance tag on an AI bubble produced by a scheduled run — the
+  // full ⏰ strip lives on the run's prompt far above, but by the time you're
+  // reading output mid-run that strip is scrolled away (see schedStrip).
+  const t = new Date(s.ts * 1000), p = (n) => String(n).padStart(2, "0");
+  return el("div", "run-chip", `⏰ ${p(t.getMonth() + 1)}-${p(t.getDate())} ${p(t.getHours())}:${p(t.getMinutes())}` +
+    (s.manual ? " · MANUAL" : ""));
+}
+
 function renderHistory(msgs) {
   $("#chat").innerHTML = "";
   $("#chat")._pinned = true; // opening a thread always shows its newest message
+  // run provenance: a scheduled firing's segment = the stamped prompt up to
+  // (exclusive) the next human message. A human WITHOUT a stamp is manual
+  // chat (even inside a schedule's thread) and ends the segment. Survives
+  // compaction — archived heads keep their sched stamps in their JSON.
+  let curSched = null;
   for (const m of msgs) {
     if (m.role === "system") continue;
     if (m.compacted) {
       const b = addBlock("compact", `⟲ CONTEXT COMPACTED — ${m.compacted.count} EARLIER MSGS SUMMARIZED`);
       b.querySelector("pre").textContent = textOf(m.content);
-      continue;
+      continue; // notes sit between runs; never touch curSched
     }
     if (m.shell) {
       const b = shellBlock(m.shell.cmd);
@@ -371,13 +385,17 @@ function renderHistory(msgs) {
     if (m.role === "human") {
       const b = addMsg("user", textOf(m.content), imagesOf(m.content));
       if (m.sched) b.prepend(schedStrip(m.sched));
+      curSched = m.sched || null;
     } else if (m.role === "ai") {
       if (m.thinking) {
         const b = addBlock("thinking", "◈ THINKING");
         b.querySelector("pre").textContent = m.thinking;
       }
-      if (textOf(m.content).trim())
-        attachSpeak(addMsg("assistant", textOf(m.content)), textOf(m.content));
+      if (textOf(m.content).trim()) {
+        const b = addMsg("assistant", textOf(m.content));
+        if (curSched) b.prepend(runChip(curSched));
+        attachSpeak(b, textOf(m.content));
+      }
       for (const tc of m.tool_calls || []) {
         const b = addBlock("tool", `⚙ ${tc.name}`);
         b.querySelector("pre").textContent = "→ " + JSON.stringify(tc.args, null, 2);
