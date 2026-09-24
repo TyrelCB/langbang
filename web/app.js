@@ -967,8 +967,25 @@ async function refreshThreads() {
     pen.onclick = (e) => { e.stopPropagation(); SFX.play("click"); startInlineRename(t, d, name); };
     d.appendChild(pen);
     const x = el("span", "x", "✕");
+    x.title = "Delete thread";
+    const disarm = () => {
+      x.textContent = "✕"; x.classList.remove("arm"); x.title = "Delete thread";
+    };
+    let armT = 0;
     x.onclick = async (e) => {
       e.stopPropagation();
+      // Mis-click guard: rows that hold real content need a second,
+      // confirming click; empty/thin rows (abandoned new chats, test
+      // probes) die in one click so junk stays quick to sweep.
+      const trivial = (t.n_msgs ?? 99) < 3 && (t.chars ?? 1e9) < 100;
+      if (!x.classList.contains("arm") && !trivial) {
+        x.classList.add("arm");
+        x.textContent = "⚠";
+        x.title = `${t.n_msgs} messages — click again to DELETE`;
+        clearTimeout(armT);
+        armT = setTimeout(disarm, 4000);
+        return;
+      }
       await api.delThread(t.id);
       if (t.id === threadId) { threadId = null; $("#chat").innerHTML = ""; resetTrajView(); }
       refreshThreads();

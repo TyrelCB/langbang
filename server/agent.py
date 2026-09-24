@@ -787,10 +787,15 @@ async def list_threads() -> list:
         # What the *next* model call would replay: live graph state (post-
         # compaction), not the full archived transcript the UI shows.
         # _live_messages also reconstructs delta-stored messages (deep mode).
-        ctx = base + count_tokens_approximately(await _live_messages(r[0]))
+        msgs = await _live_messages(r[0])
+        ctx = base + count_tokens_approximately(msgs)
         out.append(
             {"id": r[0], "title": r[1], "created_at": r[2], "updated_at": r[3],
-             "context_tokens": ctx, "orig": r[4]}
+             "context_tokens": ctx, "orig": r[4],
+             # cheap content signal the sidebar uses to decide whether the ✕
+             # needs a confirm click (see web/app.js refreshThreads)
+             "n_msgs": len(msgs),
+             "chars": sum(len(str(getattr(m, "content", "") or "")) for m in msgs)}
         )
     return out
 

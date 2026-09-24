@@ -47,6 +47,7 @@ body {
 .thread.active { border-left-color: var(--orange); background: #122448; }
 .thread .x { float: right; color: var(--muted); padding-left: 8px; }
 .thread .x:hover { color: var(--danger); }
+.thread .x.arm { color: var(--danger); font-weight: 800; }
 .thread .a { color: var(--muted); padding-left: 6px; }
 .thread .a:hover { color: var(--cyan); }
 .thread .a.fail { color: var(--danger); }
