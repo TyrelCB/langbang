@@ -89,11 +89,19 @@ async def init() -> None:
     await _db.executescript(
         """
         CREATE TABLE IF NOT EXISTS threads(
-          id TEXT PRIMARY KEY, title TEXT, created_at REAL, updated_at REAL);
+          id TEXT PRIMARY KEY, title TEXT, created_at REAL, updated_at REAL,
+          orig TEXT);
         CREATE TABLE IF NOT EXISTS archived_messages(
           seq INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT, msg TEXT);
         """
     )
+    # threads.orig = the seed title (schedule name / first-message prefix) that
+    # ⟲ revert-title restores. Existing DBs predate the column.
+    try:
+        await _db.execute("ALTER TABLE threads ADD COLUMN orig TEXT")
+    except aiosqlite.OperationalError:  # duplicate column — already migrated
+        pass
+    await _db.execute("UPDATE threads SET orig=title WHERE orig IS NULL")
     await _db.commit()
     await _edb.executescript(
         """
@@ -749,7 +757,11 @@ async def trajectory(thread_id: str) -> dict:
 async def create_thread(title: str = "New chat") -> dict:
     tid = uuid.uuid4().hex[:12]
     now = time.time()
-    await _db.execute("INSERT INTO threads VALUES(?,?,?,?)", (tid, title, now, now))
+    # orig = seed title: renames (manual/auto) never touch it; ⟲ restores it
+    await _db.execute(
+        "INSERT INTO threads(id,title,created_at,updated_at,orig) VALUES(?,?,?,?,?)",
+        (tid, title, now, now, title),
+    )
     await _db.commit()
     return {"id": tid, "title": title, "created_at": now, "updated_at": now}
 
@@ -767,7 +779,7 @@ def prompt_overhead_tokens() -> int:
 
 
 async def list_threads() -> list:
-    cur = await _db.execute("SELECT id,title,created_at,updated_at FROM threads ORDER BY updated_at DESC")
+    cur = await _db.execute("SELECT id,title,created_at,updated_at,orig FROM threads ORDER BY updated_at DESC")
     rows = await cur.fetchall()
     base = prompt_overhead_tokens()
     out = []
@@ -778,7 +790,7 @@ async def list_threads() -> list:
         ctx = base + count_tokens_approximately(await _live_messages(r[0]))
         out.append(
             {"id": r[0], "title": r[1], "created_at": r[2], "updated_at": r[3],
-             "context_tokens": ctx}
+             "context_tokens": ctx, "orig": r[4]}
         )
     return out
 
@@ -807,12 +819,17 @@ async def _touch(thread_id: str, first_text: str) -> None:
     if row is None:
         title = first_text[:60]
         now = time.time()
-        await _db.execute("INSERT INTO threads VALUES(?,?,?,?)", (thread_id, title, now, now))
+        await _db.execute(
+            "INSERT INTO threads(id,title,created_at,updated_at,orig) VALUES(?,?,?,?,?)",
+            (thread_id, title, now, now, title),
+        )
     else:
         title = row[0]
         if title == "New chat" or title == "":
-            await _db.execute("UPDATE threads SET title=?, updated_at=? WHERE id=?",
-                              (first_text[:60], time.time(), thread_id))
+            # first message seeds BOTH title and orig (⟲ reverts here)
+            await _db.execute(
+                "UPDATE threads SET title=?, orig=?, updated_at=? WHERE id=?",
+                (first_text[:60], first_text[:60], time.time(), thread_id))
         else:
             await _db.execute("UPDATE threads SET updated_at=? WHERE id=?", (time.time(), thread_id))
     await _db.commit()
@@ -823,6 +840,107 @@ async def touch_thread(thread_id: str) -> None:
     top of the sidebar. Unknown/deleted ids are a no-op — never resurrect."""
     await _db.execute("UPDATE threads SET updated_at=? WHERE id=?", (time.time(), thread_id))
     await _db.commit()
+
+
+# ---- titles (✎ manual / ⚡ auto / ⟲ initial) + recap ----
+
+def _one_shot(s: dict, max_tokens: int, temperature: float) -> SGlangChatOpenAI:
+    """Non-streaming single completion, same construction as summarizer()."""
+    return SGlangChatOpenAI(
+        model=s["model"], base_url=s["base_url"], api_key=s["api_key"],
+        temperature=temperature, max_tokens=max_tokens, streaming=False,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+
+
+def _flat_transcript(msgs: list[dict], head: int, tail: int, cap: int = 350) -> str:
+    """history()-style dicts → compact text for one-shot LLM calls. First
+    `head` + last `tail` messages; tool noise folded to the tool name."""
+    sel = msgs if len(msgs) <= head + tail else msgs[:head] + msgs[-tail:]
+    lines = []
+    for m in sel:
+        role = m.get("role")
+        if role == "tool":
+            lines.append(f"TOOL[{m.get('tool_name')}]: {m.get('content') or ''}"[:cap])
+            continue
+        if role == "system":
+            continue
+        text = _text_only(m.get("content") or "").strip()[:cap]
+        calls = ", ".join(tc["name"] for tc in (m.get("tool_calls") or []))
+        if calls:
+            text = (text + " " if text else "") + f"[called: {calls}]"
+        lines.append(f"{role.upper()}: {text}")
+    return "\n".join(lines)
+
+
+_TITLE_INSTRUCTION = (
+    "You title conversations. From the transcript excerpt, write a label of at "
+    "most 6 words that names what the conversation is ABOUT (its topic or "
+    "outcome, not 'Chat' or 'Conversation'). Same language as the "
+    "conversation. Reply with ONLY the title — no quotes, no period."
+)
+
+
+async def rename_thread(tid: str, title: str) -> str | None:
+    """Manual rename (✎). Never touches orig — that's ⟲'s anchor."""
+    title = (title or "").strip()
+    if not title:
+        raise ValueError("title must be non-empty")
+    cur = await _db.execute("UPDATE threads SET title=? WHERE id=?", (title[:200], tid))
+    await _db.commit()
+    return title[:200] if cur.rowcount else None
+
+
+async def auto_title(tid: str) -> str | None:
+    """⚡: one cheap LLM call names the thread from a transcript slice."""
+    msgs = await history(tid)
+    if not any(m.get("role") in ("human", "ai") and _text_only(m.get("content") or "").strip()
+               for m in msgs):
+        raise ValueError("nothing to title yet")
+    raw = await _one_shot(config.load(), 24, 0.4).ainvoke([
+        SystemMessage(content=_TITLE_INSTRUCTION),
+        HumanMessage(content=_flat_transcript(msgs, head=2, tail=6)),
+    ])
+    title = str(_text_only(raw.content)).strip().strip("\"'`")
+    title = title.removeprefix("Title:").strip(" \t-–—:•")
+    title = title.rstrip(".。").strip()[:80]
+    if not title:
+        raise RuntimeError("model returned an empty title")
+    cur = await _db.execute("UPDATE threads SET title=? WHERE id=?", (title, tid))
+    await _db.commit()
+    return title if cur.rowcount else None
+
+
+async def revert_title(tid: str) -> str | None:
+    """⟲: back to the seed title stored in orig."""
+    cur = await _db.execute("SELECT orig FROM threads WHERE id=?", (tid,))
+    row = await cur.fetchone()
+    if not row:
+        return None
+    return await rename_thread(tid, row[0] or "New chat")
+
+
+_RECAP_INSTRUCTION = (
+    "You recap working sessions so someone can resume them cold. From the "
+    "transcript write terse markdown with exactly these sections: "
+    "**Goal** / **Established facts** / **Current state** / **Open items**. "
+    "Keep specifics (paths, hosts, commands, numbers). No preamble."
+)
+
+
+async def recap_thread(tid: str) -> dict | None:
+    """✦ RECAP: one-shot summary of the thread (archived + live)."""
+    cur = await _db.execute("SELECT title FROM threads WHERE id=?", (tid,))
+    row = await cur.fetchone()
+    if not row:
+        return None
+    msgs = await history(tid)
+    summary = await _one_shot(config.load(), 700, 0.3).ainvoke([
+        SystemMessage(content=_RECAP_INSTRUCTION),
+        HumanMessage(content=_flat_transcript(msgs, head=2, tail=40)),
+    ])
+    return {"title": row[0], "summary": _text_only(summary.content).strip(),
+            "ts": time.time()}
 
 
 # ---- streaming runner ----

@@ -63,6 +63,21 @@ const api = {
     })).json();
   },
   async delThread(id) { await fetch("/api/threads/" + id, { method: "DELETE" }); },
+  async renameThread(id, title) {
+    return (await fetch("/api/threads/" + id, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    })).json();
+  },
+  async autoTitle(id) {
+    return (await fetch(`/api/threads/${id}/retitle`, { method: "POST" })).json();
+  },
+  async revertTitle(id) {
+    return (await fetch(`/api/threads/${id}/revert-title`, { method: "POST" })).json();
+  },
+  async recap(id) {
+    return (await fetch(`/api/threads/${id}/recap`, { method: "POST" })).json();
+  },
   async touchThread(id) { await fetch("/api/threads/" + id + "/touch", { method: "POST" }); },
   async messages(id) { return (await fetch(`/api/threads/${id}/messages`)).json(); },
   async trajectory(id) { return (await fetch(`/api/threads/${id}/trajectory`)).json(); },
@@ -919,7 +934,38 @@ async function refreshThreads() {
   for (const t of threads) {
     const d = el("div", "thread" + (t.id === threadId ? " active" : ""));
     d.appendChild(el("span", "ctx", t.context_tokens != null ? fmtTok(t.context_tokens) : ""));
-    d.appendChild(el("span", "t-name", t.title));
+    const name = el("span", "t-name", t.title);
+    name.title = t.title;
+    d.appendChild(name);
+    // one-click title ops; ✎ (manual) is handled as inline edit below
+    const act = (txt, tip, fn) => {
+      const s = el("span", "a", txt);
+      s.title = tip;
+      s.onclick = async (e) => {
+        e.stopPropagation();
+        SFX.play("click");
+        s.textContent = "…";
+        s.title = "…";
+        let r = {};
+        try { r = await fn(); } catch (err) { r = { detail: String(err) }; }
+        s.textContent = txt;
+        if (r && r.title) {
+          if (t.id === threadId) $("#chat-title").textContent = r.title.toUpperCase();
+          refreshThreads();
+        } else {
+          s.classList.add("fail");
+          s.title = "Failed: " + ((r && r.detail) || "error");
+          SFX.play("error");
+        }
+      };
+      d.appendChild(s);
+    };
+    act("⟲", "Restore the initial title (first message / task name)", () => api.revertTitle(t.id));
+    act("⚡", "Auto-title from the conversation (one LLM call)", () => api.autoTitle(t.id));
+    const pen = el("span", "a", "✎");
+    pen.title = "Rename — Enter saves, Esc cancels";
+    pen.onclick = (e) => { e.stopPropagation(); SFX.play("click"); startInlineRename(t, d, name); };
+    d.appendChild(pen);
     const x = el("span", "x", "✕");
     x.onclick = async (e) => {
       e.stopPropagation();
@@ -932,6 +978,33 @@ async function refreshThreads() {
     box.appendChild(d);
   }
   updateCtxTag();
+}
+
+function startInlineRename(t, row, name) {
+  const inp = el("input", "t-edit");
+  inp.value = t.title === "New chat" ? "" : t.title;
+  inp.placeholder = t.title || "title…";
+  row.replaceChild(inp, name);
+  inp.focus();
+  inp.select();
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    const v = inp.value.trim();
+    if (save && v && v !== t.title) {
+      const r = await api.renameThread(t.id, v);
+      if (r && r.title && t.id === threadId) $("#chat-title").textContent = r.title.toUpperCase();
+    }
+    refreshThreads();
+  };
+  inp.onclick = (e) => e.stopPropagation();
+  inp.onkeydown = (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") finish(true);
+    else if (e.key === "Escape") finish(false);
+  };
+  inp.onblur = () => finish(true);
 }
 
 // what the next model call will actually re-prefill for the open thread

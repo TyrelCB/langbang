@@ -135,6 +135,56 @@ async def trajectory(tid: str):
     return await agent.trajectory(tid)
 
 
+class ThreadRenameIn(BaseModel):
+    title: str
+
+
+@app.patch("/api/threads/{tid}")
+async def rename_thread(tid: str, body: ThreadRenameIn):
+    try:
+        title = await agent.rename_thread(tid, body.title)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if title is None:
+        raise HTTPException(404, "no such thread")
+    return {"title": title}
+
+
+@app.post("/api/threads/{tid}/retitle")
+async def retitle_thread(tid: str):
+    """⚡ LLM-generated title from a transcript slice (manual names are
+    never special — re-running just overwrites, orig still anchors ⟲)."""
+    try:
+        title = await agent.auto_title(tid)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:  # model down / empty output — say so, don't 500 silently
+        raise HTTPException(502, f"title generation failed: {e}")
+    if title is None:
+        raise HTTPException(404, "no such thread")
+    return {"title": title}
+
+
+@app.post("/api/threads/{tid}/revert-title")
+async def revert_title_thread(tid: str):
+    title = await agent.revert_title(tid)
+    if title is None:
+        raise HTTPException(404, "no such thread")
+    return {"title": title}
+
+
+@app.post("/api/threads/{tid}/recap")
+async def recap_thread(tid: str):
+    """✦ cold-resume recap; the model call takes a few seconds (Spark)."""
+    try:
+        out = await agent.recap_thread(tid)
+    except Exception as e:
+        raise HTTPException(502, f"recap generation failed: {e}")
+    if out is None:
+        raise HTTPException(404, "no such thread")
+    return out
+
+
 # ---- scheduled tasks ----
 
 

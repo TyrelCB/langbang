@@ -44,6 +44,14 @@ body {
 .thread.active { border-left-color: var(--orange); background: #122448; }
 .thread .x { float: right; color: var(--muted); padding-left: 8px; }
 .thread .x:hover { color: var(--danger); }
+.thread .a { color: var(--muted); padding-left: 6px; }
+.thread .a:hover { color: var(--cyan); }
+.thread .a.fail { color: var(--danger); }
+.thread .t-edit {
+  flex: 1; min-width: 0; font: inherit;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--cyan-dim); border-radius: 3px; padding: 0 4px;
+}
 
 .btn {
   font: inherit; background: var(--panel); color: var(--text);
