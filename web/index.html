@@ -28,6 +28,7 @@
       <div class="topbar-right">
         <button id="tab-chat" class="btn ghost tab on" title="chat view">▣ CHAT</button>
         <button id="tab-traj" class="btn ghost tab" title="agent trajectory — steps, timing, sub-agents">≡ TRAJECTORY</button>
+        <button id="btn-recap" class="btn ghost" title="session recap — LLM summary of this thread for cold resume">✦ RECAP</button>
         <button id="btn-game" class="btn ghost" title="X-SIM platformer — G to open, ESC to bail back to chat">⚔ X-SIM</button>
         <button id="btn-reasoning" class="btn ghost" title="Show/hide model reasoning">◈ REASONING: ON</button>
         <button id="btn-voice" class="btn ghost" title="Read finished replies aloud (per-message 🔊 works regardless)">🔊 VOICE: OFF</button>
@@ -222,6 +223,19 @@
         <button id="btn-sched-save" class="btn accent">SAVE</button>
       </div>
       <div id="sched-error" class="error hidden"></div>
+    </div>
+  </div>
+
+  <div id="recap-panel" class="hidden">
+    <div class="panel-inner recap-inner">
+      <h2 id="recap-head">RECAP</h2>
+      <!-- .msg class: markdown element styles are scoped to .msg — the recap
+           body borrows them, and the overrides below shed the bubble chrome -->
+      <div id="recap-body" class="msg"></div>
+      <div class="row end">
+        <span id="recap-ts" class="recap-ts"></span>
+        <button id="btn-recap-close" class="btn ghost">CLOSE</button>
+      </div>
     </div>
   </div>
 

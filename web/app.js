@@ -977,6 +977,7 @@ async function refreshThreads() {
     d.onclick = () => openThread(t);
     box.appendChild(d);
   }
+  $("#btn-recap").disabled = !threadId; // recap needs an open thread
   updateCtxTag();
 }
 
@@ -1015,6 +1016,8 @@ function updateCtxTag() {
 
 async function openThread(t) {
   SFX.play("click");
+  if (recapAbort) recapAbort.abort();
+  closeRecap(); // one thread's recap must not follow you to another
   threadId = t.id;
   $("#chat-title").textContent = t.title.toUpperCase();
   const bumped = api.touchThread(t.id); // resuming = current: sorts it to the top
@@ -1028,6 +1031,8 @@ async function openThread(t) {
 
 async function newThread() {
   const t = await api.newThread("New chat");
+  if (recapAbort) recapAbort.abort();
+  closeRecap();
   threadId = t.id;
   $("#chat").innerHTML = "";
   $("#chat-title").textContent = "NEW CHAT";
@@ -1902,6 +1907,59 @@ $("#file-img").onchange = (e) => {
 };
 $("#tab-chat").onclick = () => { SFX.play("click"); showTab("chat"); };
 $("#tab-traj").onclick = () => { SFX.play("click"); showTab("traj"); };
+
+// ---------- recap (✦): LLM cold-resume summary of the open thread ----------
+function closeRecap() {
+  $("#recap-panel").classList.add("hidden");
+}
+let recapAbort = null;
+
+async function openRecap() {
+  if (!threadId) return;
+  const tid = threadId;
+  SFX.play("click");
+  const body = $("#recap-body");
+  $("#recap-head").textContent =
+    "RECAP — " + $("#chat-title").textContent.replace(/^—|—$/g, "").trim();
+  $("#recap-ts").textContent = "";
+  body.innerHTML = '<p>⏳ SYNTHESIZING…</p>';
+  $("#recap-panel").classList.remove("hidden");
+  if (recapAbort) recapAbort.abort();
+  recapAbort = new AbortController();
+  const timer = setTimeout(() => recapAbort.abort(), 90000); // Spark may queue behind chat traffic
+  try {
+    const r = await fetch(`/api/threads/${tid}/recap`,
+      { method: "POST", signal: recapAbort.signal });
+    if (threadId !== tid) return; // switched mid-flight — result belongs to a dead view
+    if (!r.ok) {
+      let msg = "HTTP " + r.status;
+      try { msg = (await r.json()).detail || msg; } catch {}
+      throw new Error(msg);
+    }
+    const out = await r.json();
+    if (threadId !== tid) return;
+    setMarkdown(body, out.summary);
+    $("#recap-ts").textContent =
+      "GENERATED " + new Date(out.ts * 1000).toLocaleTimeString();
+    SFX.play("message_received");
+  } catch (e) {
+    if (threadId !== tid) return;
+    body.innerHTML = "";
+    setMarkdown(body, (e.name === "AbortError"
+      ? "✕ recap timed out (90 s) — the model may be busy; try again."
+      : "✕ recap failed: " + e.message));
+    SFX.play("error");
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+$("#btn-recap").onclick = openRecap;
+$("#btn-recap-close").onclick = () => { SFX.play("click"); closeRecap(); };
+$("#recap-panel").onclick = (e) => { if (e.target.id === "recap-panel") closeRecap(); };
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("#recap-panel").classList.contains("hidden")) closeRecap();
+});
 $("#todo-head").onclick = () => {
   SFX.play("click");
   localStorage.setItem(

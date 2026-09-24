@@ -246,6 +246,17 @@ body.hide-reasoning .block.thinking { display: none; }
 .hidden { display: none !important; }
 .error { color: var(--danger); margin-top: 8px; }
 
+/* recap modal (✦) — same overlay chrome; recap-body borrows .msg markdown
+   styles but sheds the bubble look via the overrides below */
+#recap-panel { position: fixed; inset: 0; background: rgba(2,6,12,.8); display: flex;
+  align-items: center; justify-content: center; z-index: 10; }
+.recap-inner { width: min(860px, 94vw); }
+#recap-body { max-width: 100%; background: none; border: none; padding: 0;
+  overflow-wrap: break-word; margin-bottom: 10px; }
+.recap-ts { flex: 1; align-self: center; color: var(--muted); font-size: 11px;
+  letter-spacing: 1px; }
+button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
+
 /* scheduled tasks panel — reuses the CONFIG panel/card chrome, narrower */
 #sched-panel { position: fixed; inset: 0; background: rgba(2,6,12,.8); display: flex;
   align-items: center; justify-content: center; z-index: 10; }
