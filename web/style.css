@@ -27,11 +27,14 @@ body {
 }
 #app { display: flex; height: 100vh; }
 
-/* sidebar */
+/* sidebar — narrow at rest, eases wider while the pointer is in it so
+   titles (whose ⟲⚡✎✕ icons are hover-revealed) get room to be read */
 #sidebar {
   width: 240px; min-width: 240px; display: flex; flex-direction: column;
   background: var(--bg2); border-right: 1px solid var(--line); padding: 12px; gap: 10px;
+  transition: width .18s ease, min-width .18s ease;
 }
+#sidebar:hover { width: 340px; min-width: 340px; }
 .logo { font-weight: 800; letter-spacing: 3px; color: var(--cyan); font-size: 18px; }
 .logo span { color: var(--orange); }
 #threads { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
@@ -47,6 +50,12 @@ body {
 .thread .a { color: var(--muted); padding-left: 6px; }
 .thread .a:hover { color: var(--cyan); }
 .thread .a.fail { color: var(--danger); }
+/* row actions only exist on hover — four always-on glyphs left ~4 chars
+   of title in a 240 px bar. (JS .click() still fires while display:none,
+   so the CDP suites are unaffected.) */
+.thread .a, .thread .x { display: none; }
+.thread:hover .a, .thread:hover .x { display: inline-block; }
+.thread:has(.t-edit) .a, .thread:has(.t-edit) .x { display: none; }
 .thread .t-edit {
   flex: 1; min-width: 0; font: inherit;
   background: var(--bg); color: var(--text);
