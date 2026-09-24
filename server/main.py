@@ -1,8 +1,10 @@
 """LangBang server: FastAPI app with a llama.cpp-style web UI."""
+import hashlib
 import json
 import os
 import re
 import shutil
+import time
 import uuid
 
 import httpx
@@ -25,6 +27,7 @@ async def _startup():
     await schedule.init()
     schedule.start_loop()
     agent.start_sweeper()  # hourly: delete abandoned empty "New chat"s
+    _prune_tts_cache()     # TTS disk cache is a replay aid, not an archive
 
 
 # ---- settings & health ----
@@ -426,6 +429,36 @@ class TTSIn(BaseModel):
     text: str
 
 
+TTS_CACHE_DIR = os.path.join(config.DATA_DIR, "tts")
+TTS_CACHE_TTL = 30 * 86400  # clips are replay artifacts, not an archive
+
+
+def _tts_key(clean: str, s: dict) -> str:
+    """Cache identity = speakable text + the voice knobs that change audio.
+    gTTS lang/tld and gcloud voice name all bite; the key FILE path rides
+    along harmlessly (synthesis doesn't depend on where it lives)."""
+    v = s.get("voice") or {}
+    tag = "|".join(
+        str(v.get(k) or "")
+        for k in ("tts_provider", "tts_lang", "tts_tld",
+                  "gcloud_key_file", "gcloud_tts_lang", "gcloud_tts_voice"))
+    return hashlib.sha256(f"{clean}|{tag}".encode()).hexdigest()
+
+
+def _prune_tts_cache() -> None:
+    try:
+        cutoff = time.time() - TTS_CACHE_TTL
+        for name in os.listdir(TTS_CACHE_DIR):
+            p = os.path.join(TTS_CACHE_DIR, name)
+            try:
+                if os.path.getmtime(p) < cutoff:
+                    os.remove(p)
+            except OSError:
+                pass
+    except FileNotFoundError:
+        pass
+
+
 @app.post("/api/tts")
 async def tts(body: TTSIn):
     if len(body.text) > voice.MAX_TTS_CHARS:
@@ -434,14 +467,36 @@ async def tts(body: TTSIn):
     if not clean:
         raise HTTPException(400, "nothing speakable in text")
     s = config.load()
-    try:
-        audio, mime = await run_in_threadpool(voice.synthesize, clean, s)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    except Exception as e:  # RuntimeError + anything: readable 502 for the UI
-        detail = str(e) or f"{type(e).__name__}"
-        raise HTTPException(502, detail)
-    return Response(content=audio, media_type=mime, headers={"Cache-Control": "no-store"})
+    key = _tts_key(clean, s)
+    path = next((os.path.join(TTS_CACHE_DIR, key + ext)
+                 for ext in (".mp3", ".wav")
+                 if os.path.isfile(os.path.join(TTS_CACHE_DIR, key + ext))), None)
+    if path:
+        with open(path, "rb") as fh:
+            audio = fh.read()
+        mime = "audio/mpeg" if path.endswith(".mp3") else "audio/wav"
+        hit = "hit"
+    else:
+        try:
+            audio, mime = await run_in_threadpool(voice.synthesize, clean, s)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:  # RuntimeError + anything: readable 502 for the UI
+            detail = str(e) or f"{type(e).__name__}"
+            raise HTTPException(502, detail)
+        hit = "miss"
+        # store the take so replays never touch the (rate-limited) provider
+        ext = ".wav" if mime == "audio/wav" else ".mp3"
+        try:
+            os.makedirs(TTS_CACHE_DIR, exist_ok=True)
+            tmp = os.path.join(TTS_CACHE_DIR, f"{key}{ext}.tmp")
+            with open(tmp, "wb") as fh:
+                fh.write(audio)
+            os.replace(tmp, os.path.join(TTS_CACHE_DIR, f"{key}{ext}"))
+        except OSError:
+            pass  # cache is best-effort; the audio still reaches the UI
+    return Response(content=audio, media_type=mime,
+                    headers={"Cache-Control": "no-store", "X-TTS-Cache": hit})
 
 
 @app.post("/api/stt")

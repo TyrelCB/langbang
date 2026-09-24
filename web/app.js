@@ -654,7 +654,7 @@ async function send() {
       if (run && !run.todosTouched) markTodosStale();
       // read the FINAL answer bubble only — mid-run "let me check…" bubbles
       // keep their manual 🔊 (auto-reading play-by-play is filler audio)
-      if (voiceMode === "speak" && asstRaw.trim()) speakRaw(asstRaw);
+      if (voiceMode === "speak" && asstRaw.trim()) speakRaw(asstRaw, asstMsg);
     }
     scrollBottom();
   }
@@ -1108,61 +1108,21 @@ $("#search").addEventListener("keydown", (e) => {
 });
 
 // ---------- voice (read-aloud) ----------
-// Synthesis happens server-side (/api/tts -> one mp3 per request, whole
-// reply at once); we keep a small objectURL queue and play one clip at a
-// time. A fresh speak interrupts whatever was playing — one voice, ever.
-const speakAudio = new Audio();
-let speakQ = [];      // pending object URLs
-let speakBusy = false;
-let speakOwner = null; // bubble whose 🔊 currently reads (■ STOP state)
+// Synthesis happens server-side (/api/tts -> one clip per request; the server
+// disk-caches by text+voice, so even a page reload never re-synthesizes).
+// Per BUBBLE we keep our own Audio + object URL forever: first 🔊 fetches
+// once, every replay/pause/seek afterwards is local. The auto-read queue
+// holds bubbles, not URLs. One voice at a time — starting one stops another.
+let speakQ = [];        // auto-read queue (voice mode) — bubbles awaiting play
+let voiceCur = null;    // bubble whose audio is playing right now
+let speakOwner = null;  // bubble whose 🔊 shows ■ STOP (playing or synthesizing)
+let synthing = false;   // a /api/tts fetch is in flight
+let playSeq = 0;        // bump cancels an in-flight playBubble (STOP mid-synth)
 
-async function speakRaw(raw, owner = null) {
-  const text = raw.trim();
-  if (!text) return;
-  let res;
-  try {
-    res = await fetch("/api/tts", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-    });
-  } catch (e) {
-    return voiceFail("VOICE: server unreachable — " + e);
-  }
-  if (!res.ok) {
-    let msg = "HTTP " + res.status;
-    try { msg = (await res.json()).detail || msg; } catch {}
-    return voiceFail("VOICE: " + msg);
-  }
-  speakQ.push(URL.createObjectURL(await res.blob()));
-  speakOwner = owner;
-  pumpSpeak();
-}
-
-function pumpSpeak() {
-  if (speakBusy || !speakQ.length) return;
-  speakBusy = true;
-  speakAudio.src = speakQ.shift();
-  speakAudio.play().catch((e) => {
-    speakBusy = false; // autoplay/codec problem — voiceFail throttles repeats
-    voiceFail("VOICE: playback failed — " + e);
-  });
-}
-
-function stopSpeaking() {
-  for (const u of speakQ) URL.revokeObjectURL(u);
-  speakQ = [];
-  speakBusy = false;
-  speakAudio.pause();
-  speakAudio.removeAttribute("src");
-  speakAudio.load();
-  markSpeaking(null);
-}
-
-speakAudio.onended = speakAudio.onerror = () => {
-  speakBusy = false;
-  if (!speakQ.length) markSpeaking(null); // natural end (or dead clip skipped)
-  pumpSpeak();
-};
+const fmtMS = (t) =>
+  !isFinite(t)
+    ? "0:00"
+    : `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
 
 function markSpeaking(msg) {
   if (speakOwner && speakOwner._speakBtn) {
@@ -1174,6 +1134,130 @@ function markSpeaking(msg) {
     msg._speakBtn.textContent = "■ STOP";
     msg._speakBtn.classList.add("on");
   }
+}
+
+function syncPlayer(msg) {
+  const a = msg._aud;
+  if (!a || !msg._ptime) return;
+  msg._pp.textContent = a.paused ? "▶" : "⏸";
+  msg._ptime.textContent = fmtMS(a.currentTime) + " / " + fmtMS(a.duration);
+  msg._pfill.style.width =
+    isFinite(a.duration) && a.duration > 0 ? (100 * a.currentTime) / a.duration + "%" : "0%";
+}
+
+function wireAudio(msg) {
+  const a = msg._aud;
+  a.onplay = () => { voiceCur = msg; markSpeaking(msg); syncPlayer(msg); };
+  a.onpause = () => {
+    if (voiceCur === msg) { voiceCur = null; markSpeaking(null); }
+    syncPlayer(msg);
+  };
+  a.onended = () => {
+    if (voiceCur === msg) { voiceCur = null; markSpeaking(null); }
+    syncPlayer(msg);
+    pumpSpeak();
+  };
+  a.ontimeupdate = () => syncPlayer(msg);
+  a.onerror = () => { if (voiceCur === msg) { voiceCur = null; markSpeaking(null); } pumpSpeak(); };
+}
+
+// mini player INSIDE the bubble (pos invariant) — survives the clip, so the
+// bubble stays seekable/pausable for the whole session
+function buildPlayer(msg) {
+  if (msg.querySelector(".tts-player") || !msg.appendChild) return;
+  const p = el("div", "tts-player");
+  const pp = el("button", "cb-btn", "⏸");
+  pp.title = "pause / resume";
+  const back = el("button", "cb-btn", "−5");
+  back.title = "back 5 s";
+  const time = el("span", "tts-time", "0:00 / 0:00");
+  const fwd = el("button", "cb-btn", "+5");
+  fwd.title = "forward 5 s";
+  const bar = el("div", "tts-bar");
+  const fill = el("div", "tts-fill");
+  bar.appendChild(fill);
+  bar.title = "click to seek";
+  const seek = (t) => {
+    const a = msg._aud, d = isFinite(a.duration) ? a.duration : 0;
+    if (!d) return;
+    a.currentTime = Math.max(0, Math.min(t, d - 0.05));
+  };
+  pp.onclick = (e) => {
+    e.stopPropagation();
+    const a = msg._aud;
+    if (a.paused) a.play().catch(() => {}); else a.pause();
+  };
+  back.onclick = (e) => { e.stopPropagation(); seek(msg._aud.currentTime - 5); };
+  fwd.onclick = (e) => { e.stopPropagation(); seek(msg._aud.currentTime + 5); };
+  bar.onpointerdown = (e) => {
+    e.stopPropagation();
+    const a = msg._aud;
+    if (!isFinite(a.duration) || !a.duration) return;
+    const r = bar.getBoundingClientRect();
+    const f = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+    a.currentTime = f * (a.duration - 0.05);
+  };
+  p.append(pp, back, time, fwd, bar);
+  msg._pp = pp; msg._ptime = time; msg._pfill = fill;
+  msg.appendChild(p);
+}
+
+async function synth(msg) {
+  if (msg._aud) return true; // one fetch per bubble, forever
+  let res;
+  try {
+    res = await fetch("/api/tts", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: msg._raw }),
+    });
+  } catch (e) {
+    return voiceFail("VOICE: server unreachable — " + e);
+  }
+  if (!res.ok) {
+    let m = "HTTP " + res.status;
+    try { m = (await res.json()).detail || m; } catch {}
+    return voiceFail("VOICE: " + m);
+  }
+  msg._blob = URL.createObjectURL(await res.blob());
+  msg._aud = new Audio(msg._blob);
+  wireAudio(msg);
+  buildPlayer(msg);
+  return true;
+}
+
+async function playBubble(msg) {
+  const gen = ++playSeq;
+  markSpeaking(msg); // immediate ■ STOP feedback — first synthesis may take seconds
+  synthing = true;
+  const ok = await synth(msg);
+  synthing = false;
+  if (!ok || gen !== playSeq) return; // STOP (or newer play) landed mid-synth
+  if (voiceCur && voiceCur !== msg) voiceCur._aud.pause(); // onpause clears voiceCur
+  await msg._aud.play().catch((e) => {
+    markSpeaking(null);
+    voiceFail("VOICE: playback failed — " + e);
+  });
+}
+
+// auto-read entry point: queue the bubble, pump when the voice is free
+function speakRaw(raw, owner) {
+  const text = raw.trim();
+  if (!text || !owner) return;
+  owner._raw = text;
+  speakQ.push(owner);
+  pumpSpeak();
+}
+
+function pumpSpeak() {
+  if (voiceCur || synthing || !speakQ.length) return;
+  playBubble(speakQ.shift());
+}
+
+function stopSpeaking() {
+  playSeq++; // also cancels a mid-synth playBubble (fetch may finish; we won't play it)
+  speakQ = [];
+  if (voiceCur) voiceCur._aud.pause(); // currentTime survives → resume is free
+  markSpeaking(null);
 }
 
 let lastVoiceFail = 0;
@@ -1190,15 +1274,15 @@ function voiceFail(msg) {
 // innerHTML while streaming, so callers attach only at FINALIZATION.
 function attachSpeak(msg, raw) {
   if (!raw || !raw.trim() || msg.querySelector(".speak-btn")) return;
+  msg._raw = raw.trim();
   const b = el("button", "cb-btn speak-btn", "🔊");
-  b.title = "Read this reply aloud";
-  b.onclick = (e) => {
+  b.title = "Read this reply aloud (replays are instant, no re-synthesis)";
+  b.onclick = async (e) => {
     e.stopPropagation();
-    const stopping = b.textContent === "■ STOP"; // read state BEFORE reset
-    stopSpeaking(); // also clears any other bubble that was reading
-    if (stopping) return;
-    markSpeaking(msg); // immediate ■ STOP feedback — synthesis may take seconds
-    speakRaw(raw, msg);
+    // ■ STOP shows only while THIS bubble owns the voice (playing or mid-fetch)
+    if (speakOwner === msg) { stopSpeaking(); return; } // pause; resume via 🔊/▶ stays free
+    stopSpeaking(); // take the voice from any other bubble, drop pending queue
+    await playBubble(msg); // resumes from pause — zero network for known clips
   };
   msg._speakBtn = b;
   msg.appendChild(b);

@@ -456,6 +456,15 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
 /* sits below the message body, reuses .cb-btn chip chrome */
 .speak-btn { display: block; margin-top: 6px; }
 .speak-btn.on { color: var(--cyan); border-color: var(--cyan); }
+/* per-bubble TTS mini player — inside .msg (chat child-index invariant) */
+.tts-player { display: flex; align-items: center; gap: 5px; margin-top: 6px; }
+.tts-player .cb-btn { padding: 1px 6px; }
+.tts-time { font-size: 10px; color: var(--muted); min-width: 74px;
+  text-align: center; letter-spacing: .5px; }
+.tts-bar { flex: 1; height: 4px; background: var(--line); cursor: pointer;
+  position: relative; min-width: 60px; }
+.tts-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0;
+  background: var(--cyan); }
 /* first <select>s in the app — match .panel-inner input chrome */
 .panel-inner select {
   width: 100%; font: inherit; margin-top: 4px; color: var(--text);
