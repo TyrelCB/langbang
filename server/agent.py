@@ -842,6 +842,41 @@ async def touch_thread(thread_id: str) -> None:
     await _db.commit()
 
 
+# ---- empty-thread sweep ----
+
+async def _sweep_once() -> int:
+    """Drop abandoned 'New chat' rows: default title, untouched for an hour,
+    and empty on top of that (a real thread renamed to 'New chat' with
+    messages survives). Lazy-create means new ones only appear from old
+    clients or direct POSTs; _touch re-inserts the row on first chat, so a
+    swept thread that gets used again resurrects itself."""
+    cur = await _db.execute(
+        "SELECT id FROM threads WHERE title IN ('New chat','') AND updated_at<?",
+        (time.time() - 3600,))
+    n = 0
+    for (tid,) in await cur.fetchall():
+        if not await _live_messages(tid):
+            await delete_thread(tid)
+            n += 1
+    if n:
+        logger.warning("swept %d empty New chat thread(s)", n)
+    return n
+
+
+def start_sweeper() -> None:
+    """Hourly cleanup; first pass immediately after startup."""
+
+    async def loop():
+        while True:
+            try:
+                await _sweep_once()
+            except Exception as e:
+                logger.warning("thread sweep failed: %s", e)
+            await asyncio.sleep(3600)
+
+    asyncio.get_running_loop().create_task(loop())
+
+
 # ---- titles (✎ manual / ⚡ auto / ⟲ initial) + recap ----
 
 def _one_shot(s: dict, max_tokens: int, temperature: float) -> SGlangChatOpenAI:

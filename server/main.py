@@ -24,6 +24,7 @@ async def _startup():
     await agent.init()
     await schedule.init()
     schedule.start_loop()
+    agent.start_sweeper()  # hourly: delete abandoned empty "New chat"s
 
 
 # ---- settings & health ----

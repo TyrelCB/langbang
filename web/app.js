@@ -436,7 +436,7 @@ async function send() {
     return;
   }
   stopSpeaking(); // a new run interrupts whatever was being read aloud
-  if (!threadId) await newThread();
+  if (!threadId) await createThreadNow();
   // upload attachments first; their server-side paths go INTO the message
   // body (that's what the agent — and the persisted history — sees). On
   // failure the draft survives untouched: fix the network, press SEND again.
@@ -689,7 +689,7 @@ function shellSeal(b, { cmd, out, exit, dur }) {
 }
 
 async function runShell(cmd) {
-  if (!threadId) await newThread();
+  if (!threadId) await createThreadNow();
   streaming = true; // reuse the chat gate: no model run may interleave a shell
   aborter = new AbortController();
   setBusy(true);
@@ -1030,14 +1030,21 @@ async function openThread(t) {
 }
 
 async function newThread() {
-  const t = await api.newThread("New chat");
+  // Lazy: NO server row yet — an abandoned "New chat" used to leave a
+  // permanent sidebar ghost. createThreadNow() materializes on first send.
   if (recapAbort) recapAbort.abort();
   closeRecap();
-  threadId = t.id;
+  threadId = null;
   $("#chat").innerHTML = "";
   $("#chat-title").textContent = "NEW CHAT";
   resetTrajView();
   SFX.play("thread_new");
+  refreshThreads();
+}
+
+async function createThreadNow() {
+  const t = await api.newThread("New chat");
+  threadId = t.id;
   refreshThreads();
 }
 
