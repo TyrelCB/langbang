@@ -143,9 +143,16 @@ points at them:
 
 ```bash
 uv sync
-uv run uvicorn server.main:app --port 8123
-# open http://localhost:8123
+uv run uvicorn server.main:app --host 0.0.0.0 --port 8123
+# open http://localhost:8123        (or http://<LAN-IP>:8123 from any device)
 ```
+
+The harness box also runs **Caddy on :80** as a friendly LAN front
+(`/etc/caddy/Caddyfile` → `reverse_proxy 127.0.0.1:8123` with
+`flush_interval -1` so chat SSE streams instead of buffering).
+⚠ This makes `/api/shell` reachable by everything on the LAN — and over
+Tailscale if you're off-network — never expose either port beyond
+LAN/tailnet (no port-forwards, no internet tunnels).
 
 ## Voice (read-aloud + STT)
 
@@ -164,24 +171,27 @@ directory is gitignored; never commit keys).
 
 The mic/voice-chat half is **ready server-side but not wired client-side**:
 `POST /api/stt` takes 16 kHz mono PCM16 WAV (or bare PCM) and returns text.
-Browser recording needs a secure context, so on `http://spark-ee93:8123`
-`getUserMedia` is refused.
+Browser recording needs a secure context, so on `http://<LAN-IP>` (or
+:8123 directly) `getUserMedia` is refused.
 
 **Mic access options (deferred — revisit before building the recorder):**
 
-1. **Caddy + public zone + ACME DNS-01 (decided direction).** Caddy already
-   runs on spark-ee93; `tls dns <provider>` validates via the DNS API, so
+1. **Caddy + public zone + ACME DNS-01 (decided direction).** Caddy now
+   runs on the harness box itself (currently plain HTTP on :80);
+   `tls dns <provider>` validates via the DNS API, so
    nothing opens inbound (no port-forwards — the ⚠ Security rule stands).
    Real wildcard cert → trusted on every machine with zero per-machine CA
    imports. The `langbang` A record points at the LAN IP of whichever box
    hosts the harness today: the record travels with the harness, which is
-   what makes it portable. uvicorn stays loopback-only behind Caddy.
+   what makes it portable. Add the hostname + `tls dns` block to the local
+   Caddyfile when the DNS provider is settled; until then the mic only
+   works over `http://localhost` (secure context) or the SSH tunnel below.
    DNS API token lives in a chmod-600 EnvironmentFile for the Caddy unit,
    never in the repo.
 2. **Self-signed + `uvicorn --ssl-*`** — zero new moving parts, but a
    per-machine CA import and a regen dance whenever the hostname changes.
    Fine as a stopgap.
-3. **SSH tunnel (`ssh -L 8123:localhost:8123 tyrel@spark-ee93`)** — no TLS
+3. **SSH tunnel (`ssh -L 8123:localhost:8123 tyrel@<harness-host>`)** — no TLS
    work at all; the mic works because `http://localhost` is *already* a
    secure context. That nuance also means: on whichever machine literally
    hosts the process, voice chat needs no TLS.
