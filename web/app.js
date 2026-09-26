@@ -1144,7 +1144,10 @@ async function openThread(t) {
   if (liveRun && liveRun.tid !== t.id) parkRun(); // switch mid-run: output leaves with its thread
   threadId = t.id;
   $("#chat-title").textContent = t.title.toUpperCase();
-  const bumped = api.touchThread(t.id); // resuming = current: sorts it to the top
+  // resuming = current: sorts it to the top. Best-effort: a 500 (DB busy
+  // during a heavy run) must not reject after an early `seq` return or after
+  // the render already succeeded — worst case the row just won't re-sort.
+  const bumped = api.touchThread(t.id).catch(() => {});
   const msgs = await api.messages(t.id);
   if (seq !== openSeq) return; // superseded by a newer open/newThread — don't paint
   // returning to the thread that is mid-run: re-attach its parked nodes and
