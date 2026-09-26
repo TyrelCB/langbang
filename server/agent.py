@@ -6,6 +6,7 @@ import os
 import re
 import time
 import uuid
+from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 import aiosqlite
@@ -83,7 +84,7 @@ async def init() -> None:
     # half-written checkpoint transaction that lands between the saver's
     # inserts and its own commit. The DB is WAL, so writers serialize cleanly.
     _edb = await aiosqlite.connect(config.DB_PATH)
-    await _edb.execute("PRAGMA busy_timeout=10000")
+    await _edb.execute("PRAGMA busy_timeout=30000")
     _checkpointer = AsyncSqliteSaver(_db)
     await _checkpointer.setup()
     await _db.executescript(
@@ -261,12 +262,12 @@ def _compaction_hook(s: dict):
             ]
         )
         tid = (get_config() or {}).get("configurable", {}).get("thread_id", "")
-        for m in head:
-            await _db.execute(
-                "INSERT INTO archived_messages(thread_id,msg) VALUES(?,?)",
-                (tid, json.dumps(_msg_dict(m), ensure_ascii=False)),
-            )
-        await _db.commit()
+        async with _wt(_db):
+            for m in head:
+                await _db.execute(
+                    "INSERT INTO archived_messages(thread_id,msg) VALUES(?,?)",
+                    (tid, json.dumps(_msg_dict(m), ensure_ascii=False)),
+                )
         note = HumanMessage(
             content=str(summary.content).strip(),
             additional_kwargs={"lb_compacted": {"count": len(head)}},
@@ -712,6 +713,30 @@ async def _release_tx() -> None:
             pass
 
 
+@asynccontextmanager
+async def _wt(c: aiosqlite.Connection):
+    """Write transaction that can never linger half-open.
+
+    A failed sqlite statement does NOT auto-rollback (see _release_tx): the
+    implicit write txn keeps holding the WAL writer lock and every later
+    writer on every connection times out behind it. Run every multi-statement
+    write through this — the endpoint still 500s on failure, but the wedge
+    dies with the request instead of poisoning the DB for hours. Single
+    statement + commit sites could equally use _set()-style rollback-swallow;
+    this covers the helpers whose failure is what the 2026-09-26 cascade
+    actually showed (touch/rename/compaction writes under concurrent runs).
+    """
+    try:
+        yield
+        await c.commit()
+    except Exception:
+        try:
+            await c.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+
+
 def _cap(x, n: int) -> str:
     """Stringify + truncate for trajectory meta previews (kept small so the
     event table stays bounded; full text lives in the chat transcript)."""
@@ -782,11 +807,11 @@ async def create_thread(title: str = "New chat") -> dict:
     tid = uuid.uuid4().hex[:12]
     now = time.time()
     # orig = seed title: renames (manual/auto) never touch it; ⟲ restores it
-    await _db.execute(
-        "INSERT INTO threads(id,title,created_at,updated_at,orig) VALUES(?,?,?,?,?)",
-        (tid, title, now, now, title),
-    )
-    await _db.commit()
+    async with _wt(_db):
+        await _db.execute(
+            "INSERT INTO threads(id,title,created_at,updated_at,orig) VALUES(?,?,?,?,?)",
+            (tid, title, now, now, title),
+        )
     return {"id": tid, "title": title, "created_at": now, "updated_at": now}
 
 
@@ -835,40 +860,40 @@ async def search_text(m: dict) -> str:
 
 
 async def delete_thread(tid: str) -> None:
-    await _db.execute("DELETE FROM threads WHERE id=?", (tid,))
-    await _db.execute("DELETE FROM archived_messages WHERE thread_id=?", (tid,))
-    await _db.commit()
-    await _edb.execute("DELETE FROM run_events WHERE thread_id=?", (tid,))
-    await _edb.commit()
+    async with _wt(_db):
+        await _db.execute("DELETE FROM threads WHERE id=?", (tid,))
+        await _db.execute("DELETE FROM archived_messages WHERE thread_id=?", (tid,))
+    async with _wt(_edb):
+        await _edb.execute("DELETE FROM run_events WHERE thread_id=?", (tid,))
 
 
 async def _touch(thread_id: str, first_text: str) -> None:
-    cur = await _db.execute("SELECT title FROM threads WHERE id=?", (thread_id,))
-    row = await cur.fetchone()
-    if row is None:
-        title = first_text[:60]
-        now = time.time()
-        await _db.execute(
-            "INSERT INTO threads(id,title,created_at,updated_at,orig) VALUES(?,?,?,?,?)",
-            (thread_id, title, now, now, title),
-        )
-    else:
-        title = row[0]
-        if title == "New chat" or title == "":
-            # first message seeds BOTH title and orig (⟲ reverts here)
+    async with _wt(_db):
+        cur = await _db.execute("SELECT title FROM threads WHERE id=?", (thread_id,))
+        row = await cur.fetchone()
+        if row is None:
+            title = first_text[:60]
+            now = time.time()
             await _db.execute(
-                "UPDATE threads SET title=?, orig=?, updated_at=? WHERE id=?",
-                (first_text[:60], first_text[:60], time.time(), thread_id))
+                "INSERT INTO threads(id,title,created_at,updated_at,orig) VALUES(?,?,?,?,?)",
+                (thread_id, title, now, now, title),
+            )
         else:
-            await _db.execute("UPDATE threads SET updated_at=? WHERE id=?", (time.time(), thread_id))
-    await _db.commit()
+            title = row[0]
+            if title == "New chat" or title == "":
+                # first message seeds BOTH title and orig (⟲ reverts here)
+                await _db.execute(
+                    "UPDATE threads SET title=?, orig=?, updated_at=? WHERE id=?",
+                    (first_text[:60], first_text[:60], time.time(), thread_id))
+            else:
+                await _db.execute("UPDATE threads SET updated_at=? WHERE id=?", (time.time(), thread_id))
 
 
 async def touch_thread(thread_id: str) -> None:
     """Resume-bump: opening a thread counts as current, so it sorts to the
     top of the sidebar. Unknown/deleted ids are a no-op — never resurrect."""
-    await _db.execute("UPDATE threads SET updated_at=? WHERE id=?", (time.time(), thread_id))
-    await _db.commit()
+    async with _wt(_db):
+        await _db.execute("UPDATE threads SET updated_at=? WHERE id=?", (time.time(), thread_id))
 
 
 # ---- empty-thread sweep ----
@@ -950,9 +975,10 @@ async def rename_thread(tid: str, title: str) -> str | None:
     title = (title or "").strip()
     if not title:
         raise ValueError("title must be non-empty")
-    cur = await _db.execute("UPDATE threads SET title=? WHERE id=?", (title[:200], tid))
-    await _db.commit()
-    return title[:200] if cur.rowcount else None
+    async with _wt(_db):
+        cur = await _db.execute("UPDATE threads SET title=? WHERE id=?", (title[:200], tid))
+        hit = cur.rowcount
+    return title[:200] if hit else None
 
 
 async def auto_title(tid: str) -> str | None:
@@ -970,9 +996,10 @@ async def auto_title(tid: str) -> str | None:
     title = title.rstrip(".。").strip()[:80]
     if not title:
         raise RuntimeError("model returned an empty title")
-    cur = await _db.execute("UPDATE threads SET title=? WHERE id=?", (title, tid))
-    await _db.commit()
-    return title if cur.rowcount else None
+    async with _wt(_db):
+        cur = await _db.execute("UPDATE threads SET title=? WHERE id=?", (title, tid))
+        hit = cur.rowcount
+    return title if hit else None
 
 
 async def revert_title(tid: str) -> str | None:

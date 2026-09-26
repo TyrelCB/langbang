@@ -203,10 +203,9 @@ async def create(title: str, prompt: str, cron: str) -> dict:
     now = time.time()
     thread = await agent.create_thread(title)  # the task's run-history notebook
     # column order: id,title,prompt,cron,thread_id,enabled,last_run,next_run,running,created_at
-    await _db.execute(
+    await _set(
         "INSERT INTO schedules VALUES(?,?,?,?,?,1,NULL,?,0,?)",
         (sid, title, prompt, cron, thread["id"], _next_run(cron, now), now))
-    await _db.commit()
     return await get(sid)
 
 
@@ -233,8 +232,7 @@ async def update(sid: str, patch: dict) -> dict | None:
             vals.append(_next_run(r[0]))  # waking up restarts from now
     if cols:
         vals.append(sid)
-        await _db.execute(f"UPDATE schedules SET {', '.join(cols)} WHERE id=?", vals)
-        await _db.commit()
+        await _set(f"UPDATE schedules SET {', '.join(cols)} WHERE id=?", vals)
     return await get(sid)
 
 
@@ -243,8 +241,7 @@ async def delete(sid: str) -> bool:
     r = await cur.fetchone()
     if not r:
         return False
-    await _db.execute("DELETE FROM schedules WHERE id=?", (sid,))
-    await _db.commit()
+    await _set("DELETE FROM schedules WHERE id=?", (sid,))
     await agent.delete_thread(r[0])  # the notebook belongs to the task
     return True
 
