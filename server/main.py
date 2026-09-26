@@ -10,7 +10,7 @@ import uuid
 import httpx
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -18,7 +18,19 @@ from . import agent, config, mcp, schedule, sfxgen, voice
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
-app = FastAPI(title="LangBang")
+
+class _NoStoreJSON(JSONResponse):
+    """Same reason _NoCacheStatic exists for statics: without validators
+    browsers apply heuristic caching to these GETs, and reopening a thread
+    serves a stale /messages from cache (verified with headless chromium —
+    a finished run's transcript was invisible until a hard reload)."""
+
+    def init_headers(self, headers=None):
+        super().init_headers(headers)
+        self.headers["Cache-Control"] = "no-store"
+
+
+app = FastAPI(title="LangBang", default_response_class=_NoStoreJSON)
 
 
 @app.on_event("startup")
@@ -523,7 +535,9 @@ async def stt(request: Request):
 
 @app.get("/")
 async def index():
-    return FileResponse(os.path.join(WEB_DIR, "index.html"))
+    # no-store like the statics: a cached index.html pins stale asset refs
+    return FileResponse(os.path.join(WEB_DIR, "index.html"),
+                        headers={"Cache-Control": "no-store"})
 
 
 class _NoCacheStatic(StaticFiles):
