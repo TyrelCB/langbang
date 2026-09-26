@@ -77,7 +77,7 @@ _read_graph = None
 async def init() -> None:
     global _checkpointer, _db, _edb
     _db = await aiosqlite.connect(config.DB_PATH)
-    await _db.execute("PRAGMA busy_timeout=10000")
+    await _db.execute("PRAGMA busy_timeout=30000")
     # Trajectory rows get their OWN connection: run_chat's generator commits
     # per event, and sharing the checkpointer's connection could commit a
     # half-written checkpoint transaction that lands between the saver's
@@ -685,7 +685,31 @@ async def _log(
         )
         await _edb.commit()
     except Exception:  # noqa: BLE001
-        pass
+        # the swallow MUST roll back: a failed INSERT leaves the implicit
+        # write txn (and the WAL writer lock) open on _edb — every later
+        # writer on _db/`_edb` then times out "database is locked" (the
+        # 2026-09-25 cascade started exactly here)
+        try:
+            await _edb.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def _release_tx() -> None:
+    """Roll both connections back to a clean slate.
+
+    WHY this exists: a failed write (any sqlite error, e.g. "database is
+    locked") does NOT auto-rollback — the half-open write transaction stays
+    open and keeps holding the WAL writer lock, so every later writer on
+    every connection then times out too (the 2026-09-25 incident: one
+    timeout cascaded into a self-sustaining wedge for HOURS). Call this in
+    the run's error/cancel arms: a failed write there otherwise poisons the
+    DB for every subsequent writer."""
+    for c in (_edb, _db):
+        try:
+            await c.rollback()
+        except Exception:  # noqa: BLE001 — last-resort cleanup
+            pass
 
 
 def _cap(x, n: int) -> str:
@@ -1192,6 +1216,9 @@ async def run_chat(
         # LangGraph's own text ("set the recursion_limit config key", docs URL)
         # is misleading here: the user-facing knob is MAX AGENT ITERATIONS, and
         # crucially the checkpoint survives — a new message resumes for free.
+        # a checkpoint write that died mid-flight must not leave its txn
+        # (and the WAL writer lock) open for the next victim
+        await _release_tx()
         await _log(
             thread_id,
             turn_id,
@@ -1209,6 +1236,7 @@ async def run_chat(
             ),
         }
     except Exception as e:  # noqa: BLE001 - stream errors to the UI
+        await _release_tx()  # same reason as above: failed writes don't self-rollback
         await _log(thread_id, turn_id, "error", meta={"message": str(e)[:500]})
         yield {"type": "error", "message": f"{type(e).__name__}: {e}"}
     except (asyncio.CancelledError, GeneratorExit):
@@ -1218,10 +1246,15 @@ async def run_chat(
         # only a lone user row and looked like the message vanished into a
         # void. Breadcrumb the trajectory; fire-and-forget, because awaiting
         # anything here either re-raises (CancelledError) or is illegal
-        # (GeneratorExit inside a closing generator).
-        _spawn(_log(thread_id, turn_id, "error", meta={
-            "message": "RUN CANCELLED — client disconnected mid-run (refresh or STOP)",
-        }))
+        # (GeneratorExit inside a closing generator). A mid-write cancellation
+        # is the MOST likely way to strand an open txn holding the DB lock,
+        # so the cleanup releases it before the breadcrumb.
+        async def _cancel_cleanup() -> None:
+            await _release_tx()
+            await _log(thread_id, turn_id, "error", meta={
+                "message": "RUN CANCELLED — client disconnected mid-run (refresh or STOP)",
+            })
+        _spawn(_cancel_cleanup())
         raise
 
 

@@ -34,73 +34,85 @@ let trajVisible = false;
 let voiceMode = localStorage.getItem("lb-voice") === "speak" ? "speak" : "off";
 
 // ---------- API ----------
+// fetch + parse with a READABLE failure: FastAPI's 500 body is plain text,
+// so a bare .json() died with "unexpected character at line 1 column 1" and
+// hid the real cause (e.g. "database is locked") from the UI entirely.
+async function J(res) {
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    let m = body.slice(0, 200);
+    try { m = JSON.parse(body).detail || m; } catch { /* keep text */ }
+    throw new Error(`HTTP ${res.status}: ${m || res.statusText}`);
+  }
+  return res.json();
+}
 const api = {
-  async settings() { return (await fetch("/api/settings")).json(); },
+  async settings() { return J(await fetch("/api/settings")); },
   async saveSettings(patch) {
-    return (await fetch("/api/settings", {
+    return J(await fetch("/api/settings", {
       method: "PUT", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ patch }),
-    })).json();
+    }));
   },
   async mcpTest(config) {
-    return (await fetch("/api/mcp/test", {
+    return J(await fetch("/api/mcp/test", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ config }),
-    })).json();
+    }));
   },
-  async soundsSlots() { return (await fetch("/api/sounds/slots")).json(); },
+  async soundsSlots() { return J(await fetch("/api/sounds/slots")); },
   async sfxRegen(slot) {
-    return (await fetch("/api/sounds/regen", {
+    return J(await fetch("/api/sounds/regen", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ slot }),
-    })).json();
+    }));
   },
-  async sfxRegenStatus(slot) { return (await fetch("/api/sounds/regen/" + slot)).json(); },
-  async health() { return (await fetch("/api/health")).json(); },
-  async threads() { return (await fetch("/api/threads")).json(); },
+  async sfxRegenStatus(slot) { return J(await fetch("/api/sounds/regen/" + slot)); },
+  async health() { return J(await fetch("/api/health")); },
+  async threads() { return J(await fetch("/api/threads")); },
   async newThread(title) {
-    return (await fetch("/api/threads", {
+    return J(await fetch("/api/threads", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title }),
-    })).json();
+    }));
   },
   async delThread(id) { await fetch("/api/threads/" + id, { method: "DELETE" }); },
   async renameThread(id, title) {
-    return (await fetch("/api/threads/" + id, {
+    return J(await fetch("/api/threads/" + id, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title }),
-    })).json();
+    }));
   },
   async autoTitle(id) {
-    return (await fetch(`/api/threads/${id}/retitle`, { method: "POST" })).json();
+    return J(await fetch(`/api/threads/${id}/retitle`, { method: "POST" }));
   },
   async revertTitle(id) {
-    return (await fetch(`/api/threads/${id}/revert-title`, { method: "POST" })).json();
+    return J(await fetch(`/api/threads/${id}/revert-title`, { method: "POST" }));
   },
   async recap(id) {
-    return (await fetch(`/api/threads/${id}/recap`, { method: "POST" })).json();
+    return J(await fetch(`/api/threads/${id}/recap`, { method: "POST" }));
   },
   async touchThread(id) { await fetch("/api/threads/" + id + "/touch", { method: "POST" }); },
-  async messages(id) { return (await fetch(`/api/threads/${id}/messages`)).json(); },
-  async trajectory(id) { return (await fetch(`/api/threads/${id}/trajectory`)).json(); },
-  async search(q) { return (await fetch("/api/search?q=" + encodeURIComponent(q))).json(); },
-  async schedules() { return (await fetch("/api/schedules")).json(); },
+  async messages(id) { return J(await fetch(`/api/threads/${id}/messages`)); },
+  async trajectory(id) { return J(await fetch(`/api/threads/${id}/trajectory`)); },
+  async search(q) { return J(await fetch("/api/search?q=" + encodeURIComponent(q))); },
+  async schedules() { return J(await fetch("/api/schedules")); },
   async newSchedule(t) {
-    return (await fetch("/api/schedules", {
+    return J(await fetch("/api/schedules", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(t),
-    })).json();
+    }));
   },
   async putSchedule(id, patch) {
-    return (await fetch("/api/schedules/" + id, {
+    return J(await fetch("/api/schedules/" + id, {
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch),
-    })).json();
+    }));
   },
   async delSchedule(id) { await fetch("/api/schedules/" + id, { method: "DELETE" }); },
   async runSchedule(id) {
-    return (await fetch("/api/schedules/" + id + "/run", { method: "POST" })).json();
+    return J(await fetch("/api/schedules/" + id + "/run", { method: "POST" }));
   },
   async cronNext(cron) {
-    return (await fetch("/api/schedules/next?cron=" + encodeURIComponent(cron))).json();
+    return J(await fetch("/api/schedules/next?cron=" + encodeURIComponent(cron)));
   },
 };
 
@@ -438,7 +450,12 @@ async function send() {
     return;
   }
   stopSpeaking(); // a new run interrupts whatever was being read aloud
-  if (!threadId) await createThreadNow();
+  if (!threadId) {
+    // lazy row creation can fail (server wedged?) — say so INSTEAD of
+    // dropping the message into an unhandled rejection
+    try { await createThreadNow(); }
+    catch (e) { SFX.play("error"); addMsg("error", "COULD NOT START THREAD: " + e.message); return; }
+  }
   // upload attachments first; their server-side paths go INTO the message
   // body (that's what the agent — and the persisted history — sees). On
   // failure the draft survives untouched: fix the network, press SEND again.
@@ -716,7 +733,12 @@ function shellSeal(b, { cmd, out, exit, dur }) {
 }
 
 async function runShell(cmd) {
-  if (!threadId) await createThreadNow();
+  if (!threadId) {
+    // lazy row creation can fail (server wedged?) — say so INSTEAD of
+    // dropping the message into an unhandled rejection
+    try { await createThreadNow(); }
+    catch (e) { SFX.play("error"); addMsg("error", "COULD NOT START THREAD: " + e.message); return; }
+  }
   streaming = true; // reuse the chat gate: no model run may interleave a shell
   // same DOM-ownership bundle as send(): a `! sleep 300` must keep parking
   // its card off-screen once the user has switched threads mid-await

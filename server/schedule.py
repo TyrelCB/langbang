@@ -42,6 +42,17 @@ async def init() -> None:
           created_at REAL);
         """
     )
+    # Stale bookkeeping from a dead process: a run that died mid-flight (or
+    # whose finally-block UPDATE itself hit "database is locked") leaves
+    # running=1 in the DB forever — the UI shows "RUNNING" hours after the
+    # run is gone, and the due-scan below filters the task out of every tick.
+    # After a process restart any running=1 is stale by definition.
+    cur = await _db.execute("SELECT title FROM schedules WHERE running=1")
+    stale = [r[0] for r in await cur.fetchall()]
+    if stale:
+        await _db.execute("UPDATE schedules SET running=0 WHERE running=1")
+        await _db.commit()
+        logger.warning("cleared stale running flags on startup: %s", stale)
     # fresh next_run for every enabled task: anything missed while the
     # server was down is skipped, not replayed
     now = time.time()
@@ -79,6 +90,13 @@ async def _loop() -> None:
             raise
         except Exception:  # noqa: BLE001 - the loop must outlive any task
             logger.exception("schedule loop tick failed")
+            # a failed statement leaves its write txn (and the WAL writer
+            # lock) OPEN on this connection — clear it or the next tick
+            # inherits the poison, forever (see _set's docstring)
+            try:
+                await _db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
             await asyncio.sleep(5.0)
 
 
@@ -93,18 +111,44 @@ def _next_run(cron: str, frm: float | None = None) -> float:
     return croniter(cron, base).get_next(datetime).timestamp()
 
 
+async def _set(sql: str, args: tuple = (), tries: int = 5) -> int:
+    """Bookkeeping write that SURVIVES transient 'database is locked'.
+
+    The incident this guards: a failed write in aiosqlite does NOT auto-
+    rollback — the connection keeps its half-open write transaction and its
+    WAL write lock, so every later writer on any connection times out too
+    (cascade). Roll back first to release any such poison, then retry. The
+    finally-block flag-clear MUST land; if it doesn't, the UI shows a
+    phantom RUNNING forever and the due-scan skips the task permanently."""
+    last: Exception | None = None
+    delay = 0.5
+    for _ in range(tries):
+        try:
+            cur = await _db.execute(sql, args)
+            await _db.commit()
+            return cur.rowcount
+        except Exception as e:  # noqa: BLE001
+            last = e
+            try:
+                await _db.rollback()  # drop the failed txn, release its locks
+            except Exception:  # noqa: BLE001
+                pass
+            await asyncio.sleep(delay)
+            delay *= 2
+    raise RuntimeError(f"schedule bookkeeping write failed: {last}") from last
+
+
 async def _fire(row: dict, manual: bool = False) -> None:
     """Drain run_chat as a headless consumer. run_chat logs its own errors
     into the thread trajectory; the try/except only protects the loop.
     The lock spans the whole run: cron fires and run-now clicks serialize."""
     rid = row["id"]
     async with _lock:
-        cur = await _db.execute("SELECT running FROM schedules WHERE id=?", (rid,))
-        r = await cur.fetchone()
-        if not r or r[0]:
-            return  # already in flight (loop vs run-now race)
-        await _db.execute("UPDATE schedules SET running=1 WHERE id=?", (rid,))
-        await _db.commit()
+        # conditional single write (no read-then-write window); rowcount 0
+        # means already in flight (loop vs run-now race)
+        if not await _set("UPDATE schedules SET running=1 WHERE id=? AND running=0",
+                          (rid,)):
+            return
         logger.info("schedule %r firing in thread %s", row["title"], row["thread_id"])
         try:
             s = config.load()  # live config per run, same contract as /api/chat
@@ -120,10 +164,13 @@ async def _fire(row: dict, manual: bool = False) -> None:
         finally:
             # a manual run must not shift the cron rhythm
             nxt = row["next_run"] if manual else _next_run(row["cron"])
-            await _db.execute(
-                "UPDATE schedules SET running=0, last_run=?, next_run=? WHERE id=?",
-                (time.time(), nxt, rid))
-            await _db.commit()
+            try:
+                await _set(
+                    "UPDATE schedules SET running=0, last_run=?, next_run=? WHERE id=?",
+                    (time.time(), nxt, rid))
+            except RuntimeError:
+                logger.exception("schedule %r: running flag STUCK (restart to clear)",
+                                 row["title"])
 
 
 # ---- CRUD (used by main.py routes) ----
