@@ -24,6 +24,8 @@ const IMG_TYPE_RE = new RegExp("^image/(png|jpeg|webp|gif)$");
 
 // agentic-visibility state
 let run = null;        // live-run bundle {t0, iv, tools:Map, subs:Map, stats} while streaming
+let liveRun = null;    // the streaming run's DOM-ownership bundle (see send()/runShell):
+                       // {tid, off, nodes, viewing, match} — parked nodes live in .off
 let trajCache = null;  // trajectory rows/totals for the current thread
 let trajVisible = false;
 
@@ -264,7 +266,7 @@ function imagesOf(content) {
 }
 
 // ---------- rendering ----------
-function addMsg(role, text, images) {
+function addMsg(role, text, images, host) {
   const m = el("div", "msg " + role);
   setMarkdown(m, text);
   for (const url of images || []) {
@@ -272,15 +274,15 @@ function addMsg(role, text, images) {
     img.src = url;
     m.insertBefore(img, m.firstChild);
   }
-  $("#chat").appendChild(m);
+  (host || $("#chat")).appendChild(m);
   scrollBottom();
   return m;
 }
 
-function addMsgRaw(cls, text) {
+function addMsgRaw(cls, text, host) {
   // plain-text row (no markdown round-trip) — usage readouts etc.
   const m = el("div", cls, text);
-  $("#chat").appendChild(m);
+  (host || $("#chat")).appendChild(m);
   scrollBottom();
   return m;
 }
@@ -294,12 +296,12 @@ function buildToolCard(label, input) {
   return d;
 }
 
-function addBlock(kind, label) {
+function addBlock(kind, label, host) {
   const d = el("details", "block " + kind);
   const s = el("summary", null, label);
   d.appendChild(s);
   d.appendChild(el("pre"));
-  $("#chat").appendChild(d);
+  (host || $("#chat")).appendChild(d);
   scrollBottom();
   return d;
 }
@@ -469,7 +471,7 @@ async function send() {
   pendingFiles = [];
   renderAttachStrip();
   $("#chat")._pinned = true; // sending always reveals your own message
-  addMsg("user", msgText, images);
+  const userBubble = addMsg("user", msgText, images);
   SFX.play("message_sent");
   streaming = true;
   aborter = new AbortController();
@@ -483,14 +485,33 @@ async function send() {
     subs: new Map(),  // task run_id -> {card, body, t0}
     stats: { steps: 0, llm_s: 0, tool_s: 0, in: 0, out: 0, ttfts: 0, ttft_n: 0 },
     todosTouched: false, // did THIS run write the list? drives the stale badge
+    // Thread ownership: this run's DOM belongs to ITS thread. The user can
+    // switch threads mid-run (streaming only gates SEND), so every live node
+    // is tracked here; while another thread is on screen the nodes park in
+    // the detached .off host instead of leaking into it (parkRun/resumeRun
+    // in openThread). Server-side persistence was never the bug — this is
+    // purely the display-layer fix.
+    tid: threadId,
+    off: el("div"),
+    nodes: [userBubble], // run's top-level #chat children, in creation order
+    viewing: true,
+    // resumeRun() slices server history right before this message — the run's
+    // parked nodes ARE the tail from here on (later identical texts win:
+    // scanning from the end finds OUR occurrence)
+    match: (m) => m.role === "human" && !m.shell && textOf(m.content) === msgText,
   };
+  liveRun = run;
+  // every #chat append this run makes goes through CH()/put(): the live pane
+  // while its thread is on screen, the off-screen host while it isn't.
+  const CH = () => (run.viewing ? $("#chat") : run.off);
+  const put = (n) => { CH().appendChild(n); run.nodes.push(n); return n; };
   $("#sb-live").classList.remove("hidden");
   // In-pane liveness card: on a big context the first token can take 30s+
   // (prefill), and a chat pane that shows nothing reads as "broken". Lives
   // until the first stream event of any kind (handleEvent) or teardown.
   const ctxTok = (threads.find((x) => x.id === threadId) || {}).context_tokens || 0;
   run.waitLabel = "⏳ AWAITING MODEL" + (ctxTok ? ` — CTX ~${fmtTok(ctxTok)}` : "");
-  run.waiting = addBlock("waiting", run.waitLabel + " …");
+  run.waiting = put(addBlock("waiting", run.waitLabel + " …", CH()));
   run.waiting.open = true;
   tickRun();
 
@@ -500,7 +521,7 @@ async function send() {
   let renderTimer = null;
   const ensureAsst = () => {
     if (!asstMsg) {
-      asstMsg = addMsg("assistant", "");
+      asstMsg = put(addMsg("assistant", "", null, CH()));
       asstRaw = "";
       asstMsg.classList.add("cursor");
     }
@@ -525,7 +546,7 @@ async function send() {
   try {
     const res = await fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ thread_id: threadId, text: msgText, images }),
+      body: JSON.stringify({ thread_id: run.tid, text: msgText, images }),
       signal: aborter.signal,
     });
     const reader = res.body.getReader();
@@ -544,9 +565,9 @@ async function send() {
     }
   } catch (e) {
     if (e.name === "AbortError") {
-      addMsg("error", "TRANSMISSION ABORTED");
+      put(addMsg("error", "TRANSMISSION ABORTED", null, CH()));
     } else {
-      addMsg("error", "CONNECTION LOST: " + e);
+      put(addMsg("error", "CONNECTION LOST: " + e, null, CH()));
       SFX.play("error");
     }
   }
@@ -567,6 +588,7 @@ async function send() {
     card.open = false;
   }
   run = null;
+  liveRun = null;
   $("#sb-live").classList.add("hidden");
   await refreshThreads();
   // rows are committed per-event server-side, so totals read back coherently
@@ -591,7 +613,7 @@ async function send() {
         attachSpeak(asstMsg, asstRaw);
         asstMsg = null;
       }
-      let card, host = $("#chat");
+      let card, host = null;
       if (ev.name === "task") {
         // sub-agent run: the card IS the live activity container — inner
         // tool cards nest into its body instead of into #chat
@@ -605,7 +627,8 @@ async function send() {
         if (ev.sub && run.subs.get(ev.sub)) host = run.subs.get(ev.sub).body;
       }
       card.open = true;
-      host.appendChild(card);
+      if (host) host.appendChild(card);
+      else put(card); // top-level: parked with the run when its thread is off-screen
       run.tools.set(ev.run_id, card);
     } else if (ev.type === "tool_end") {
       SFX.play("tool_end");
@@ -627,7 +650,9 @@ async function send() {
       }
     } else if (ev.type === "todos") {
       if (run) run.todosTouched = true;
-      renderTodos(ev.todos);
+      // the to-do panel shows the OPEN thread's list — a parked run must not
+      // paint over another thread's; replayTodos() redraws ours on switch-back
+      if (run && run.viewing) renderTodos(ev.todos);
     } else if (ev.type === "usage") {
       // one line per model call (ReAct rounds and the compaction summarizer
       // each report their own); prefill_tps is ttft-inclusive, so it's a
@@ -638,20 +663,22 @@ async function send() {
       run.stats.llm_s += ev.seconds || 0;
       run.stats.ttfts += ev.ttft || 0;
       run.stats.ttft_n++;
-      addMsgRaw(
+      put(addMsgRaw(
         "usage",
         `⚡ IN ${fmtTok(ev.input)} → OUT ${fmtTok(ev.output)} · TTFT ${ev.ttft}s · ` +
-          `PREFILL ~${fmtTok(ev.prefill_tps)}/s · DECODE ${ev.decode_tps}/s · ${ev.seconds}s`
-      );
+          `PREFILL ~${fmtTok(ev.prefill_tps)}/s · DECODE ${ev.decode_tps}/s · ${ev.seconds}s`,
+        CH()
+      ));
     } else if (ev.type === "error") {
       SFX.play("error");
-      addMsg("error", ev.message);
+      put(addMsg("error", ev.message, null, CH()));
     } else if (ev.type === "done") {
       SFX.play("message_received");
       // run ended without ever writing the list while items sit open → the
       // card shows a mid-run snapshot; say so (model finished, bookkeeping
-      // didn't follow — e.g. a resumed run that dove straight back to work)
-      if (run && !run.todosTouched) markTodosStale();
+      // didn't follow — e.g. a resumed run that dove straight back to work).
+      // Only while OUR thread is on screen — the panel shows the open thread.
+      if (run && run.viewing && !run.todosTouched) markTodosStale();
       // read the FINAL answer bubble only — mid-run "let me check…" bubbles
       // keep their manual 🔊 (auto-reading play-by-play is filler audio)
       if (voiceMode === "speak" && asstRaw.trim()) speakRaw(asstRaw, asstMsg);
@@ -676,8 +703,8 @@ function stopGeneration() {
 }
 
 // ---------- shell mode (`!cmd`): run on the server, no model call ----------
-function shellBlock(cmd) {
-  const b = addBlock("shell", `$ ${cmd} …`);
+function shellBlock(cmd, host) {
+  const b = addBlock("shell", `$ ${cmd} …`, host);
   b.open = true; // user ran it to see the result — never hide the output
   return b;
 }
@@ -691,15 +718,23 @@ function shellSeal(b, { cmd, out, exit, dur }) {
 async function runShell(cmd) {
   if (!threadId) await createThreadNow();
   streaming = true; // reuse the chat gate: no model run may interleave a shell
+  // same DOM-ownership bundle as send(): a `! sleep 300` must keep parking
+  // its card off-screen once the user has switched threads mid-await
+  liveRun = {
+    tid: threadId, off: el("div"), nodes: [], viewing: true,
+    match: (m) => m.shell && m.shell.cmd === cmd,
+  };
+  const CH = () => (liveRun.viewing ? $("#chat") : liveRun.off);
   aborter = new AbortController();
   setBusy(true);
   SFX.play("tool_start");
   $("#chat")._pinned = true; // same reveal rule as send()
-  const card = shellBlock(cmd);
+  const card = shellBlock(cmd, CH());
+  liveRun.nodes.push(card);
   try {
     const res = await fetch("/api/shell", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ thread_id: threadId, command: cmd }),
+      body: JSON.stringify({ thread_id: liveRun.tid, command: cmd }),
       signal: aborter.signal,
     });
     if (!res.ok) throw new Error((await res.text()).slice(0, 300) || String(res.status));
@@ -713,11 +748,12 @@ async function runShell(cmd) {
     } else {
       SFX.play("error");
       card.remove();
-      addMsg("error", "SHELL FAILED: " + e.message);
+      liveRun.nodes.push(addMsg("error", "SHELL FAILED: " + e.message, null, CH()));
     }
   }
   streaming = false;
   aborter = null;
+  liveRun = null;
   setBusy(false);
   await refreshThreads(); // context grew — CTX chip and thread order may move
   refreshStats();
@@ -987,7 +1023,10 @@ async function refreshThreads() {
         return;
       }
       await api.delThread(t.id);
-      if (t.id === threadId) { threadId = null; $("#chat").innerHTML = ""; resetTrajView(); }
+      // park BEFORE the wipe: a run streaming in this very thread keeps its
+      // nodes off-screen until its stream tears itself down (deleted thread
+      // can never be re-opened, so the host is simply dropped)
+      if (t.id === threadId) { parkRun(); threadId = null; $("#chat").innerHTML = ""; resetTrajView(); }
       refreshThreads();
     };
     d.appendChild(x);
@@ -1031,15 +1070,60 @@ function updateCtxTag() {
   $("#ctx-tag").textContent = t ? "CTX ~" + fmtTok(t.context_tokens) : "";
 }
 
+// ---------- live-run thread ownership ----------
+// send()/runShell() mark their DOM as belonging to their own thread. If the
+// user switches threads mid-run, parkRun() moves the run's top-level nodes
+// into a detached host (later events append there directly via CH());
+// resumeRun() re-attaches them IN ORDER and draws history only up to the
+// run's prompt — re-rendering the full server history would double-paint the
+// very tool cards/text that are still streaming into the parked nodes.
+function parkRun() {
+  const r = liveRun;
+  if (!r) return;
+  r.viewing = false;
+  for (const n of r.nodes) if (n.parentNode === $("#chat")) r.off.appendChild(n);
+}
+
+function resumeRun(msgs) {
+  const r = liveRun;
+  if (!r) return false;
+  let idx = -1;
+  for (let i = msgs.length - 1; i >= 0; i--)
+    if (r.match(msgs[i])) { idx = i; break; }
+  // The run's own turn only reaches graph state when its superstep CHECKPOINT
+  // commits — measured: mid-tool-run the raw checkpoint can still show just
+  // the PREVIOUS turns (a shell turn never lands until it commits, and
+  // compaction can eat the prompt entirely). No match therefore means the
+  // whole list is the committed prefix that the parked tail continues.
+  const head = idx < 0 ? msgs : msgs.slice(0, idx);
+  for (const n of r.nodes) if (n.parentNode === $("#chat")) r.off.appendChild(n);
+  r.viewing = true;
+  renderHistory(head);
+  for (const n of r.nodes) if (n.parentNode === r.off) $("#chat").appendChild(n);
+  scrollBottom();
+  return true;
+}
+
+// fast thread-switch race: an earlier openThread's messages fetch can land
+// AFTER a later one's — without this token the stale response paints thread
+// B's bubbles under A's header (render is the async part; title/threadId aren't)
+let openSeq = 0;
+
 async function openThread(t) {
+  const seq = ++openSeq;
   SFX.play("click");
   if (recapAbort) recapAbort.abort();
   closeRecap(); // one thread's recap must not follow you to another
+  if (liveRun && liveRun.tid !== t.id) parkRun(); // switch mid-run: output leaves with its thread
   threadId = t.id;
   $("#chat-title").textContent = t.title.toUpperCase();
   const bumped = api.touchThread(t.id); // resuming = current: sorts it to the top
   const msgs = await api.messages(t.id);
-  renderHistory(msgs);
+  if (seq !== openSeq) return; // superseded by a newer open/newThread — don't paint
+  // returning to the thread that is mid-run: re-attach its parked nodes and
+  // let them keep streaming (resumeRun draws the history above them);
+  // any other case redraws the whole committed transcript
+  if (!(liveRun && liveRun.tid === t.id && resumeRun(msgs))) renderHistory(msgs);
   replayTodos(msgs); // last write_todos call re-draws the panel on switch/reload
   refreshStats();
   await bumped; // order may already have moved — refresh AFTER the bump lands
@@ -1049,8 +1133,10 @@ async function openThread(t) {
 async function newThread() {
   // Lazy: NO server row yet — an abandoned "New chat" used to leave a
   // permanent sidebar ghost. createThreadNow() materializes on first send.
+  openSeq++; // invalidate any in-flight openThread render (see openSeq)
   if (recapAbort) recapAbort.abort();
   closeRecap();
+  parkRun(); // switch to a draft: a mid-run thread's output stays behind
   threadId = null;
   $("#chat").innerHTML = "";
   $("#chat-title").textContent = "NEW CHAT";
