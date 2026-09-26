@@ -25,7 +25,13 @@ body {
   background-image:
     repeating-linear-gradient(0deg, transparent 0 2px, rgba(63,214,255,.012) 2px 4px);
 }
-#app { display: flex; height: 100vh; }
+#app { display: flex; height: 100vh; height: 100dvh; }
+/* phone drawer chrome (see the media block at the bottom): hidden off-phone */
+#nav-scrim { display: none; }
+#btn-nav { display: none; }
+/* ✕ two-step arming is a double-TAP on touch — without this the browser
+   can interpret it as double-tap-zoom instead of two clicks */
+button, .thread .a, .thread .x { touch-action: manipulation; }
 
 /* sidebar — narrow at rest, eases wider while the pointer is in it so
    titles (whose ⟲⚡✎✕ icons are hover-revealed) get room to be read */
@@ -114,7 +120,9 @@ body {
 #btn-reasoning { font: inherit; font-size: 12px; letter-spacing: 1px; padding: 3px 10px; }
 #btn-reasoning.on { color: var(--cyan); border-color: var(--cyan-dim); }
 body.hide-reasoning .block.thinking { display: none; }
-#chat-title { color: var(--orange); letter-spacing: 2px; }
+/* ellipsized so long titles can never re-flow the topbar (phone: one line) */
+#chat-title { color: var(--orange); letter-spacing: 2px; flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #model-tag { color: var(--muted); font-size: 12px; }
 #chat { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
 
@@ -235,7 +243,10 @@ body.hide-reasoning .block.thinking { display: none; }
 .cfg-card h3 { margin: 0 0 10px; color: var(--cyan); font-size: 12px; font-weight: 600;
   letter-spacing: 2px; }
 .cfg-card label:last-child { margin-bottom: 0; }
-@media (max-width: 860px) { .cfg-grid { grid-template-columns: 1fr; } }
+/* minmax(0,1fr) not bare 1fr: a plain 1fr track floors at min-content, and
+   the config cards (size=38 inputs, long placeholders) min-out at ~820px —
+   which stretched the whole layout viewport on phones */
+@media (max-width: 860px) { .cfg-grid { grid-template-columns: minmax(0, 1fr); } }
 .panel-inner h2 { color: var(--cyan); letter-spacing: 3px; margin-top: 0; }
 .panel-inner label { display: block; margin-bottom: 12px; color: var(--muted); letter-spacing: 1px; }
 .panel-inner input, .panel-inner textarea {
@@ -484,3 +495,47 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
 
 /* to-do card: run ended without reconciling an open list */
 .todo-stale { color: var(--orange); }
+
+/* ---- phone: sidebar becomes an off-canvas drawer (☰ in the topbar + scrim),
+   topbar buttons drop to their own line, bubbles widen, config rows stack ---- */
+@media (max-width: 720px) {
+  #sidebar {
+    position: fixed; left: 0; top: 0; bottom: 0; z-index: 15;
+    width: min(320px, 86vw); min-width: 0; padding: 12px 14px;
+    transform: translateX(-105%); transition: transform .18s ease;
+    box-shadow: 4px 0 18px rgba(0, 0, 0, .6);
+  }
+  /* the hover-widen rule is meaningless (and would double-width the drawer)
+     at this size — pin it back */
+  #sidebar:hover { width: min(320px, 86vw); min-width: 0; }
+  #app.nav-open #sidebar { transform: none; }
+  #app.nav-open #nav-scrim { display: block; position: fixed; inset: 0;
+    background: rgba(2, 6, 12, .6); z-index: 14; }
+  #btn-nav { display: inline-block; }
+
+  #topbar { flex-wrap: wrap; gap: 6px 8px; padding: 8px 10px; }
+  /* wrap inside the group too — its buttons' min-content widths add up to
+     more than a phone line, and a nowrap flex row would stretch the whole
+     layout viewport instead (64 px of phantom width on a 390 px phone) */
+  .topbar-right { width: 100%; flex-wrap: wrap; justify-content: flex-start; gap: 6px; }
+  .topbar-right .btn { padding: 3px 8px; font-size: 11px; }
+
+  #chat { padding: 12px 10px; }
+  .msg, .block, .usage { max-width: 92%; }
+  #composer { padding: 8px 10px; gap: 8px; }
+  #btn-attach, #btn-send { padding: 8px 10px; }
+  #attach-strip { padding: 0 10px; }
+  #todo-panel { padding: 8px 10px; }
+  #statusbar { padding: 4px 10px; }
+
+  .panel-inner { max-height: 88dvh; padding: 14px; }
+  /* config label rows stack at this width (button-only .rows unaffected);
+     inputs were overflowing the card to the right otherwise */
+  .row { flex-wrap: wrap; }
+  .row > label { flex: 1 1 100%; }
+}
+
+/* touch devices have no hover to reveal row actions with — show them always */
+@media (hover: none) {
+  .thread .a, .thread .x { display: inline-block; }
+}

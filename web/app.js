@@ -1104,6 +1104,10 @@ function resumeRun(msgs) {
   return true;
 }
 
+// phone drawer: on ≤720px the sidebar is off-canvas (☰ + scrim); closing is a
+// no-op on desktop, so every "you have a thread now" path can call it freely
+function closeNav() { $("#app").classList.remove("nav-open"); }
+
 // fast thread-switch race: an earlier openThread's messages fetch can land
 // AFTER a later one's — without this token the stale response paints thread
 // B's bubbles under A's header (render is the async part; title/threadId aren't)
@@ -1112,6 +1116,7 @@ let openSeq = 0;
 async function openThread(t) {
   const seq = ++openSeq;
   SFX.play("click");
+  closeNav();
   if (recapAbort) recapAbort.abort();
   closeRecap(); // one thread's recap must not follow you to another
   if (liveRun && liveRun.tid !== t.id) parkRun(); // switch mid-run: output leaves with its thread
@@ -1134,6 +1139,7 @@ async function newThread() {
   // Lazy: NO server row yet — an abandoned "New chat" used to leave a
   // permanent sidebar ghost. createThreadNow() materializes on first send.
   openSeq++; // invalidate any in-flight openThread render (see openSeq)
+  closeNav();
   if (recapAbort) recapAbort.abort();
   closeRecap();
   parkRun(); // switch to a draft: a mid-run thread's output stays behind
@@ -2053,7 +2059,7 @@ $("#sched-cron").addEventListener("input", () => {
   clearTimeout(schedPrevT);
   schedPrevT = setTimeout(schedPreviewNow, 350);
 });
-$("#btn-schedules").onclick = openSchedules;
+$("#btn-schedules").onclick = () => { closeNav(); openSchedules(); };
 $("#btn-sched-close").onclick = () => { SFX.play("click"); closeSchedules(); };
 $("#btn-sched-new").onclick = schedNew;
 $("#btn-sched-save").onclick = saveScheduleTask;
@@ -2077,7 +2083,10 @@ $("#btn-send").onclick = () => {
   send();
 };
 $("#btn-new").onclick = () => { SFX.play("click"); newThread(); };
-$("#btn-settings").onclick = openSettings;
+$("#btn-settings").onclick = () => { closeNav(); openSettings(); };
+// phone drawer: ☰ toggles, scrim click closes (openThread/newThread also close)
+$("#btn-nav").onclick = () => { SFX.play("click"); $("#app").classList.toggle("nav-open"); };
+$("#nav-scrim").onclick = closeNav;
 $("#btn-save").onclick = saveSettings;
 $("#btn-cancel").onclick = () => $("#settings-panel").classList.add("hidden");
 $("#input").addEventListener("keydown", (e) => {
