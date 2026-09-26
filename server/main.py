@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import agent, config, mcp, schedule, sfxgen, voice
+from . import agent, config, mcp, runs, schedule, sfxgen, voice
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -128,6 +128,7 @@ async def new_thread(body: ThreadIn):
 
 @app.delete("/api/threads/{tid}")
 async def del_thread(tid: str):
+    runs.cancel(tid)  # a detached run must not outlive its thread's row
     await agent.delete_thread(tid)
     return {"ok": True}
 
@@ -396,15 +397,53 @@ async def chat(body: ChatIn):
             if len(m.group(2)) > MAX_IMG_B64:
                 raise HTTPException(400, "image too large (max ~5 MB)")
 
-    async def gen():
-        async for ev in agent.run_chat(body.thread_id, text, s, images=body.images):
-            yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+    # the run is server-owned (runs.Hub): this response is just a follower.
+    # Closing it (phone sleep, refresh, app switch) no longer cancels the run
+    # — GET /api/threads/{tid}/stream?since=N reattaches and replays.
+    try:
+        hub = runs.start(
+            body.thread_id,
+            agent.run_chat(body.thread_id, text, s, images=body.images),
+        )
+    except runs.Busy as e:
+        raise HTTPException(409, str(e))
+    except runs.TooMany as e:
+        raise HTTPException(429, str(e))
+    return _sse(runs.follow(hub, 0))
 
+
+def _sse(gen):
     return StreamingResponse(
-        gen(),
+        gen,
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.get("/api/threads/{tid}/stream")
+async def thread_stream(tid: str, since: int = 0):
+    """Reattach to a server-owned run (page reload, phone wake, second tab).
+    `since` = events already seen; falling behind the ring buffer sends one
+    {"type":"gap"} note and resumes at the window head."""
+    hub = runs.get(tid)
+    if not hub:
+        raise HTTPException(404, "no run for this thread")
+    return _sse(runs.follow(hub, max(0, since)))
+
+
+@app.post("/api/threads/{tid}/cancel")
+async def thread_cancel(tid: str):
+    """STOP, the real way: cancels the detached task (a dropped SSE stream is
+    no longer a cancellation signal)."""
+    if not runs.cancel(tid):
+        raise HTTPException(404, "not running")
+    return {"ok": True}
+
+
+@app.get("/api/runs")
+async def list_runs():
+    """Active runs (interactive AND scheduler-fired) → sidebar indicators."""
+    return runs.active_map()
 
 
 # ---- shell mode (`!cmd` from the chat box) ----
@@ -423,10 +462,15 @@ async def shell(body: ShellIn):
     cmd = body.command.strip()
     if not cmd:
         raise HTTPException(400, "empty command")
+    # hub-backed like chat: `! sleep 300` survives a dead phone (the client
+    # seals its card from the shell_result event whenever it arrives)
     try:
-        return await agent.run_user_shell(body.thread_id, cmd)
-    except Exception as e:  # noqa: BLE001 - readable 502 like the voice routes
-        raise HTTPException(502, str(e) or type(e).__name__)
+        hub = runs.start(body.thread_id, runs.shell_events(body.thread_id, cmd))
+    except runs.Busy as e:
+        raise HTTPException(409, str(e))
+    except runs.TooMany as e:
+        raise HTTPException(429, str(e))
+    return _sse(runs.follow(hub, 0))
 
 
 # ---- voice (TTS / STT) ----

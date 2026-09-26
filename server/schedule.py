@@ -20,7 +20,7 @@ from datetime import datetime
 
 from croniter import croniter
 
-from . import agent, config
+from . import agent, config, runs
 
 logger = logging.getLogger("langbang.schedule")
 
@@ -153,24 +153,45 @@ async def _fire(row: dict, manual: bool = False) -> None:
         try:
             s = config.load()  # live config per run, same contract as /api/chat
             # stamp the run so its thread bubble shows WHEN (a schedule's
-            # thread accumulates many runs; this says which output is which)
-            async for _ev in agent.run_chat(
-                row["thread_id"], row["prompt"], s,
-                sched={"ts": time.time(), "manual": bool(manual)},
-            ):
-                pass
+            # thread accumulates many runs; this says which output is which).
+            # Server-owned hub task: the UI can watch it live (/api/runs)
+            # and even STOP it; a dead viewer never kills it.
+            hub = runs.start(
+                row["thread_id"],
+                agent.run_chat(
+                    row["thread_id"], row["prompt"], s,
+                    sched={"ts": time.time(), "manual": bool(manual)},
+                ),
+            )
+            await hub.task  # _produce swallows run errors into the stream;
+            # CancelledError (a user STOP on this run) propagates — the
+            # finally below must still clear the flag (see _clear_flag)
+        except runs.Busy:
+            logger.warning("schedule %r skipped — thread %s already running",
+                           row["title"], row["thread_id"])
         except Exception:  # noqa: BLE001
             logger.exception("schedule %r run crashed", row["title"])
         finally:
             # a manual run must not shift the cron rhythm
             nxt = row["next_run"] if manual else _next_run(row["cron"])
-            try:
-                await _set(
-                    "UPDATE schedules SET running=0, last_run=?, next_run=? WHERE id=?",
-                    (time.time(), nxt, rid))
-            except RuntimeError:
-                logger.exception("schedule %r: running flag STUCK (restart to clear)",
-                                 row["title"])
+            _clear_flag(rid, time.time(), nxt)
+
+
+def _clear_flag(rid, ts, nxt) -> None:
+    """Fire-and-forget the running=0 clear: when a user STOPs a scheduled
+    run, _fire itself is being cancelled, and awaiting anything in that arm
+    just re-raises CancelledError — which used to strand running=1 (the
+    phantom-RUNNING bug). A spawned task runs on its own footing."""
+
+    async def _go():
+        try:
+            await _set(
+                "UPDATE schedules SET running=0, last_run=?, next_run=? WHERE id=?",
+                (ts, nxt, rid))
+        except RuntimeError:
+            logger.exception("schedule %r: running flag STUCK (restart to clear)", rid)
+
+    agent._spawn(_go())
 
 
 # ---- CRUD (used by main.py routes) ----

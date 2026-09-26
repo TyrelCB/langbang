@@ -9,8 +9,6 @@ const el = (tag, cls, txt) => {
 
 let threadId = null;
 let threads = [];
-let streaming = false;
-let aborter = null;
 let supportsVision = false;
 let pendingImages = []; // data URLs awaiting send
 let pendingFiles = []; // {file} non-image attachments, uploaded at send time
@@ -23,9 +21,12 @@ const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const IMG_TYPE_RE = new RegExp("^image/(png|jpeg|webp|gif)$");
 
 // agentic-visibility state
-let run = null;        // live-run bundle {t0, iv, tools:Map, subs:Map, stats} while streaming
-let liveRun = null;    // the streaming run's DOM-ownership bundle (see send()/runShell):
-                       // {tid, off, nodes, viewing, match} — parked nodes live in .off
+// Runs are SERVER-owned now (server/runs.py): every stream we watch — one we
+// started, one a scheduler fired, one a reload interrupted — is a follower of
+// a hub. So run state is per-THREAD, not global: RUNS maps tid -> bundle,
+// and many can live at once (only one is on screen; the rest park off-DOM).
+const RUNS = new Map();
+let serverRuns = new Set(); // active hub tids per GET /api/runs (scheduler/other tabs)
 let trajCache = null;  // trajectory rows/totals for the current thread
 let trajVisible = false;
 
@@ -113,6 +114,10 @@ const api = {
   },
   async cronNext(cron) {
     return J(await fetch("/api/schedules/next?cron=" + encodeURIComponent(cron)));
+  },
+  async runs() { return J(await fetch("/api/runs")); },
+  async cancelThread(id) {
+    return J(await fetch("/api/threads/" + id + "/cancel", { method: "POST" }));
   },
 };
 
@@ -440,7 +445,10 @@ function renderHistory(msgs) {
 async function send() {
   const text = $("#input").value.trim();
   const images = pendingImages;
-  if ((!text && !images.length && !pendingFiles.length) || streaming || uploading) return;
+  if ((!text && !images.length && !pendingFiles.length) || uploading) return;
+  // per-thread gate: only a run IN THIS THREAD blocks sending here — other
+  // threads run concurrently (the SEND button reads STOP only for this one)
+  if (threadId && RUNS.has(threadId)) return;
   // `!cmd` = shell mode (Claude Code style): run on the server, no model call
   if (!images.length && !pendingFiles.length && text.startsWith("!")) {
     const cmd = text.slice(1).trim();
@@ -490,47 +498,96 @@ async function send() {
   $("#chat")._pinned = true; // sending always reveals your own message
   const userBubble = addMsg("user", msgText, images);
   SFX.play("message_sent");
-  streaming = true;
-  aborter = new AbortController();
-  setBusy(true);
-  // live-run bundle: timers are recomputed from t0 on every tick (background
-  // tabs throttle intervals — never accumulate elapsed by counting ticks)
-  run = {
+  // live-run bundle (newBundle): timers recomputed from t0 on every tick
+  // (background tabs throttle intervals — never accumulate elapsed by
+  // counting ticks). Thread ownership lives in the bundle: this run's DOM
+  // belongs to ITS thread, and the user can be anywhere else while it
+  // streams — nodes park in the detached .off host (parkRun/resumeRun).
+  const run = newBundle(threadId);
+  run.nodes.push(userBubble); // run's top-level #chat children, in creation order
+  // resumeRun() slices server history right before this message — the run's
+  // parked nodes ARE the tail from here on (later identical texts win:
+  // scanning from the end finds OUR occurrence)
+  run.match = (m) => m.role === "human" && !m.shell && textOf(m.content) === msgText;
+  RUNS.set(threadId, run);
+  run.iv = setInterval(() => tickRun(run), 250);
+  syncSendBtn();
+  const pipe = runPipeline(run);
+  if (run.viewing) {
+    $("#sb-live").classList.remove("hidden");
+    // In-pane liveness card: on a big context the first token can take 30s+
+    // (prefill), and a chat pane that shows nothing reads as "broken". Lives
+    // until the first stream event of any kind (handleEvent).
+    const ctxTok = (threads.find((x) => x.id === threadId) || {}).context_tokens || 0;
+    run.waitLabel = "⏳ AWAITING MODEL" + (ctxTok ? ` — CTX ~${fmtTok(ctxTok)}` : "");
+    run.waiting = pipe.put(addBlock("waiting", run.waitLabel + " …", pipe.CH()));
+    run.waiting.open = true;
+    tickRun(run);
+  }
+  // POST starts the SERVER-SIDE run; the response is merely our follower
+  // stream. Losing it (refresh, phone sleep) now only detaches the view —
+  // pollRuns()/openThread reattach via GET /api/threads/{tid}/stream.
+  try {
+    const res = await fetch("/api/chat", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ thread_id: run.tid, text: msgText, images }),
+    });
+    if (!res.ok) {
+      // rejected before the run started (busy thread / concurrency cap):
+      // nothing was persisted — retract the echoed bubble, don't leave a lie
+      let why = "";
+      try { await J(res); } catch (e) { why = e.message; }
+      userBubble.remove();
+      run.nodes = [];
+      SFX.play("error");
+      pipe.put(addMsg("error", "RUN REJECTED — " + why, null, pipe.CH()));
+      endRun(run);
+      return;
+    }
+    await pipeSSE(res, pipe.handleEvent);
+    await afterStream(run, pipe);
+  } catch (e) {
+    // stream death without a terminal event ≠ run death: keep the bundle
+    // parked, pollRuns() reattaches from run.seen. If the hub is really gone
+    // (server restart), pollRuns sees it missing and repairs the view.
+    detachedNote(run, e);
+  }
+}
+
+// ---------- run lifecycle (server-owned hubs, per-thread followers) ----------
+// A run's DOM + counters live in one bundle keyed by thread; MANY can be
+// alive at once (only one viewed, the rest parked off-DOM). Streams are
+// disposable: send()/attachRun()/rejoinRun() all feed the SAME pipeline, and
+// a lost stream just marks the bundle a zombie until pollRuns() reattaches.
+function newBundle(tid) {
+  return {
+    tid,
     t0: Date.now(),
-    iv: setInterval(tickRun, 250),
+    iv: null, // setInterval(() => tickRun(bundle), 250)
     tools: new Map(), // run_id -> card el; pairs start/end even when parallel
     subs: new Map(),  // task run_id -> {card, body, t0}
     stats: { steps: 0, llm_s: 0, tool_s: 0, in: 0, out: 0, ttfts: 0, ttft_n: 0 },
     todosTouched: false, // did THIS run write the list? drives the stale badge
-    // Thread ownership: this run's DOM belongs to ITS thread. The user can
-    // switch threads mid-run (streaming only gates SEND), so every live node
-    // is tracked here; while another thread is on screen the nodes park in
-    // the detached .off host instead of leaking into it (parkRun/resumeRun
-    // in openThread). Server-side persistence was never the bug — this is
-    // purely the display-layer fix.
-    tid: threadId,
-    off: el("div"),
-    nodes: [userBubble], // run's top-level #chat children, in creation order
-    viewing: true,
-    // resumeRun() slices server history right before this message — the run's
-    // parked nodes ARE the tail from here on (later identical texts win:
-    // scanning from the end finds OUR occurrence)
-    match: (m) => m.role === "human" && !m.shell && textOf(m.content) === msgText,
+    seen: 0,        // events consumed from the server hub (absolute index)
+    terminal: false,// saw done/error: the run is over, teardown is real
+    zombie: false,  // stream dropped WITHOUT terminal — awaiting reattach
+    off: el("div"), // detached host for nodes while the thread is off-screen
+    nodes: [],      // run's top-level #chat children, in creation order
+    viewing: tid === threadId,
+    match: null,    // resumeRun's history-slice predicate (send sets it)
+    dropEvents: false, // join header landed on a done hub → discard replay
+    waiting: null,
+    waitLabel: "",
   };
-  liveRun = run;
-  // every #chat append this run makes goes through CH()/put(): the live pane
-  // while its thread is on screen, the off-screen host while it isn't.
+}
+
+// the send()-shaped event pipeline, parameterized by bundle: EVERY follower
+// (fresh send, reload replay, phone-wake rejoin) builds one of these and
+// pipes SSE frames into handleEvent. Lexical capture of `run` is deliberate —
+// concurrent streams must never cross-talk through a shared global.
+function runPipeline(run) {
   const CH = () => (run.viewing ? $("#chat") : run.off);
   const put = (n) => { CH().appendChild(n); run.nodes.push(n); return n; };
-  $("#sb-live").classList.remove("hidden");
-  // In-pane liveness card: on a big context the first token can take 30s+
-  // (prefill), and a chat pane that shows nothing reads as "broken". Lives
-  // until the first stream event of any kind (handleEvent) or teardown.
-  const ctxTok = (threads.find((x) => x.id === threadId) || {}).context_tokens || 0;
-  run.waitLabel = "⏳ AWAITING MODEL" + (ctxTok ? ` — CTX ~${fmtTok(ctxTok)}` : "");
-  run.waiting = put(addBlock("waiting", run.waitLabel + " …", CH()));
-  run.waiting.open = true;
-  tickRun();
 
   let asstMsg = null; // created lazily on first visible token — no empty cursor boxes
   let asstRaw = "";
@@ -548,7 +605,7 @@ async function send() {
     renderTimer = setTimeout(() => {
       renderTimer = null;
       if (asstMsg) setMarkdown(asstMsg, asstRaw);
-      scrollBottom();
+      if (run.viewing) scrollBottom();
     }, 80);
   };
   // MUST run before any finalize-then-append (attachSpeak): a pending render
@@ -560,66 +617,35 @@ async function send() {
     if (asstMsg) setMarkdown(asstMsg, asstRaw);
   };
 
-  try {
-    const res = await fetch("/api/chat", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ thread_id: run.tid, text: msgText, images }),
-      signal: aborter.signal,
-    });
-    const reader = res.body.getReader();
-    const dec = new TextDecoder();
-    let buf = "";
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      let idx;
-      while ((idx = buf.indexOf("\n\n")) >= 0) {
-        const raw = buf.slice(0, idx); buf = buf.slice(idx + 2);
-        if (!raw.startsWith("data: ")) continue;
-        handleEvent(JSON.parse(raw.slice(6)));
-      }
-    }
-  } catch (e) {
-    if (e.name === "AbortError") {
-      put(addMsg("error", "TRANSMISSION ABORTED", null, CH()));
-    } else {
-      put(addMsg("error", "CONNECTION LOST: " + e, null, CH()));
-      SFX.play("error");
-    }
-  }
-  if (run.waiting) run.waiting.remove(); // zero-event ends (error/abort) never hit handleEvent
-  if (asstMsg) {
-    flushRender();
-    asstMsg.classList.remove("cursor");
-    attachSpeak(asstMsg, asstRaw); // final answer bubble (partial on abort/error — speakable anyway)
-  }
-  streaming = false;
-  setBusy(false);
-  clearInterval(run.iv);
-  // aborted/errored runs: cards whose tool_end never arrived get sealed ✕ —
-  // never leave a spinner that will never stop
-  for (const card of run.tools.values()) {
-    const s = card.querySelector("summary");
-    s.textContent = "✕ " + s.textContent.replace(/ …$/, "");
-    card.open = false;
-  }
-  run = null;
-  liveRun = null;
-  $("#sb-live").classList.add("hidden");
-  await refreshThreads();
-  // rows are committed per-event server-side, so totals read back coherently
-  // even after an abort or an error mid-run
-  refreshStats();
-
   function handleEvent(ev) {
-    if (run && run.waiting) { run.waiting.remove(); run.waiting = null; } // first sign of life
+    // join/gap are FOLLOWER-transport frames, not model output: they must
+    // NOT count as the "first sign of life" that retires the AWAITING MODEL
+    // card — the join header arrives milliseconds after SEND, and the card's
+    // live WAITED timer is exactly what long prefill (big CTX) needs shown.
+    if (ev.type === "join") {
+      // a FRESH join (seen=0) landing on an already-done hub means the full
+      // transcript is in /messages — dropping the replay and repainting
+      // beats double-painting it
+      if (ev.done && run.seen === 0) run.dropEvents = true;
+      return;
+    }
+    if (run.dropEvents) return;
+    if (ev.type === "gap") {
+      // our since= fell behind the server ring buffer: whatever we're about
+      // to show skips a middle — the FINAL answer still arrives whole
+      put(addMsgRaw("usage", "⚠ LIVE BUFFER ROLLED OVER — older output evicted; awaiting final answer", CH()));
+      if (run.viewing) scrollBottom();
+      return; // not a hub event — seen counts server events only
+    }
+    if (run.waiting) { run.waiting.remove(); run.waiting = null; } // first REAL event
+    run.seen++;
+    if (ev.type === "done" || ev.type === "error") run.terminal = true;
     if (ev.type === "token") {
       if (ev.text.trim()) ensureAsst(); // whitespace-only content never opens a bubble
       if (asstMsg) { asstRaw += ev.text; scheduleRender(); }
     }
     else if (ev.type === "thinking") {
-      if (!thinkingBlock) { thinkingBlock = addBlock("thinking", "◈ THINKING"); }
+      if (!thinkingBlock) { thinkingBlock = addBlock("thinking", "◈ THINKING", CH()); }
       thinkingBlock.querySelector("pre").textContent += ev.text;
     } else if (ev.type === "tool_start") {
       SFX.play("tool_start");
@@ -666,10 +692,10 @@ async function send() {
         card.open = false;
       }
     } else if (ev.type === "todos") {
-      if (run) run.todosTouched = true;
+      run.todosTouched = true;
       // the to-do panel shows the OPEN thread's list — a parked run must not
       // paint over another thread's; replayTodos() redraws ours on switch-back
-      if (run && run.viewing) renderTodos(ev.todos);
+      if (run.viewing) renderTodos(ev.todos);
     } else if (ev.type === "usage") {
       // one line per model call (ReAct rounds and the compaction summarizer
       // each report their own); prefill_tps is ttft-inclusive, so it's a
@@ -689,19 +715,178 @@ async function send() {
     } else if (ev.type === "error") {
       SFX.play("error");
       put(addMsg("error", ev.message, null, CH()));
+    } else if (ev.type === "shell_result") {
+      // a shell hub replayed through attach/rejoin (runShell seals its own
+      // card inline via its bespoke onEvent; this covers the replay paths)
+      const c = run.nodes.find((n) => n.classList?.contains("shell"));
+      if (c) shellSeal(c, ev.result);
     } else if (ev.type === "done") {
       SFX.play("message_received");
       // run ended without ever writing the list while items sit open → the
       // card shows a mid-run snapshot; say so (model finished, bookkeeping
-      // didn't follow — e.g. a resumed run that dove straight back to work).
-      // Only while OUR thread is on screen — the panel shows the open thread.
-      if (run && run.viewing && !run.todosTouched) markTodosStale();
+      // didn't follow — e.g. a resumed run that dove straight back to work)
+      if (run.viewing && !run.todosTouched) markTodosStale();
       // read the FINAL answer bubble only — mid-run "let me check…" bubbles
       // keep their manual 🔊 (auto-reading play-by-play is filler audio)
       if (voiceMode === "speak" && asstRaw.trim()) speakRaw(asstRaw, asstMsg);
     }
-    scrollBottom();
+    if (run.viewing) scrollBottom();
   }
+
+  // waiting-card removal, bubble sealing, and the ✕ stamp on cards whose
+  // tool_end never arrived (aborted/errored runs — never a forever-spinner)
+  function finalize() {
+    if (run.waiting) { run.waiting.remove(); run.waiting = null; }
+    if (asstMsg) {
+      flushRender();
+      asstMsg.classList.remove("cursor");
+      attachSpeak(asstMsg, asstRaw); // final answer bubble (partial on error — speakable anyway)
+    }
+    for (const card of run.tools.values()) {
+      const s = card.querySelector("summary");
+      s.textContent = "✕ " + s.textContent.replace(/ …$/, "");
+      card.open = false;
+    }
+  }
+
+  return { handleEvent, finalize, put, CH };
+}
+
+// parse SSE `data:` frames from a fetch response body into handleEvent
+async function pipeSSE(res, onEvent) {
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf("\n\n")) >= 0) {
+      const raw = buf.slice(0, idx); buf = buf.slice(idx + 2);
+      if (!raw.startsWith("data: ")) continue; // ": ping" heartbeats pass here
+      onEvent(JSON.parse(raw.slice(6)));
+    }
+  }
+}
+
+// a follower stream ended: only a terminal event means the RUN ended
+async function afterStream(run, pipe) {
+  if (!run.terminal) { detachedNote(run); return; }
+  pipe.finalize();
+  await endRun(run);
+}
+
+// keep the bundle alive (parked nodes and all) and say what happened; the
+// 4s poller reattaches from run.seen while the hub is still alive
+function detachedNote(run, err) {
+  run.zombie = true;
+  const host = run.viewing ? $("#chat") : run.off;
+  run.nodes.push(addMsgRaw(
+    "usage",
+    "⚠ CONNECTION TO RUN LOST" + (err ? `: ${err}` : "") +
+    " — the run continues on the server; reconnecting…",
+    host
+  ));
+  SFX.play("error");
+}
+
+// forget a bundle; repair=true repaints from the server (used when a run
+// vanished without a terminal event — e.g. server restart mid-run)
+async function endRun(run, repair = false) {
+  RUNS.delete(run.tid);
+  if (run.iv) clearInterval(run.iv);
+  if (run.tid === threadId) {
+    syncSendBtn();
+    $("#sb-live").classList.add("hidden");
+    if (repair) {
+      const seq = openSeq;
+      try {
+        const ms = await api.messages(run.tid);
+        if (seq === openSeq && threadId === run.tid) renderHistory(ms);
+      } catch (e) { /* transient — a reopen will try again */ }
+    }
+  }
+  await refreshThreads();
+  refreshStats();
+}
+
+// watch a hub we did NOT start: reload reattach (since=0 replay), a run the
+// scheduler fired, or a second tab. Replay reconstructs the tail through the
+// same pipeline; a hub already DONE returns done-first and we bail to a
+// clean history render instead of double-painting under it.
+async function attachRun(tid, since) {
+  const run = newBundle(tid);
+  run.seen = since;
+  RUNS.set(tid, run);
+  syncSendBtn();
+  run.iv = setInterval(() => tickRun(run), 250);
+  const pipe = runPipeline(run);
+  if (run.viewing) {
+    $("#sb-live").classList.remove("hidden");
+    run.waitLabel = "⏳ RUN IN PROGRESS";
+    run.waiting = pipe.put(addBlock("waiting", run.waitLabel + " — REPLAYING …", pipe.CH()));
+    run.waiting.open = true;
+    tickRun(run);
+  }
+  try {
+    const res = await fetch(`/api/threads/${encodeURIComponent(tid)}/stream?since=${since}`);
+    if (!res.ok) { await endRun(run, true); return; } // hub vanished between /api/runs and here
+    await pipeSSE(res, pipe.handleEvent);
+    if (run.dropEvents) { await endRun(run, true); return; } // finished between the runs-poll and the join header
+    await afterStream(run, pipe); // seal + teardown, or park as zombie
+  } catch (e) {
+    detachedNote(run, e);
+  }
+}
+
+// rejoin a zombie bundle after the network came back (phone wake, tab freeze)
+async function rejoinRun(run) {
+  run.zombie = false;
+  const pipe = runPipeline(run); // fresh closure: continuation text opens a new bubble
+  if (run.waiting === null && run.viewing && !run.terminal) {
+    run.waitLabel = "⏳ RUN IN PROGRESS";
+    run.waiting = pipe.put(addBlock("waiting", run.waitLabel + " — RECONNECTED …", pipe.CH()));
+    run.waiting.open = true;
+  }
+  try {
+    const res = await fetch(`/api/threads/${encodeURIComponent(run.tid)}/stream?since=${run.seen}`);
+    if (!res.ok) { await endRun(run, true); return; }
+    await pipeSSE(res, pipe.handleEvent);
+    await afterStream(run, pipe);
+  } catch (e) {
+    detachedNote(run, e);
+  }
+}
+
+// SEND/STOP follows the VIEWED thread only — concurrent runs elsewhere leave
+// this thread's button a normal SEND
+function syncSendBtn() {
+  setBusy(!!(threadId && RUNS.get(threadId)) || uploading);
+}
+
+// the glue between the server's run registry and the sidebar/UI: which
+// threads are busy, and (re)attaching the viewed one. Cheap: /api/runs is an
+// in-memory dict — no SQL, no model.
+async function pollRuns() {
+  let act;
+  try {
+    act = Object.keys((await api.runs()).runs || {});
+  } catch (e) {
+    return; // server restarting under us — next beat will find it
+  }
+  serverRuns = new Set(act);
+  const cur = threadId ? RUNS.get(threadId) : null;
+  if (cur) {
+    // A LIVE (non-zombie) follower is never touched here: the hub can leave
+    // the active map the instant the run completes, and our own stream
+    // delivers done/error a beat later — only zombies need this poller.
+    if (cur.zombie && serverRuns.has(threadId)) rejoinRun(cur);
+    else if (cur.zombie) await endRun(cur, true); // hub gone (restart / done while offline) → clean repaint
+  } else if (threadId && serverRuns.has(threadId)) {
+    attachRun(threadId, 0); // scheduler run / other tab / post-reload
+  }
+  refreshThreads(); // repaint the ◉ running dots
 }
 
 let chargeT = null; // X-buster: STOP charges while a run is live
@@ -716,7 +901,11 @@ function setBusy(b) {
 }
 
 function stopGeneration() {
-  if (aborter) aborter.abort();
+  // STOP is a server-side cancel now (the old abort() killed the SSE, which
+  // used to kill the run — exactly the phone-timeout disaster). The hub
+  // ends its stream with a cancelled error event; teardown happens there.
+  const r = threadId && RUNS.get(threadId);
+  if (r) api.cancelThread(r.tid).catch(() => {});
 }
 
 // ---------- shell mode (`!cmd`): run on the server, no model call ----------
@@ -739,51 +928,66 @@ async function runShell(cmd) {
     try { await createThreadNow(); }
     catch (e) { SFX.play("error"); addMsg("error", "COULD NOT START THREAD: " + e.message); return; }
   }
-  streaming = true; // reuse the chat gate: no model run may interleave a shell
-  // same DOM-ownership bundle as send(): a `! sleep 300` must keep parking
-  // its card off-screen once the user has switched threads mid-await
-  liveRun = {
-    tid: threadId, off: el("div"), nodes: [], viewing: true,
-    match: (m) => m.shell && m.shell.cmd === cmd,
-  };
-  const CH = () => (liveRun.viewing ? $("#chat") : liveRun.off);
-  aborter = new AbortController();
-  setBusy(true);
+  if (RUNS.has(threadId)) return; // this thread is already running (button reads STOP)
+  // hub-backed (SSE like chat): `! sleep 300` now SURVIVES a dead tab —
+  // the command runs on the server regardless; we just watch. DOM
+  // ownership is the same bundle scheme as send(), so switching threads
+  // mid-await parks the card off-screen instead of leaking it.
+  const run = newBundle(threadId);
+  run.match = (m) => m.shell && m.shell.cmd === cmd;
+  RUNS.set(threadId, run);
+  run.iv = setInterval(() => tickRun(run), 250);
+  syncSendBtn();
   SFX.play("tool_start");
   $("#chat")._pinned = true; // same reveal rule as send()
-  const card = shellBlock(cmd, CH());
-  liveRun.nodes.push(card);
+  const CH = () => (run.viewing ? $("#chat") : run.off);
+  const put = (n) => { CH().appendChild(n); run.nodes.push(n); return n; };
+  const card = put(shellBlock(cmd, CH()));
+  let sealed = false;
+  const onEvent = (ev) => {
+    if (ev.type === "join" || ev.type === "gap") return; // headers/notes, not hub events
+    run.seen++;
+    if (ev.type === "done" || ev.type === "error") run.terminal = true;
+    if (ev.type === "shell_result") {
+      shellSeal(card, ev.result);
+      SFX.play("tool_end");
+      sealed = true;
+    } else if (ev.type === "error") {
+      SFX.play("error");
+      card.remove();
+      put(addMsg("error", "SHELL FAILED: " + ev.message, null, CH()));
+    }
+  };
   try {
     const res = await fetch("/api/shell", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ thread_id: liveRun.tid, command: cmd }),
-      signal: aborter.signal,
+      body: JSON.stringify({ thread_id: run.tid, command: cmd }),
     });
-    if (!res.ok) throw new Error((await res.text()).slice(0, 300) || String(res.status));
-    shellSeal(card, await res.json());
-    SFX.play("tool_end");
-  } catch (e) {
-    if (e.name === "AbortError") {
-      // STOP only abandons the view: the server-side command runs to
-      // completion and is saved to the thread — a reload shows its card
-      card.querySelector("summary").textContent = "✕ $ " + cmd;
-    } else {
-      SFX.play("error");
+    if (!res.ok) {
+      let why = "";
+      try { await J(res); } catch (e) { why = e.message; }
       card.remove();
-      liveRun.nodes.push(addMsg("error", "SHELL FAILED: " + e.message, null, CH()));
+      SFX.play("error");
+      put(addMsg("error", "SHELL REJECTED — " + why, null, CH()));
+      await endRun(run);
+      return;
     }
+    await pipeSSE(res, onEvent);
+    if (!run.terminal) { detachedNote(run); return; } // command lives on; card shows on reopen
+  } catch (e) {
+    detachedNote(run, e);
+    return;
   }
-  streaming = false;
-  aborter = null;
-  liveRun = null;
-  setBusy(false);
-  await refreshThreads(); // context grew — CTX chip and thread order may move
-  refreshStats();
+  await endRun(run); // context grew — CTX chip and thread order may move (refreshThreads inside)
+  if (sealed) refreshStats();
 }
 
 // ---------- agentic visibility: live run bar, to-dos, totals, trajectory ----------
-function tickRun() {
-  if (!run) return;
+function tickRun(run) {
+  // the live bar reflects the VIEWED thread's run; other runs keep ticking
+  // their own timers invisibly (sub-chip clocks and traj refresh only matter
+  // while you're looking at them)
+  if (!run || run.tid !== threadId) return;
   const bar = $("#sb-live");
   const s = run.stats;
   const parts = [`⏱ RUN ${fmtClock((Date.now() - run.t0) / 1000)}`, `${s.steps} STEPS`];
@@ -913,7 +1117,7 @@ function showTab(which) {
   if (!trajVisible) return;
   // while a run streams, the cache is by definition stale — tickRun also
   // re-reads every ~3s once this tab is visible
-  if (trajCache && !streaming) renderTraj();
+  if (trajCache && !(threadId && RUNS.has(threadId))) renderTraj();
   else refreshStats();
 }
 
@@ -985,12 +1189,21 @@ function renderTraj() {
 }
 
 // ---------- threads ----------
+// Two-click delete confirm lives on a module-scoped tid, NOT the ✕ element:
+// the ◉ dot sync repaints the sidebar every few seconds (pollRuns), which
+// would otherwise wipe an armed row mid-confirm.
+let armedTid = null;
+let armT = 0;
 async function refreshThreads() {
   threads = await api.threads();
   const box = $("#threads");
   box.innerHTML = "";
   for (const t of threads) {
-    const d = el("div", "thread" + (t.id === threadId ? " active" : ""));
+    // busy = OUR client has a run in it, or the server says one is in flight
+    // (another tab, a phone, or a cron-scheduled run we know nothing about)
+    const busy = RUNS.has(t.id) || serverRuns.has(t.id);
+    const d = el("div", "thread" + (t.id === threadId ? " active" : "")
+                 + (busy ? " running" : ""));
     d.appendChild(el("span", "ctx", t.context_tokens != null ? fmtTok(t.context_tokens) : ""));
     const name = el("span", "t-name", t.title);
     name.title = t.title;
@@ -1026,29 +1239,36 @@ async function refreshThreads() {
     d.appendChild(pen);
     const x = el("span", "x", "✕");
     x.title = "Delete thread";
-    const disarm = () => {
-      x.textContent = "✕"; x.classList.remove("arm"); x.title = "Delete thread";
-    };
-    let armT = 0;
+    if (armedTid === t.id) {  // repaint mid-confirm: re-apply the armed look
+      x.classList.add("arm");
+      x.textContent = "⚠";
+      x.title = `${t.n_msgs} messages — click again to DELETE`;
+    }
     x.onclick = async (e) => {
       e.stopPropagation();
       // Mis-click guard: rows that hold real content need a second,
       // confirming click; empty/thin rows (abandoned new chats, test
       // probes) die in one click so junk stays quick to sweep.
       const trivial = (t.n_msgs ?? 99) < 3 && (t.chars ?? 1e9) < 100;
-      if (!x.classList.contains("arm") && !trivial) {
+      if (armedTid !== t.id && !trivial) {
+        armedTid = t.id;
         x.classList.add("arm");
         x.textContent = "⚠";
         x.title = `${t.n_msgs} messages — click again to DELETE`;
         clearTimeout(armT);
-        armT = setTimeout(disarm, 4000);
+        // repaint (not element mutation): the live row may be a fresh one
+        armT = setTimeout(() => { armedTid = null; refreshThreads(); }, 4000);
         return;
       }
+      armedTid = null;
+      clearTimeout(armT);
+      // server cancels an in-flight hub for us (del_thread → runs.cancel)
       await api.delThread(t.id);
       // park BEFORE the wipe: a run streaming in this very thread keeps its
-      // nodes off-screen until its stream tears itself down (deleted thread
-      // can never be re-opened, so the host is simply dropped)
-      if (t.id === threadId) { parkRun(); threadId = null; $("#chat").innerHTML = ""; resetTrajView(); }
+      // nodes off-screen until its stream tears itself down with the cancelled
+      // terminal event (deleted thread can never be re-opened, so the parked
+      // host is simply dropped — RUNS.delete happens in that teardown)
+      if (t.id === threadId) { parkRun(RUNS.get(t.id)); threadId = null; $("#chat").innerHTML = ""; resetTrajView(); }
       refreshThreads();
     };
     d.appendChild(x);
@@ -1099,19 +1319,21 @@ function updateCtxTag() {
 // resumeRun() re-attaches them IN ORDER and draws history only up to the
 // run's prompt — re-rendering the full server history would double-paint the
 // very tool cards/text that are still streaming into the parked nodes.
-function parkRun() {
-  const r = liveRun;
+function parkRun(r) {
   if (!r) return;
   r.viewing = false;
   for (const n of r.nodes) if (n.parentNode === $("#chat")) r.off.appendChild(n);
 }
 
-function resumeRun(msgs) {
-  const r = liveRun;
+function parkAll() {
+  for (const r of RUNS.values()) parkRun(r);
+}
+
+function resumeRun(r, msgs) {
   if (!r) return false;
   let idx = -1;
   for (let i = msgs.length - 1; i >= 0; i--)
-    if (r.match(msgs[i])) { idx = i; break; }
+    if (r.match && r.match(msgs[i])) { idx = i; break; } // null match (reattach): no slice
   // The run's own turn only reaches graph state when its superstep CHECKPOINT
   // commits — measured: mid-tool-run the raw checkpoint can still show just
   // the PREVIOUS turns (a shell turn never lands until it commits, and
@@ -1141,9 +1363,11 @@ async function openThread(t) {
   closeNav();
   if (recapAbort) recapAbort.abort();
   closeRecap(); // one thread's recap must not follow you to another
-  if (liveRun && liveRun.tid !== t.id) parkRun(); // switch mid-run: output leaves with its thread
+  parkAll(); // every run's output leaves with its thread (ours re-attaches below)
   threadId = t.id;
   $("#chat-title").textContent = t.title.toUpperCase();
+  syncSendBtn(); // a busy thread opens to STOP, an idle one to SEND — even
+                 // while other threads' runs stream on (per-thread gating)
   // resuming = current: sorts it to the top. Best-effort: a 500 (DB busy
   // during a heavy run) must not reject after an early `seq` return or after
   // the render already succeeded — worst case the row just won't re-sort.
@@ -1152,8 +1376,14 @@ async function openThread(t) {
   if (seq !== openSeq) return; // superseded by a newer open/newThread — don't paint
   // returning to the thread that is mid-run: re-attach its parked nodes and
   // let them keep streaming (resumeRun draws the history above them);
-  // any other case redraws the whole committed transcript
-  if (!(liveRun && liveRun.tid === t.id && resumeRun(msgs))) renderHistory(msgs);
+  // any other case redraws the whole committed transcript. No local bundle
+  // but the server says busy → this is a reload/second-tab return: attach.
+  const r = RUNS.get(t.id);
+  if (r) { resumeRun(r, msgs); tickRun(r); }
+  else renderHistory(msgs);
+  if (r) $("#sb-live").classList.remove("hidden");
+  else $("#sb-live").classList.add("hidden");
+  if (!r && serverRuns.has(t.id)) attachRun(t.id, 0);
   replayTodos(msgs); // last write_todos call re-draws the panel on switch/reload
   refreshStats();
   await bumped; // order may already have moved — refresh AFTER the bump lands
@@ -1167,11 +1397,13 @@ async function newThread() {
   closeNav();
   if (recapAbort) recapAbort.abort();
   closeRecap();
-  parkRun(); // switch to a draft: a mid-run thread's output stays behind
+  parkAll(); // switch to a draft: mid-run threads' output stays behind (runs go on)
   threadId = null;
   $("#chat").innerHTML = "";
   $("#chat-title").textContent = "NEW CHAT";
+  $("#sb-live").classList.add("hidden");
   resetTrajView();
+  syncSendBtn(); // a run streaming elsewhere must NOT leave STOP in the draft
   SFX.play("thread_new");
   refreshThreads();
 }
@@ -1990,7 +2222,15 @@ async function refreshSchedules() {
     const act = el("div", "sched-actions");
     const run = el("button", "btn ghost sm", "▶ RUN");
     run.title = "Fire one run now (does not shift the cron rhythm)";
-    run.onclick = async () => { SFX.play("click"); await api.runSchedule(s.id); setTimeout(refreshSchedules, 1200); };
+    // optimistic .running: the server flips the flag asynchronously and a fast
+  // run can finish between refresh ticks — without this the card may never
+  // visibly say RUNNING. The 1.2s refresh (then 5s ticks) takes over truth.
+  run.onclick = async () => {
+    SFX.play("click");
+    await api.runSchedule(s.id);
+    card.classList.add("running");
+    setTimeout(refreshSchedules, 1200);
+  };
     const edit = el("button", "btn ghost sm", "EDIT");
     edit.onclick = () => { SFX.play("click"); schedEdit(s); };
     const del = el("button", "btn ghost sm", "✕ DELETE");
@@ -2103,7 +2343,9 @@ async function checkHealth() {
 }
 
 $("#btn-send").onclick = () => {
-  if (streaming) { stopGeneration(); return; }
+  // STOP only while the VIEWED thread runs — other threads' runs are none of
+  // this button's business (per-thread gating; RUNS.get is the single source)
+  if (threadId && RUNS.get(threadId)) { stopGeneration(); return; }
   SFX.play("click");
   send();
 };
@@ -2235,6 +2477,16 @@ applyVoiceMode();
 
 checkHealth();
 setInterval(checkHealth, 15000);
+// detached-run poller: runs live on the SERVER, so a phone sleeping / a tab
+// backgrounding / a laptop lid no longer stops them — this finds their hubs,
+// puts ▶ dots on their sidebar rows, re-attaches zombie streams, and
+// reconciles bundles whose hub vanished (server restart). visibilitychange
+// makes a phone wake re-attach instantly instead of waiting for the next
+// tick. The initial call doubles as the boot-time attach for a ?thread= deep
+// link into a mid-run thread (openThread ran before serverRuns was filled).
+pollRuns();
+setInterval(pollRuns, 4000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) pollRuns(); });
 refreshThreads().then(() => {
   const p = new URLSearchParams(location.search);
   const t = p.get("thread");

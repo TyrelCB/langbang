@@ -1267,19 +1267,19 @@ async def run_chat(
         await _log(thread_id, turn_id, "error", meta={"message": str(e)[:500]})
         yield {"type": "error", "message": f"{type(e).__name__}: {e}"}
     except (asyncio.CancelledError, GeneratorExit):
-        # Client gone: a tab refresh, STOP click, or proxy cut cancels the
-        # response task and the run dies with it mid-air. Both inherit
-        # BaseException, so the arm above never saw them — the thread kept
-        # only a lone user row and looked like the message vanished into a
-        # void. Breadcrumb the trajectory; fire-and-forget, because awaiting
-        # anything here either re-raises (CancelledError) or is illegal
-        # (GeneratorExit inside a closing generator). A mid-write cancellation
-        # is the MOST likely way to strand an open txn holding the DB lock,
-        # so the cleanup releases it before the breadcrumb.
+        # Runs are server-owned now (runs.Hub): this generator is consumed by
+        # a detached task, so it only ever gets cancelled by an EXPLICIT STOP
+        # (hub.task.cancel()) or a server shutdown — a dropped browser tab
+        # can no longer reach here. Both inherit BaseException, so the arm
+        # above never saw them; breadcrumb the trajectory fire-and-forget,
+        # because awaiting anything here either re-raises (CancelledError) or
+        # is illegal (GeneratorExit inside a closing generator). A mid-write
+        # cancellation is the MOST likely way to strand an open txn holding
+        # the DB lock, so the cleanup releases it before the breadcrumb.
         async def _cancel_cleanup() -> None:
             await _release_tx()
             await _log(thread_id, turn_id, "error", meta={
-                "message": "RUN CANCELLED — client disconnected mid-run (refresh or STOP)",
+                "message": "RUN CANCELLED — stop requested (or server shutdown)",
             })
         _spawn(_cancel_cleanup())
         raise

@@ -68,6 +68,15 @@ button, .thread .a, .thread .x { touch-action: manipulation; }
   background: var(--bg); color: var(--text);
   border: 1px solid var(--cyan-dim); border-radius: 3px; padding: 0 4px;
 }
+/* running: pulsing REC dot before the title — the thread has a live hub on
+   the SERVER (this tab's run, another tab's, a phone, or a cron firing).
+   Class comes from refreshThreads(): RUNS ∪ serverRuns. */
+.thread.running { border-left-color: var(--cyan); }
+.thread.running .t-name::before {
+  content: "◉"; color: var(--cyan); margin-right: 5px;
+  animation: lb-run-dot 1.1s ease-in-out infinite;
+}
+@keyframes lb-run-dot { 50% { opacity: 0.2; } }
 
 .btn {
   font: inherit; background: var(--panel); color: var(--text);
