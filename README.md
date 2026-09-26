@@ -128,8 +128,18 @@ points at them:
 - **Empty-thread hygiene** — `+ NEW CHAT` only materializes a sidebar row
   once the first message is sent, and an hourly server sweep deletes
   message-less `New chat` rows untouched for over an hour.
+- **Mid-run thread switching** — a run's live output belongs to *its* thread:
+  switch panes while it streams and the bubbles, tool cards and usage lines
+  park off-screen instead of painting over the thread you're reading; switch
+  back and they re-attach in place and keep filling in (`!cmd` shell cards
+  included). Persistence was never the bug — this is the display layer
+  keeping each thread's pane honest.
 - Web UI: dark Mega Man X HUD by default, streaming chat, visible
   thinking/tool-call cards, thread management, live config editor
+- Phone-friendly: below ~720px the sidebar becomes an off-canvas drawer (☰ +
+  tap-to-dismiss scrim), row actions (✎⚡⟲✕) show without hover, the topbar
+  buttons wrap instead of stretching the page, and the config modal fits a
+  phone screen — usable straight from a phone on the LAN
 - Sound effects: Mega Man X-style cues in `web/sounds/` (generated via
   `audio_sfx` on the all-media MCP server) — `♪ SOUND` button toggles them;
   CONFIG → SOUNDBOARD auditions any cue and ↻ REGEN re-renders just that one
@@ -160,6 +170,13 @@ Every finished assistant reply gets a 🔊 button; the topbar **VOICE: SPEAK**
 toggle reads each finished reply automatically. Markdown is stripped before
 synthesis (code blocks become a spoken placeholder), so code-heavy answers
 stay listenable.
+
+Synthesis is **cached on disk** (`data/tts/`, sha256 of the cleaned text +
+provider, pruned after 30 days), so a reply is only ever synthesized once —
+replays hit the file (or even the page's own blob) and start instantly. The
+first play opens a mini player inside the bubble: ⏸/▶, −5/+5 s, click the bar
+to seek. Each bubble keeps its own audio (the player stays for replay);
+playing a new bubble pauses whichever was going.
 
 Defaults ride the **same keyless Google endpoints telemarketing used** — gTTS
 (Translate TTS) for speech and `SpeechRecognition.recognize_google` for
