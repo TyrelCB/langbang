@@ -95,6 +95,7 @@ const api = {
   },
   async touchThread(id) { await fetch("/api/threads/" + id + "/touch", { method: "POST" }); },
   async messages(id) { return J(await fetch(`/api/threads/${id}/messages`)); },
+  async todos(id) { return J(await fetch(`/api/threads/${id}/todos`)); },
   async trajectory(id) { return J(await fetch(`/api/threads/${id}/trajectory`)); },
   async search(q) { return J(await fetch("/api/search?q=" + encodeURIComponent(q))); },
   async schedules() { return J(await fetch("/api/schedules")); },
@@ -820,7 +821,10 @@ async function endRun(run, repair = false) {
       const seq = openSeq;
       try {
         const ms = await api.messages(run.tid);
-        if (seq === openSeq && threadId === run.tid) renderHistory(ms);
+        if (seq === openSeq && threadId === run.tid) {
+          renderHistory(ms);
+          ensureTodosCard(run.tid, ms); // dead run's card -> the committed truth
+        }
       } catch (e) { /* transient — a reopen will try again */ }
     }
   }
@@ -1082,13 +1086,39 @@ function resetTrajView() {
 }
 
 // replay from persisted messages — write_todos calls live in tool_call args,
-// so this survives compaction (archived messages keep their args)
+// so this survives compaction (archived messages keep their args).
+// Returns whether a list was found (see ensureTodosCard).
 function replayTodos(msgs) {
   for (let i = msgs.length - 1; i >= 0; i--)
     for (const tc of msgs[i].tool_calls || [])
-      if (tc.name === "write_todos" && Array.isArray(tc.args?.todos))
-        return renderTodos(tc.args.todos);
+      if (tc.name === "write_todos" && Array.isArray(tc.args?.todos)) {
+        renderTodos(tc.args.todos);
+        return true;
+      }
   hideTodos();
+  return false;
+}
+
+// The message replay CAN miss the list: the serving stack drops oversized
+// tool-call args (the call then has no todos to scan), or the super-step
+// that committed it never landed (a checkpoint write lost to a DB failure).
+// The list itself is plain checkpointed state — /todos asks the checkpointer
+// directly, so a reopened tab or a second browser still sees the card the
+// initiating tab got from live SSE. Skipped while a run is live: SSE owns
+// the card then, and the checkpoint read lags a super-step behind.
+async function ensureTodosCard(tid, msgs) {
+  if (replayTodos(msgs) || RUNS.has(tid)) return;
+  const seq = openSeq;
+  let todos = null;
+  try {
+    todos = (await api.todos(tid)).todos;
+  } catch (e) {
+    return; // transient — the next reopen will try again
+  }
+  // guarded paint: a thread switch mid-fetch must not draw the old thread's
+  // list, and a run that started meanwhile owns the card again (SSE)
+  if (seq !== openSeq || threadId !== tid || RUNS.has(tid)) return;
+  if (todos) renderTodos(todos);
 }
 
 async function refreshStats() {
@@ -1401,7 +1431,9 @@ async function openThread(t) {
   if (r) $("#sb-live").classList.remove("hidden");
   else $("#sb-live").classList.add("hidden");
   if (!r && serverRuns.has(t.id)) attachRun(t.id, 0);
-  replayTodos(msgs); // last write_todos call re-draws the panel on switch/reload
+  ensureTodosCard(t.id, msgs); // last write_todos call re-draws the panel on
+                               // switch/reload; /todos covers dropped args /
+                               // lost commits the messages scan can't see
   refreshStats();
   await bumped; // order may already have moved — refresh AFTER the bump lands
   refreshThreads();
@@ -1762,6 +1794,8 @@ async function openSettings() {
   loadedVoice = { ...DEFAULT_VOICE, ...(s.voice || {}) };
   for (const k of Object.keys(DEFAULT_VOICE))
     $("#set-voice-" + k).value = loadedVoice[k];
+  $("#cfg-confirm").classList.add("hidden");
+  cfgSnapshot(); // after every field is populated: this is the unsaved-baseline
   $("#settings-panel").classList.remove("hidden");
   SFX.play("click");
 }
@@ -1810,8 +1844,62 @@ async function saveSettings() {
     },
   });
   $("#settings-panel").classList.add("hidden");
+  cfgBase = null;  // the save closed the draft; next openSettings re-snapshots
+  $("#cfg-dirty").classList.add("hidden");
+  $("#cfg-confirm").classList.add("hidden");
   SFX.play("settings_saved");
   checkHealth();
+}
+
+// ---------- CONFIG dirty tracking / close paths ----------
+// openSettings refetches and rebuilds everything on every open, so DISCARD
+// is just "close" — the snapshot taken here defines unsaved. Covers static
+// fields, the JS-built tool checkboxes, the voice selects, and the MCP draft
+// (whose edits live only in mcpDraft, so its JSON rides the same Map).
+let cfgBase = null;
+// #mcp-list/#mcp-editor/#soundboard-list rebuild their DOM wholesale on
+// every action — their inputs can't be identity-keyed snapshot members (the
+// MCP state rides the __mcp JSON instead; the soundboard saves per-cue)
+const cfgMember = (el0) => !el0.closest("#mcp-list,#mcp-editor,#soundboard-list");
+function cfgDirtyCompute() {
+  if (!cfgBase) return;
+  let n = 0;
+  for (const el0 of document.querySelectorAll(
+      "#settings-panel input,#settings-panel textarea,#settings-panel select")) {
+    if (!cfgMember(el0)) continue;
+    const now = el0.type === "checkbox" ? el0.checked : el0.value;
+    const diff = !cfgBase.has(el0) || cfgBase.get(el0) !== now;
+    const host = el0.closest("label") || el0; // .chk labels: color the whole row
+    el0.classList.toggle("changed", diff);
+    host.classList.toggle("changed", diff);
+    if (diff) n++;
+  }
+  if (cfgBase.get("__mcp") !== JSON.stringify(mcpDraft)) n++;
+  const bar = $("#cfg-dirty");
+  bar.classList.toggle("hidden", n === 0);
+  if (n) bar.textContent = "● " + n + " UNSAVED";
+}
+function cfgSnapshot() {
+  cfgBase = new Map();
+  for (const el0 of document.querySelectorAll(
+      "#settings-panel input,#settings-panel textarea,#settings-panel select"))
+    if (cfgMember(el0)) cfgBase.set(el0, el0.type === "checkbox" ? el0.checked : el0.value);
+  cfgBase.set("__mcp", JSON.stringify(mcpDraft));
+  cfgDirtyCompute();  // fresh baseline => clean; also clears a stale N-UNSAVED span
+}
+// ESC / CANCEL / backdrop all route here: clean closes are instant; dirty
+// ones reveal the save|discard bar instead of silently eating the edits
+// (no window.confirm — inline bar matches the app idiom).
+function closeSettings(force) {
+  const hidden = $("#settings-error").classList.contains("hidden");
+  if (!force && !hidden) { return; } // server rejected a value — stay open
+  if (!force && !$("#cfg-dirty").classList.contains("hidden")) {
+    $("#cfg-confirm").classList.remove("hidden");
+    $("#cfg-confirm-n").textContent = $("#cfg-dirty").textContent.match(/\d+/)[0];
+    return;
+  }
+  $("#cfg-confirm").classList.add("hidden");
+  $("#settings-panel").classList.add("hidden");
 }
 
 // ---------- mcp server manager ----------
@@ -1891,6 +1979,7 @@ function mcpRenderList() {
   const names = Object.keys(mcpDraft);
   if (!names.length) {
     box.appendChild(el("div", "mcp-empty", "No MCP servers. ADD SERVER below."));
+    cfgDirtyCompute();
     return;
   }
   const mkBtn = (txt, title, fn) => {
@@ -1933,6 +2022,7 @@ function mcpRenderList() {
     row.append(head, sub, testLine, acts);
     box.appendChild(row);
   }
+  cfgDirtyCompute(); // every MCP mutation funnels through a re-render
 }
 
 function mcpSyncTransportRows() {
@@ -2420,7 +2510,16 @@ $("#btn-settings").onclick = () => { closeNav(); openSettings(); };
 $("#btn-nav").onclick = () => { SFX.play("click"); $("#app").classList.toggle("nav-open"); };
 $("#nav-scrim").onclick = closeNav;
 $("#btn-save").onclick = saveSettings;
-$("#btn-cancel").onclick = () => $("#settings-panel").classList.add("hidden");
+$("#btn-cancel").onclick = () => { SFX.play("click"); closeSettings(false); };
+// backdrop + ESC join CANCEL through closeSettings(false), which routes a
+// dirty draft through the confirm bar instead of silently trashing it
+$("#settings-panel").onclick = (e) => { if (e.target.id === "settings-panel") closeSettings(false); };
+$("#cfg-confirm-save").onclick = () => { SFX.play("click"); saveSettings(); };
+$("#cfg-confirm-discard").onclick = () => { SFX.play("click"); closeSettings(true); };
+$("#cfg-confirm-keep").onclick = () => { SFX.play("click"); $("#cfg-confirm").classList.add("hidden"); };
+// one delegated pair catches static fields AND the JS-built tool checkboxes
+// (mcp/soundboard subtrees are excluded inside cfgDirtyCompute)
+for (const t of ["input", "change"]) $("#settings-panel").addEventListener(t, cfgDirtyCompute);
 $("#input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
 });
@@ -2493,7 +2592,10 @@ $("#btn-recap").onclick = openRecap;
 $("#btn-recap-close").onclick = () => { SFX.play("click"); closeRecap(); };
 $("#recap-panel").onclick = (e) => { if (e.target.id === "recap-panel") closeRecap(); };
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !$("#recap-panel").classList.contains("hidden")) closeRecap();
+  if (e.key !== "Escape") return;
+  // settings above recap: it can sit on top of it and is the top-most panel
+  if (!$("#settings-panel").classList.contains("hidden")) closeSettings(false);
+  else if (!$("#recap-panel").classList.contains("hidden")) closeRecap();
 });
 $("#todo-head").onclick = () => {
   SFX.play("click");

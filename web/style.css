@@ -290,6 +290,19 @@ body.hide-reasoning .block.thinking { display: none; }
 .panel-inner label code { color: var(--orange); background: var(--panel); padding: 0 4px; }
 .hidden { display: none !important; }
 .error { color: var(--danger); margin-top: 8px; }
+/* CONFIG: pin h2 + the action row and let the card grid do the scrolling —
+   .panel-inner itself scrolling is what buried CANCEL/SAVE below the fold.
+   Scoped: sched/recap share .panel-inner and keep their own scroll. */
+#settings-panel .panel-inner { display: flex; flex-direction: column; overflow: hidden; }
+#settings-panel .cfg-grid { flex: 1; min-height: 0; overflow-y: auto; }
+/* dirty-field highlight (orange ring + tinted label), unsaved counter,
+   save/discard bar revealed by ESC / CANCEL / backdrop while edits are pending */
+#settings-panel .changed { border-color: var(--orange); }
+#settings-panel label.chk.changed { color: var(--orange); }
+#cfg-dirty { color: var(--orange); letter-spacing: 2px; font-size: 11px; align-self: center; margin-right: auto; }
+#cfg-confirm { display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 8px 10px;
+  border: 1px solid var(--orange); background: var(--panel); color: var(--orange);
+  font-size: 12px; letter-spacing: 1px; clip-path: var(--clip); }
 
 /* recap modal (✦) — same overlay chrome; recap-body borrows .msg markdown
    styles but sheds the bubble look via the overrides below */
