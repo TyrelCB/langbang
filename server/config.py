@@ -6,6 +6,9 @@ import threading
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
 DB_PATH = os.path.join(DATA_DIR, "langbang.db")
+# Trajectory (run_events) lives apart from the checkpoint file: per-event
+# appends and multi-MB checkpoint commits must not fight over one WAL lock.
+EVENTS_DB_PATH = os.path.join(DATA_DIR, "events.db")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 

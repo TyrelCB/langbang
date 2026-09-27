@@ -70,23 +70,35 @@ def _spawn(coro):
 
 _checkpointer: AsyncSqliteSaver | None = None
 _db: aiosqlite.Connection | None = None
-_edb: aiosqlite.Connection | None = None  # event-log connection (trajectory rows)
+_edb: aiosqlite.Connection | None = None  # event-log connection (events.db)
+_cpdb: aiosqlite.Connection | None = None  # checkpointer-only connection (langbang.db)
 # graph used ONLY to read state back (never invoked); see _read_agent()
 _read_graph = None
 
 
 async def init() -> None:
-    global _checkpointer, _db, _edb
+    global _checkpointer, _db, _edb, _cpdb
     _db = await aiosqlite.connect(config.DB_PATH)
     await _db.execute("PRAGMA busy_timeout=30000")
-    # Trajectory rows get their OWN connection: run_chat's generator commits
-    # per event, and sharing the checkpointer's connection could commit a
-    # half-written checkpoint transaction that lands between the saver's
-    # inserts and its own commit. The DB is WAL, so writers serialize cleanly.
-    _edb = await aiosqlite.connect(config.DB_PATH)
-    await _edb.execute("PRAGMA busy_timeout=30000")
-    _checkpointer = AsyncSqliteSaver(_db)
+    # The checkpointer gets its OWN connection to the same WAL file. Statements
+    # are FIFO-queued per connection and aput() is execute(INSERT)+commit as
+    # TWO queued ops — so a _wt() UI commit/rollback could interleave between
+    # them: worst case _wt's rollback discards the saver's already-executed
+    # INSERT while the saver's queued commit() then no-ops "successfully", and
+    # LangGraph advances with the checkpoint row SILENTLY LOST (2026-09-27
+    # forensics). Transactions belong to connections, so a dedicated _cpdb
+    # makes that interleave structurally impossible.
+    _cpdb = await aiosqlite.connect(config.DB_PATH)
+    await _cpdb.execute("PRAGMA busy_timeout=30000")
+    _checkpointer = AsyncSqliteSaver(_cpdb)
     await _checkpointer.setup()
+    # Trajectory rows live in their OWN FILE now: one INSERT+commit per run
+    # event sharing the 900 MB checkpoint file's WAL writer lock was a
+    # contention amplifier in the "database is locked" deaths. (One-way
+    # migration below: old code versions can't see migrated trajectories.)
+    _edb = await aiosqlite.connect(config.EVENTS_DB_PATH)
+    await _edb.execute("PRAGMA busy_timeout=30000")
+    await _edb.execute("PRAGMA journal_mode=WAL")
     await _db.executescript(
         """
         CREATE TABLE IF NOT EXISTS threads(
@@ -121,6 +133,193 @@ async def init() -> None:
         """
     )
     await _edb.commit()
+    await _migrate_run_events()
+    await _startup_maintenance()
+
+
+async def shutdown() -> None:
+    """Close every aiosqlite connection: each Connection IS a non-daemon
+    thread parked on its work queue — interpreter shutdown joins them forever
+    if they're left open (a graceful uvicorn stop would hang; the scripted
+    fuser -k restart masked this). Closing also checkpoints their WALs, so
+    what was written survives in the main files."""
+    for c in (_cpdb, _db, _edb):
+        if c is not None:
+            try:
+                await c.close()
+            except Exception:  # noqa: BLE001 - best-effort; process is leaving
+                pass
+
+
+async def _migrate_run_events() -> None:
+    """One-time: run_events rows from langbang.db into events.db, then DROP
+    the legacy table. OR IGNORE makes a crash between copy and drop resumable
+    (seq is the shared PK). If the copy can't be verified the legacy table
+    stays untouched and next boot retries — new writes already go to
+    events.db, so at worst old trajectory rows sit idle."""
+    cur = await _db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='run_events' LIMIT 1")
+    if not await cur.fetchone():
+        return  # fresh DB — nothing to migrate
+    cur = await _db.execute("SELECT COUNT(*) FROM run_events")
+    n = (await cur.fetchone())[0]
+    ok = n == 0
+    if n:
+        await _edb.execute("ATTACH DATABASE ? AS src", (config.DB_PATH,))
+        try:
+            await _edb.execute(
+                "INSERT OR IGNORE INTO run_events(seq,thread_id,turn_id,ts,type,name,"
+                "dur,tok_in,tok_out,cache_read,ttft,meta) "
+                "SELECT seq,thread_id,turn_id,ts,type,name,dur,tok_in,tok_out,"
+                "cache_read,ttft,meta FROM src.run_events")
+            await _edb.commit()
+            got = (await (await _edb.execute("SELECT COUNT(*) FROM run_events")).fetchone())[0]
+            ok = got >= n
+        except Exception as e:  # noqa: BLE001 — legacy rows are the fallback
+            await _edb.rollback()
+            logger.warning("run_events migration failed (%s) — legacy table kept, retry next boot", e)
+        finally:
+            try:
+                await _edb.execute("DETACH DATABASE src")  # needs no open txn
+            except Exception:  # noqa: BLE001
+                pass
+    if ok:
+        await _db.execute("DROP TABLE run_events")  # takes its index with it
+        await _db.commit()
+        logger.warning("run_events: %d row(s) migrated to events.db, legacy table dropped", n)
+
+
+async def _startup_maintenance() -> None:
+    """First boot after this deploy: purge orphans + prune, then VACUUM the
+    once-huge file back to size. Startup-only (no traffic yet, nothing can be
+    mid-transaction); steady-state boots find 0 rows and skip the VACUUM."""
+    deleted = await purge_orphan_checkpoints()
+    deleted += await prune_checkpoints()
+    if not deleted:
+        return
+    await _db.commit()
+    await _cpdb.commit()
+    before = (await (await _cpdb.execute("PRAGMA page_count")).fetchone())[0]
+    t0 = time.time()
+    await _cpdb.execute("VACUUM")
+    after = (await (await _cpdb.execute("PRAGMA page_count")).fetchone())[0]
+    logger.warning("db maintenance: removed %d checkpoint rows, %d -> %d pages (%.1fs)",
+                   deleted, before, after, time.time() - t0)
+
+
+async def purge_orphan_checkpoints() -> int:
+    """Delete checkpoints/writes rows for thread_ids with no `threads` row.
+    Every run _touch()es its thread row before its first put, so no thread row
+    == garbage (deleted threads — delete_thread used to leak these by the
+    hundred). Threads with a live hub are skipped: a cancelled-but-dying run
+    can still be writing, and the next sweep gets it."""
+    from . import runs  # lazy: runs imports agent at module level
+    active = {h.tid for h in runs.HUBS.values() if not h.done}
+    deleted = 0
+    async with _checkpointer.lock:
+        cur = await _cpdb.execute(
+            "SELECT DISTINCT thread_id FROM checkpoints "
+            "WHERE thread_id NOT IN (SELECT id FROM threads)")
+        tids = [r[0] for r in await cur.fetchall() if r[0] not in active]
+        for i in range(0, len(tids), 200):
+            ph = ",".join("?" * len(tids[i:i + 200]))
+            batch = tids[i:i + 200]
+            c1 = await _cpdb.execute(f"DELETE FROM writes WHERE thread_id IN ({ph})", batch)
+            c2 = await _cpdb.execute(f"DELETE FROM checkpoints WHERE thread_id IN ({ph})", batch)
+            deleted += c1.rowcount + c2.rowcount
+            await _cpdb.commit()
+    if deleted:
+        logger.warning("db maintenance: purged %d checkpoint/writes rows of %d orphan thread(s)",
+                       deleted, len(tids))
+    return deleted
+
+
+async def prune_checkpoints(keep: int = 3) -> int:
+    """Bound the checkpoint tables: per (thread_id, checkpoint_ns), keep
+    everything >= floor where floor = min(newest seed row, the `keep`-th
+    newest id) — at least `keep` rows AND never deleting past the newest
+    _DeltaSnapshot seed.
+
+    SAFETY: deep-mode `messages` is a DeltaChannel (snapshot ~every 50 steps);
+    aget_state rebuilds it by walking the parent chain down to the newest seed
+    row — past that, langgraph treats absence as 'start empty' = SILENT
+    CONTEXT LOSS. A seed is exactly a row whose metadata has no
+    counters_since_delta_snapshot.messages (counters are zeroed at a snapshot
+    and only written when non-zero; pre-delta legacy rows also lack counters,
+    counting as seeds = the safe direction). checkpoint_id is uuid6: string
+    sort == chronological (verified on the live DB). Errors are always
+    'skip this namespace', never 'delete'. Runs under the saver's own lock on
+    _cpdb, so DELETEs can never interleave with a put's execute/commit pair."""
+    from . import runs
+    active = {h.tid for h in runs.HUBS.values() if not h.done}
+    deleted = 0
+    async with _checkpointer.lock:
+        rows = await (await _cpdb.execute(
+            "SELECT DISTINCT thread_id, checkpoint_ns FROM checkpoints")).fetchall()
+        for tid, ns in rows:
+            if tid in active:
+                continue
+            try:
+                seed = await (await _cpdb.execute(
+                    "SELECT checkpoint_id FROM checkpoints "
+                    "WHERE thread_id=? AND checkpoint_ns=? AND json_extract(metadata,"
+                    "'$.counters_since_delta_snapshot.messages') IS NULL "
+                    "ORDER BY checkpoint_id DESC LIMIT 1", (tid, ns))).fetchone()
+                third = await (await _cpdb.execute(
+                    "SELECT checkpoint_id FROM checkpoints "
+                    "WHERE thread_id=? AND checkpoint_ns=? "
+                    "ORDER BY checkpoint_id DESC LIMIT 1 OFFSET ?", (tid, ns, keep - 1))).fetchone()
+                if seed is None or third is None:
+                    continue  # no anchor detectable, or fewer than `keep` rows — hands off
+                floor = min(seed[0], third[0])  # keep >= keep rows AND the seed walk landing
+                c1 = await _cpdb.execute(
+                    "DELETE FROM writes WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id<?",
+                    (tid, ns, floor))
+                c2 = await _cpdb.execute(
+                    "DELETE FROM checkpoints WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id<?",
+                    (tid, ns, floor))
+                deleted += c1.rowcount + c2.rowcount
+                if deleted and deleted % 500 < 2:
+                    await _cpdb.commit()  # bounded WAL growth; yields the FIFO to saver puts
+            except Exception as e:  # noqa: BLE001 — skip, never over-delete on a surprise
+                logger.warning("checkpoint prune skipped for %s/%s: %s", tid[:12], ns[:20], e)
+        await _cpdb.commit()
+    return deleted
+
+
+_last_prune_ts = 0.0
+
+
+def schedule_prune(force: bool = False) -> None:
+    """Throttled fire-and-forget maintenance (hub finishes call it; a burst of
+    endings costs one sweep)."""
+    global _last_prune_ts
+    if not force and time.time() - _last_prune_ts < 60:
+        return
+    _last_prune_ts = time.time()
+
+    async def _go():
+        try:
+            n = await purge_orphan_checkpoints()
+            n += await prune_checkpoints()
+            if n:
+                logger.warning("checkpoint prune: removed %d row(s)", n)
+        except Exception as e:  # noqa: BLE001 — maintenance never breaks a run
+            logger.warning("checkpoint prune failed: %s", e)
+
+    _spawn(_go())
+
+
+async def current_todos(thread_id: str):
+    """The checkpointed `todos` channel value — what write_todos last
+    COMMITTED. /messages can't always reconstruct the list (args-dropped tool
+    calls, a lost checkpoint commit), so a reopening/second browser asks this
+    when its tool-call scan comes up empty; the card then matches state."""
+    tup = await _checkpointer.aget({"configurable": {"thread_id": thread_id}})
+    if not tup:
+        return None
+    cv = tup.get("channel_values") if isinstance(tup, dict) else tup.channel_values
+    return (cv or {}).get("todos") or None
 
 
 class SGlangChatOpenAI(ChatOpenAI):
@@ -320,6 +519,7 @@ class _TodoReconcile(AgentMiddleware):
         super().__init__()
         self._nudged = False
         self._init_stage = 0  # 0=watching, 1=nudge #1 sent, 2=done (escalated or list exists)
+        self._stale_nudges = 0  # staleness gate: max 2 per run, never a spiral
 
     @staticmethod
     def _real_tools(messages) -> int:
@@ -403,8 +603,60 @@ class _TodoReconcile(AgentMiddleware):
             return request.override(messages=[*request.messages, nudge])
         return None
 
+    @staticmethod
+    def _tools_since_last_wt(messages) -> int:
+        """Real tool results since the last write_todos result (scanning
+        back; stops at that write_todos or at this turn's human boundary)."""
+        n = 0
+        for m in reversed(messages):
+            if isinstance(m, ToolMessage):
+                if (getattr(m, "name", None) or "") == "write_todos":
+                    break
+                n += 1
+            elif isinstance(m, HumanMessage):
+                break
+        return n
+
+    STALE_AFTER = 8  # real tool calls tolerated with an open list before nudging
+
+    def _stale_nudge(self, request):
+        """FRESHNESS gate (user report 2026-09-27: the card moved at run start
+        and end only). A list EXISTS and has open items, but the model has
+        done >= STALE_AFTER real tool calls without touching write_todos --
+        the UI is showing a stale snapshot. Nudge it to batch write_todos in
+        with its next tool calls. Bounded at 2 per run; a model that still
+        ignores it is accepted (same no-spiral staged philosophy as the init
+        gate; the finish-line gate is the backstop). Counting is relative to
+        the last write_todos result, so compliance resets the gate naturally."""
+        todos = (request.state or {}).get("todos") or []
+        if not todos or self._stale_nudges >= 2:
+            return None
+        open_items = [t for t in todos if t.get("status") != "completed"]
+        if not open_items:
+            return None
+        n = self._tools_since_last_wt(request.messages)
+        if n < self.STALE_AFTER:
+            return None
+        self._stale_nudges += 1
+        logger.warning(
+            "todo-stale: %d tool calls since the last write_todos, nudge %d/2 "
+            "(%d items open)", n, self._stale_nudges, len(open_items)
+        )  # warning on purpose (no logging handler; lastResort = WARNING+)
+        nudge = HumanMessage(content=(
+            "[todo-enforcer] Your todo list is STALE: " + str(n) + " tool calls "
+            "since your last write_todos while " + str(len(open_items)) + " item(s) "
+            "are still open. Your next tool-call message MUST include write_todos "
+            "(batch it with your other tool calls) with statuses matching reality: "
+            "completed for every item you actually finished, in_progress for the "
+            "one you are on. The user is watching this progress bar."
+        ))
+        return request.override(messages=[*request.messages, nudge])
+
     async def awrap_model_call(self, request, handler):  # noqa: ANN001
         req = self._init_nudge(request)  # pre-handler: sees the pristine request
+        if req is not None:
+            request = req
+        req = self._stale_nudge(request)  # freshness gate (list exists but stale)
         if req is not None:
             request = req
         resp = await handler(request)
@@ -526,7 +778,9 @@ DEEP_NOTE = (
     "arguments in transit (a failed call with empty args is a transport "
     "loss, not a bug — retry smaller). For files over ~100 lines, write a "
     "skeleton with write_file, then append sections via run_bash heredocs "
-    "(cat >> path <<'EOF')."
+    "(cat >> path <<'EOF'). Same applies to write_todos: keep each todo item "
+    "terse (a few words) — the WHOLE list rides on every call's args, and "
+    "oversized args are what gets dropped, losing the update."
 )
 
 
@@ -825,7 +1079,10 @@ async def _log(
 
 
 async def _release_tx() -> None:
-    """Roll both connections back to a clean slate.
+    """Roll ALL connections back to a clean slate (the checkpointer's too: a
+    task.cancel() can land inside an aput after the INSERT completed but
+    before its queued commit — that half-open txn on _cpdb would hold the WAL
+    writer lock, the exact wedge class below).
 
     WHY this exists: a failed write (any sqlite error, e.g. "database is
     locked") does NOT auto-rollback — the half-open write transaction stays
@@ -833,12 +1090,24 @@ async def _release_tx() -> None:
     every connection then times out too (the 2026-09-25 incident: one
     timeout cascaded into a self-sustaining wedge for HOURS). Call this in
     the run's error/cancel arms: a failed write there otherwise poisons the
-    DB for every subsequent writer."""
+    DB for every subsequent writer.
+
+    _cpdb is rolled back UNDER the saver's own lock: _checkpointer/_cpdb are a
+    shared singleton, so a concurrent hub could be mid-aput on it right now —
+    an unsynchronized rollback would discard that healthy run's INSERT (the
+    same corruption class this whole split exists to kill). The lock is the
+    one place guaranteed to have no in-flight saver statement."""
     for c in (_edb, _db):
         try:
             await c.rollback()
         except Exception:  # noqa: BLE001 — last-resort cleanup
             pass
+    if _cpdb is not None and _checkpointer is not None:
+        async with _checkpointer.lock:
+            try:
+                await _cpdb.rollback()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 @asynccontextmanager
@@ -993,6 +1262,8 @@ async def delete_thread(tid: str) -> None:
         await _db.execute("DELETE FROM archived_messages WHERE thread_id=?", (tid,))
     async with _wt(_edb):
         await _edb.execute("DELETE FROM run_events WHERE thread_id=?", (tid,))
+    # took the checkpoint tables with it (300+ leaked threads before this)
+    await _checkpointer.adelete_thread(tid)
 
 
 async def _touch(thread_id: str, first_text: str) -> None:
@@ -1054,6 +1325,9 @@ def start_sweeper() -> None:
                 await _sweep_once()
             except Exception as e:
                 logger.warning("thread sweep failed: %s", e)
+            # checkpoint tables ride the same hourly beat (idle servers where
+            # no hub ever finishes still get pruned; throttle lives inside)
+            schedule_prune(force=True)
             await asyncio.sleep(3600)
 
     asyncio.get_running_loop().create_task(loop())

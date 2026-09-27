@@ -42,6 +42,14 @@ async def _startup():
     _prune_tts_cache()     # TTS disk cache is a replay aid, not an archive
 
 
+@app.on_event("shutdown")
+async def _shutdown():
+    # aiosqlite threads are non-daemon: left open, interpreter shutdown joins
+    # them forever (graceful stop hangs). The scripted restart SIGKILLs, which
+    # is the only reason this never bit before.
+    await agent.shutdown()
+
+
 # ---- settings & health ----
 
 @app.get("/api/health")
@@ -143,6 +151,17 @@ async def touch_thread(tid: str):
 @app.get("/api/threads/{tid}/messages")
 async def messages(tid: str):
     return await agent.history(tid)
+
+
+@app.get("/api/threads/{tid}/todos")
+async def thread_todos(tid: str):
+    """Checkpointed todo-list state (the write_todos card's source of truth
+    when a reopened/second browser can't reconstruct it from /messages).
+    Unknown thread or read trouble -> null, same tone as /trajectory."""
+    try:
+        return {"todos": await agent.current_todos(tid)}
+    except Exception:  # noqa: BLE001 - the card is a nicety, never an error page
+        return {"todos": None}
 
 
 @app.get("/api/threads/{tid}/trajectory")

@@ -132,12 +132,16 @@ async def _produce(hub: Hub, events: AsyncIterator[dict]) -> None:
         except Exception:  # noqa: BLE001
             pass
     await hub.finish()
+    # run's generator is exhausted → every checkpoint put has committed, and
+    # this thread just left the active set → cheap moment to bound the tables
+    agent.schedule_prune()
 
 
 async def _on_cancel(hub: Hub) -> None:
     try:
         await hub.append({"type": "error", "message": "RUN CANCELLED — stop requested"})
         await hub.finish()
+        agent.schedule_prune()
     except Exception:  # noqa: BLE001 - hub is going away anyway
         pass
 
