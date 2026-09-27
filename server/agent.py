@@ -319,21 +319,65 @@ class _TodoReconcile(AgentMiddleware):
     def __init__(self):
         super().__init__()
         self._nudged = False
+        self._init_nudged = False
 
     @staticmethod
-    def _did_work(messages) -> bool:
-        """Real (non-write_todos) tool results after this turn's last human
-        message. Scanning backwards stops at that human boundary, so earlier
-        turns don't count."""
+    def _real_tools(messages) -> int:
+        """Count of real (non-write_todos) tool results after this turn's
+        last human message. Scanning backwards stops at that human boundary,
+        so earlier turns don't count."""
+        n = 0
         for m in reversed(messages):
             if isinstance(m, ToolMessage):
                 if (getattr(m, "name", None) or "") != "write_todos":
-                    return True
+                    n += 1
             elif isinstance(m, HumanMessage):
-                return False
-        return False
+                break
+        return n
+
+    @classmethod
+    def _did_work(cls, messages) -> bool:
+        return cls._real_tools(messages) > 0
+
+    def _init_nudge(self, request):
+        """PLANNING gate (the finish-line gate above can't fire for a run
+        that never CREATED a list — the user's "won't make a todo list
+        unless I prompt it"). Once the turn has 2+ real tool results and the
+        list is still empty, append a one-shot USER-role nudge to the NEXT
+        model call. Sub-agent-proof twice over: this middleware is only ever
+        wired into the MAIN graph (build_agent's mw), and where the wrapper
+        can see the tool list, write_todos must be in it. (A 'todos' KEY in
+        state proves the list was written — LangGraph omits never-written
+        channels, so key presence proves too little and proves nothing here;
+        an empty list is the real signal.) Advisory: if the model answers
+        anyway (genuinely near-done), we accept."""
+        tools = getattr(request, "tools", None)
+        if tools:
+            names = {getattr(t, "name", None) or (t.get("name") if isinstance(t, dict) else None)
+                     for t in tools}
+            if "write_todos" not in names:
+                return None
+        n = self._real_tools(request.messages)
+        if n < 2 or (request.state or {}).get("todos"):
+            return None
+        self._init_nudged = True
+        logger.warning(
+            "todo-init: %d tool calls with an empty list, forcing planning round", n
+        )  # warning on purpose: no logging handler configured (lastResort)
+        nudge = HumanMessage(content=(
+            "[todo-enforcer] You have run " + str(n) + " tool calls in this task "
+            "without ever calling write_todos. If there are 3+ steps left, call "
+            "write_todos NOW with the plan (current statuses accurate). If the "
+            "task is genuinely near-complete or too small to need a list, answer "
+            "directly — do not create busywork items."
+        ))
+        return request.override(messages=[*request.messages, nudge])
 
     async def awrap_model_call(self, request, handler):  # noqa: ANN001
+        if not self._init_nudged:
+            req = self._init_nudge(request)  # pre-handler: sees the pristine request
+            if req is not None:
+                request = req
         resp = await handler(request)
         if self._nudged:
             return resp
@@ -392,6 +436,9 @@ DEEP_REPLACED_TOOLS = {"read_file", "write_file"}
 # ToolNode runs multiple tool calls from one message in parallel, and
 # several `task` sub-agents dispatched together crawl/research concurrently.
 DEEP_NOTE = (
+    "\n\nOpening move: a task that will take 3+ tool calls gets write_todos "
+    "with the plan BEFORE the first real action — the list is the user's "
+    "progress bar; small one-shot questions need none."
     "\n\nParallelism: independent work goes in ONE message — several `task` "
     "sub-agents for independent research streams, and multiple tool calls "
     "when one result doesn't feed the next; they run concurrently. Batch "
