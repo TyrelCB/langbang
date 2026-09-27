@@ -1635,10 +1635,58 @@ function voiceFail(msg) {
   SFX.play("error");
 }
 
+// ---------- inline media ----------
+// Absolute file paths to images/video/audio that appear in a FINAL answer get
+// players — agents love citing "saved: /tmp/render.mp4" and switching apps to
+// check is the worst. Finalization-only (attachSpeak's contract: mid-stream
+// these are half-typed tokens), and never inside <pre>/<code>/<a> (command
+// echoes and existing links must not fake players). Files that don't exist
+// collapse to a dim chip: agent prose cites paths that aren't there yet.
+const MEDIA_RE = /(?<![\w/])\/(?:[^/\s]+\/)*[^/\s]*\.(?:png|jpe?g|gif|webp|mp4|webm|mov|m4v|mp3|wav|ogg|opus|m4a)\b/gi;
+const MEDIA_KIND = (p) =>
+  /\.(png|jpe?g|gif|webp)$/i.test(p) ? "img"
+  : /\.(mp4|webm|mov|m4v)$/i.test(p) ? "video" : "audio";
+
+function mediafy(msg) {
+  if (msg.querySelector(":scope > .media")) return; // idempotent
+  const seen = new Set();
+  const paths = [];
+  const w = document.createTreeWalker(msg, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) =>
+      n.parentElement.closest("pre,code,a,.media")
+        ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+  });
+  for (let n; (n = w.nextNode());)
+    for (const m of n.nodeValue.match(MEDIA_RE) || [])
+      if (!seen.has(m)) { seen.add(m); paths.push(m); }
+  if (!paths.length) return;
+  const host = el("div", "media");
+  for (const p of paths) {
+    const src = "/api/media?path=" + encodeURIComponent(p);
+    const kind = MEDIA_KIND(p);
+    const item = el("div", "media-item");
+    const node = document.createElement(kind);
+    node.src = src;
+    if (kind !== "img") { node.controls = true; node.preload = "metadata"; }
+    if (kind === "video") node.setAttribute("playsinline", "");
+    node.addEventListener("error", () =>
+      item.replaceChildren(el("div", "media-missing", "⚠ " + p + " (missing)")));
+    const cap = el("div", "media-cap");
+    const link = el("a", "", p.split("/").pop());
+    link.href = src;
+    link.target = "_blank";
+    cap.append(link);
+    item.append(node, cap);
+    host.append(item);
+  }
+  msg.append(host);
+}
+
 // 🔊 rides INSIDE the bubble (.msg) — never as a bare #chat child (the
 // search-jump feature keys off #chat child indices). setMarkdown() rewrites
 // innerHTML while streaming, so callers attach only at FINALIZATION.
 function attachSpeak(msg, raw) {
+  mediafy(msg); // same finalization-only contract (self-guards idempotently)
   if (!raw || !raw.trim() || msg.querySelector(".speak-btn")) return;
   msg._raw = raw.trim();
   const b = el("button", "cb-btn speak-btn", "🔊");

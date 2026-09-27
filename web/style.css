@@ -146,6 +146,18 @@ body.hide-reasoning .block.thinking { display: none; }
 /* compact provenance tag on each AI bubble inside a scheduled run's segment */
 .run-chip { font-size: 10px; letter-spacing: 1px; color: var(--cyan); opacity: .75;
   text-align: right; margin: -3px 0 4px; }
+/* inline media host appended to final answer bubbles (mediafy in app.js):
+   absolute paths cited by the agent become image/video/audio players */
+.media { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.media-item { max-width: 100%; }
+.media-item img, .media-item video { display: block; max-width: min(100%, 420px);
+  max-height: 320px; border: 1px solid var(--line); clip-path: var(--clip); }
+.media-item audio { width: min(100%, 360px); }
+.media-cap { font-size: 10px; opacity: .55; }
+.media-cap a { color: inherit; text-decoration: none; }
+.media-cap a:hover { color: var(--cyan); }
+.media-missing { font-size: 11px; color: var(--muted); border: 1px dashed var(--line);
+  padding: 4px 8px; clip-path: var(--clip); overflow-wrap: anywhere; }
 
 /* markdown content inside messages */
 .msg > :first-child { margin-top: 0; }

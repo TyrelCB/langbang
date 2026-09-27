@@ -364,6 +364,20 @@ async def upload(files: list[UploadFile] = File(...)):
     return {"files": out}
 
 
+@app.get("/api/media")
+async def media(path: str):
+    """Serve an asset by absolute path so answers can show their own
+    artifacts (image/video/audio players inline in the chat). This is NOT a
+    new capability: /api/shell already hands out any file on this box to the
+    same LAN/tailnet audience (README ⚠ Security) — range/206 comes from
+    Starlette's FileResponse, which is what makes <video> seeking work."""
+    if not os.path.isabs(path):
+        raise HTTPException(400, "path must be absolute")
+    if not os.path.isfile(path):
+        raise HTTPException(404, "not a file")
+    return FileResponse(path, headers={"Cache-Control": "private, no-cache"})
+
+
 # ---- chat (SSE stream) ----
 
 MAX_IMAGES = 4
