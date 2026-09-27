@@ -213,6 +213,9 @@ body.hide-reasoning .block.thinking { display: none; }
 .block.shell summary { border-left-color: var(--green); color: var(--green); }
 .block pre { margin: 0; padding: 8px; background: var(--bg2); overflow-x: auto; white-space: pre-wrap; }
 .block[open] summary { color: var(--text); }
+/* failed tool call (validation/lost args) — red even while open, and the
+   card IS open by default so the reason is never hidden */
+.block.tool.errored summary { border-left-color: var(--danger); color: var(--danger); }
 /* waiting card — sits after [open] so its orange survives while expanded */
 .block.waiting summary { border-left-color: var(--orange); color: var(--orange);
   animation: lb-pulse 1.6s ease-in-out infinite; }

@@ -691,6 +691,23 @@ function runPipeline(run) {
         card.querySelector("pre").textContent += "\n← " + JSON.stringify(ev.output, null, 2);
         card.open = false;
       }
+    } else if (ev.type === "tool_error") {
+      // The tool never ran (bad/lost args). Close the card as FAILED instead
+      // of leaving a forever-"…" spinner — a visible red error beats a silent
+      // stall that looks like the write happened.
+      SFX.play("error");
+      const card = run.tools.get(ev.run_id);
+      run.tools.delete(ev.run_id);
+      if (card) {
+        card.querySelector("summary").textContent =
+          `✕ ${ev.name} FAILED${typeof ev.dur === "number" ? " · " + fmtShort(ev.dur) : ""}`;
+        const pre = card.querySelector(":scope > pre");
+        if (pre) pre.textContent += "\n← " + (ev.error || "tool error");
+        else card.appendChild(el("pre", null, "← " + (ev.error || "tool error")));
+        card.open = true;
+        card.classList.add("errored");
+        run.subs.delete(ev.run_id);
+      }
     } else if (ev.type === "todos") {
       run.todosTouched = true;
       // the to-do panel shows the OPEN thread's list — a parked run must not

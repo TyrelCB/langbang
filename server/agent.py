@@ -319,7 +319,7 @@ class _TodoReconcile(AgentMiddleware):
     def __init__(self):
         super().__init__()
         self._nudged = False
-        self._init_nudged = False
+        self._init_stage = 0  # 0=watching, 1=nudge #1 sent, 2=done (escalated or list exists)
 
     @staticmethod
     def _real_tools(messages) -> int:
@@ -343,41 +343,70 @@ class _TodoReconcile(AgentMiddleware):
         """PLANNING gate (the finish-line gate above can't fire for a run
         that never CREATED a list — the user's "won't make a todo list
         unless I prompt it"). Once the turn has 2+ real tool results and the
-        list is still empty, append a one-shot USER-role nudge to the NEXT
-        model call. Sub-agent-proof twice over: this middleware is only ever
-        wired into the MAIN graph (build_agent's mw), and where the wrapper
-        can see the tool list, write_todos must be in it. (A 'todos' KEY in
-        state proves the list was written — LangGraph omits never-written
-        channels, so key presence proves too little and proves nothing here;
-        an empty list is the real signal.) Advisory: if the model answers
-        anyway (genuinely near-done), we accept."""
+        list is still empty, append a USER-role nudge to the NEXT model call;
+        if the model answers that call by KEEPING TOOLS (last message is a
+        real ToolMessage again), escalate once — then stop either way (two
+        nudges max, no spiral). Sub-agent-proof twice over: this middleware
+        is only ever wired into the MAIN graph (build_agent's mw), and where
+        the wrapper can see the tool list, write_todos must be in it. (A
+        'todos' KEY in state proves the list was written — LangGraph omits
+        never-written channels, so key presence proves too little and proves
+        nothing here; an empty list is the real signal.) A model that answers
+        anyway (genuinely near-done) is accepted: an answer is always legal."""
         tools = getattr(request, "tools", None)
         if tools:
             names = {getattr(t, "name", None) or (t.get("name") if isinstance(t, dict) else None)
                      for t in tools}
             if "write_todos" not in names:
                 return None
-        n = self._real_tools(request.messages)
-        if n < 2 or (request.state or {}).get("todos"):
+        if (request.state or {}).get("todos"):
+            self._init_stage = 2  # list exists (model complied) — gate is done
             return None
-        self._init_nudged = True
-        logger.warning(
-            "todo-init: %d tool calls with an empty list, forcing planning round", n
-        )  # warning on purpose: no logging handler configured (lastResort)
-        nudge = HumanMessage(content=(
-            "[todo-enforcer] You have run " + str(n) + " tool calls in this task "
-            "without ever calling write_todos. If there are 3+ steps left, call "
-            "write_todos NOW with the plan (current statuses accurate). If the "
-            "task is genuinely near-complete or too small to need a list, answer "
-            "directly — do not create busywork items."
-        ))
-        return request.override(messages=[*request.messages, nudge])
+        if self._init_stage >= 2:
+            return None
+        # First-person, hard-ordered phrasing (the tone the finish-line gate
+        # earned live compliance with): the old "if 3+ steps left... answer
+        # directly" wording let Qwen3.8 talk itself into "too small" on every
+        # multi-echo test and keep answering list-free (seen 2026-09-27).
+        if self._init_stage == 0:
+            n = self._real_tools(request.messages)
+            if n < 2:
+                return None
+            self._init_stage = 1
+            logger.warning(
+                "todo-init: %d tool calls with an empty list, forcing planning round", n
+            )  # warning on purpose: no logging handler configured (lastResort)
+            nudge = HumanMessage(content=(
+                "[todo-enforcer] You have run " + str(n) + " tool calls in this task "
+                "without ever calling write_todos. Unless the task is COMPLETE or a "
+                "single obvious action, your very next tool call must be write_todos "
+                "listing the remaining steps with accurate statuses — the user's "
+                "progress bar depends on it. Then continue the work. Do not answer "
+                "without either writing the list or finishing."
+            ))
+            return request.override(messages=[*request.messages, nudge])
+        # stage 1: the model was warned. If its answer to that was ANOTHER
+        # real tool call (not write_todos, not a final answer), escalate once.
+        # (The stage-0 nudge itself isn't persisted — middleware message
+        # overrides are call-local — so the tail here is the model's
+        # post-warning tool_call + result.)
+        last = request.messages[-1] if request.messages else None
+        if isinstance(last, ToolMessage) and (getattr(last, "name", None) or "") != "write_todos":
+            self._init_stage = 2
+            logger.warning("todo-init: warning ignored, escalating (final round)")
+            nudge = HumanMessage(content=(
+                "[todo-enforcer] FINAL WARNING: you kept working after being told to "
+                "maintain a todo list. Your next tool call must be write_todos with "
+                "the remaining plan and statuses. Only if the task is fully complete "
+                "may you answer instead."
+            ))
+            return request.override(messages=[*request.messages, nudge])
+        return None
 
     async def awrap_model_call(self, request, handler):  # noqa: ANN001
-        if not self._init_nudged:
-            req = self._init_nudge(request)  # pre-handler: sees the pristine request
-            if req is not None:
-                request = req
+        req = self._init_nudge(request)  # pre-handler: sees the pristine request
+        if req is not None:
+            request = req
         resp = await handler(request)
         if self._nudged:
             return resp
@@ -432,6 +461,52 @@ class _TodoReconcile(AgentMiddleware):
 # richer descriptions) — our same-named tools would collide on bind.
 DEEP_REPLACED_TOOLS = {"read_file", "write_file"}
 
+
+class _FileArgAlias(AgentMiddleware):
+    """Rename drifted file-tool args BEFORE validation.
+
+    The harness file tools take `file_path`; a code-agent-trained model
+    sometimes reaches for Claude-Code's `path` instead (observed live:
+    write_file({'path': …}) → ToolNode answers 'file_path: Field required'
+    without the tool ever running). Renaming is safe only on the
+    file_path-family tools — ls/glob/grep legitimately take `path`."""
+
+    TOOLS = {"write_file", "read_file", "edit_file", "delete_file", "delete"}
+    ALIAS = ("path", "filename", "file")
+
+    async def awrap_tool_call(self, request, handler):  # noqa: ANN001
+        call = request.tool_call
+        args = call.get("args")
+        if (
+            call.get("name") in self.TOOLS
+            and isinstance(args, dict)
+            and any(k in args for k in self.ALIAS)
+        ):
+            # rename only when the canonical key is absent; an alias present
+            # ALONGSIDE file_path is a strict-schema extra -> just drop it.
+            fixed = dict(args)
+            for k in self.ALIAS:
+                if k in fixed:
+                    fixed.setdefault("file_path", fixed.pop(k))
+            logger.warning(
+                "arg-repair: %s %s -> file_path",
+                call.get("name"),
+                [k for k in self.ALIAS if k in args],
+            )
+            request = request.override(tool_call={**call, "args": fixed})
+        res = await handler(request)
+        # ToolNode converts invocation/validation failures into error
+        # ToolMessages instead of raising; breadcrumb them (the astream
+        # loop separately surfaces on_tool_error events to UI+trajectory).
+        if isinstance(res, ToolMessage) and getattr(res, "status", None) == "error":
+            logger.warning(
+                "tool-error: %s kwargs=%.120s — %.200s",
+                request.tool_call.get("name"),
+                str(request.tool_call.get("args") or {}),
+                res.content,
+            )
+        return res
+
 # Nudge the planner to use the concurrency the harness already supports:
 # ToolNode runs multiple tool calls from one message in parallel, and
 # several `task` sub-agents dispatched together crawl/research concurrently.
@@ -447,6 +522,11 @@ DEEP_NOTE = (
     "final reply call write_todos (no items left pending/in_progress that "
     "are actually finished; after resuming an interrupted run, reconcile the "
     "list first)."
+    "\n\nLarge writes: a write_file whose content is many KB can lose its "
+    "arguments in transit (a failed call with empty args is a transport "
+    "loss, not a bug — retry smaller). For files over ~100 lines, write a "
+    "skeleton with write_file, then append sections via run_bash heredocs "
+    "(cat >> path <<'EOF')."
 )
 
 
@@ -593,6 +673,7 @@ async def build_agent(s: dict, checkpointer=None):
         if s.get("compact_enabled", True):
             mw.append(_CompactionMiddleware(s))
         mw.append(_TodoReconcile())  # deterministic finish-line gate
+        mw.append(_FileArgAlias())  # repair path->file_path arg drift pre-validation
         perms = []
         if s.get("skills_enabled", True):
             mw.append(_FreshSkillsMiddleware(
@@ -1285,6 +1366,29 @@ async def run_chat(
                 }
                 if ev["name"] == "task":
                     yield {"type": "sub", "state": "end", "sub_id": rid, "dur": dur}
+            elif kind == "on_tool_error":
+                # Validation/invocation failure (e.g. the model emitted a
+                # tool call with empty or wrong-schema args — sglang drops
+                # giant tool-call JSON now and then). The tool never ran:
+                # without this branch the card sat "running" forever and
+                # the trajectory had no row for the attempt at all.
+                rid = str(ev["run_id"])
+                sub_runs.discard(rid)
+                st0, sub0, inp0 = tool_t0.pop(rid, (None, sub_id, None))
+                dur = round(time.time() - st0, 3) if st0 else None
+                err = str(ev["data"].get("error") or "tool error")[:500]
+                await _log(
+                    thread_id, turn_id, "tool", name=ev["name"], dur=dur,
+                    meta={"in": _cap(inp0, 2000), "err": err, "sub": sub0},
+                )
+                yield {
+                    "type": "tool_error",
+                    "name": ev["name"],
+                    "error": err,
+                    "run_id": rid,
+                    "sub": sub0,
+                    "dur": dur,
+                }
         yield {"type": "done", "seconds": round(time.time() - t_run0, 1)}
     except GraphRecursionError:
         # LangGraph's own text ("set the recursion_limit config key", docs URL)

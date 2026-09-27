@@ -16,10 +16,18 @@ but built on the LangChain/LangGraph ecosystem:
   — our same-named `read_file`/`write_file` step aside, and oversize tool
   results get auto-evicted to disk). `run_bash` stays the only
   shell — the harness's extra `execute` tool is excluded. If a multi-step
-  task burns several tool calls without ever opening a todo list, a one-shot
-  enforcer nudges the model to plan (and a finish-line nudge nudges stale
-  items before the final answer). Turning the toggle
+  task burns several tool calls without ever opening a todo list, a staged
+  enforcer nudges the model to plan (harder "FINAL WARNING" if the first
+  nudge is ignored, then accepted — never a nudge spiral; a finish-line
+  nudge reconciles stale items before the final answer). Turning the toggle
   off falls back to the plain LangGraph ReAct graph
+- **Tool-call reliability**: local models sometimes mangle tool-call args in
+  transit — Qwen drifts `file_path` to `path`, and multi-KB `content` can be
+  dropped whole (a `→ {}` call). `_FileArgAlias` middleware renames known
+  aliases before validation (server log: `arg-repair:`), schema-loss failures
+  surface as red ✕ FAILED cards + trajectory rows instead of frozen "…"
+  spinners (`on_tool_error`), and the deep prompt teaches the agent to chunk
+  big files (write a skeleton, append the rest via `run_bash` heredocs)
 - **Skills** (Agent Skills spec; deep mode, CONFIG toggle): layers
   `~/.hermes/skills` — your existing Hermes tree, categories included —
   under a LangBang-owned `~/.langbang/skills` dir. Hermes stays the package
