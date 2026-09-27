@@ -15,7 +15,10 @@ but built on the LangChain/LangGraph ecosystem:
   `edit_file`, `glob`, `grep`) come from the harness on the real filesystem
   — our same-named `read_file`/`write_file` step aside, and oversize tool
   results get auto-evicted to disk). `run_bash` stays the only
-  shell — the harness's extra `execute` tool is excluded. Turning the toggle
+  shell — the harness's extra `execute` tool is excluded. If a multi-step
+  task burns several tool calls without ever opening a todo list, a one-shot
+  enforcer nudges the model to plan (and a finish-line nudge nudges stale
+  items before the final answer). Turning the toggle
   off falls back to the plain LangGraph ReAct graph
 - **Skills** (Agent Skills spec; deep mode, CONFIG toggle): layers
   `~/.hermes/skills` — your existing Hermes tree, categories included —
@@ -52,6 +55,19 @@ but built on the LangChain/LangGraph ecosystem:
   tools (`create/list/update/set_scheduled_task_enabled/run_scheduled_task_now/
   delete_scheduled_task` in CONFIG → LOCAL TOOLS), so "check X every 4 hours"
   said in chat becomes a real LangBang schedule — not crontab improvisation.
+- **Detached runs** (`server/runs.py`): every run — chat turn, `!cmd`, or
+  scheduled firing — belongs to a server-side hub, not to a browser tab. A
+  dropped connection (phone screen timeout, app switch, refresh, proxy blip)
+  never cancels work in flight; reopening the thread reattaches and replays
+  what was missed (`GET /api/runs` + `GET /api/threads/{tid}/stream?since=N`,
+  heartbeats keep Caddy/phones attached). Only STOP cancels a run. Many
+  threads can run at once (cap 4 — shared GPU), each with its own SEND/STOP,
+  and busy threads get a pulsing ◉ in the sidebar.
+- **Inline media**: absolute file paths cited in an answer (`.png`, `.mp4`,
+  `.wav`, …) render as inline images/players via `GET /api/media?path=…`
+  (Range/206 → seekable video), scanned at finalization only and never
+  inside code blocks; a path missing on disk collapses to a dim "missing"
+  chip instead of a dead player.
 
 ## Spark services wired in by default
 
@@ -223,7 +239,10 @@ machine running the server** (`run_bash` = `bash -lc`). There is no approval
 prompt — by design, this is a personal LAN tool. Do **not** expose
 `/api/chat` beyond localhost/LAN, and do not add auth-bypassing proxies in
 front of it. Anyone who can post to `/api/chat` (or `/api/shell`, the `!cmd`
-route) can run commands as you.
+route) can run commands as you. `GET /api/media?path=` serves any absolute
+path on this machine (for the inline players) — the same read surface
+`!cat /etc/shadow` already grants, so it adds no new capability, but the
+same LAN/tailnet-only rule covers it.
 
 ## Layout
 
