@@ -397,6 +397,121 @@ async def media(path: str):
     return FileResponse(path, headers={"Cache-Control": "private, no-cache"})
 
 
+# ---- file editor (✎ FILES) ----
+# Same trust posture as /api/media and /api/shell: a LAN/tailnet-only personal
+# tool whose agent already has an unsandboxed shell (README ⚠ Security).
+# Writes are optimistic-concurrency guarded: the client sends the mtime_ns it
+# loaded, so an agent edit landing while the buffer is open is a 409 the UI
+# resolves (reload / overwrite) instead of a silent clobber. mtime_ns rides as
+# a STRING: ~1.8e18 is past JS's 2^53, and a JSON number came back rounded —
+# every first save of an existing file was a false 409.
+
+EDIT_MAX_BYTES = 2_000_000
+FS_LIST_MAX = 2000
+
+
+def _abs(path: str) -> str:
+    p = os.path.expanduser(path or "~")
+    if not os.path.isabs(p):
+        raise HTTPException(400, "path must be absolute (or start with ~)")
+    return os.path.normpath(p)
+
+
+@app.get("/api/fs/list")
+async def fs_list(path: str = "~"):
+    p = _abs(path)
+    if not os.path.isdir(p):
+        raise HTTPException(404, "not a directory")
+    entries = []
+    try:
+        with os.scandir(p) as it:
+            for e in it:
+                try:
+                    is_dir = e.is_dir()  # follows symlinks: a link to a dir browses
+                    st = e.stat() if not is_dir else None
+                except OSError:  # dangling symlink, dead fuse mount (spark-ee93)
+                    is_dir, st = False, None
+                entries.append({"name": e.name, "dir": is_dir,
+                                "size": st.st_size if st else None})
+    except PermissionError:
+        raise HTTPException(403, "permission denied")
+    entries.sort(key=lambda x: (not x["dir"], x["name"].lower()))
+    return {"path": p, "parent": os.path.dirname(p) if p != "/" else None,
+            "entries": entries[:FS_LIST_MAX], "truncated": len(entries) > FS_LIST_MAX}
+
+
+@app.get("/api/fs/read")
+async def fs_read(path: str):
+    p = _abs(path)
+    if not os.path.isfile(p):
+        raise HTTPException(404, "not a file")
+    st = os.stat(p)
+    if st.st_size > EDIT_MAX_BYTES:
+        raise HTTPException(413, f"file too large to edit ({st.st_size:,} bytes; max {EDIT_MAX_BYTES:,})")
+    try:
+        with open(p, "rb") as fh:
+            raw = fh.read()
+    except PermissionError:
+        raise HTTPException(403, "permission denied")
+    if b"\0" in raw[:8192]:
+        raise HTTPException(415, "binary file — not editable as text")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(415, "not UTF-8 text — not editable here")
+    # <textarea> normalizes CRLF to LF; remember it so a save round-trips
+    eol = "crlf" if "\r\n" in text else "lf"
+    return {"path": p, "content": text.replace("\r\n", "\n") if eol == "crlf" else text,
+            "eol": eol, "mtime_ns": str(st.st_mtime_ns), "size": st.st_size,
+            "writable": os.access(p, os.W_OK)}
+
+
+class FsWriteIn(BaseModel):
+    path: str
+    content: str
+    mtime_ns: str | None = None  # None = creating a new file (string: see above)
+    eol: str = "lf"
+    force: bool = False
+
+
+@app.put("/api/fs/write")
+async def fs_write(body: FsWriteIn):
+    shown = _abs(body.path)
+    p = os.path.realpath(shown)  # write THROUGH symlinks, not over them
+    exists = os.path.exists(p)
+    if exists and not os.path.isfile(p):
+        raise HTTPException(400, "not a regular file")
+    if not os.path.isdir(os.path.dirname(p)):
+        raise HTTPException(400, "parent directory does not exist")
+    if not body.force:
+        if body.mtime_ns is None and exists:
+            raise HTTPException(409, "file already exists on disk")
+        if body.mtime_ns is not None:
+            if not exists:
+                raise HTTPException(409, "file was deleted on disk")
+            if str(os.stat(p).st_mtime_ns) != body.mtime_ns:
+                raise HTTPException(409, "file changed on disk since it was opened")
+    text = body.content.replace("\n", "\r\n") if body.eol == "crlf" else body.content
+    data = text.encode("utf-8")
+    if len(data) > EDIT_MAX_BYTES:
+        raise HTTPException(413, "content too large")
+    # atomic replace (a crash mid-save never leaves half a file), keeping mode
+    tmp = f"{p}.lb-save-{os.getpid()}.tmp"
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+        if exists:
+            shutil.copymode(p, tmp)
+        os.replace(tmp, p)
+    except PermissionError:
+        raise HTTPException(403, "permission denied")
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    st = os.stat(p)
+    return {"path": shown, "mtime_ns": str(st.st_mtime_ns), "size": st.st_size}
+
+
 # ---- chat (SSE stream) ----
 
 MAX_IMAGES = 4

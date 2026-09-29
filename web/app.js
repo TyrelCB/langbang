@@ -434,6 +434,7 @@ function renderHistory(msgs) {
       for (const tc of m.tool_calls || []) {
         const b = addBlock("tool", `⚙ ${tc.name}`);
         b.querySelector("pre").textContent = "→ " + JSON.stringify(tc.args, null, 2);
+        edLink(b, tc.args);
       }
     } else if (m.role === "tool") {
       const b = addBlock("tool", `⚙ ${m.tool_name} result`);
@@ -668,6 +669,7 @@ function runPipeline(run) {
         run.subs.set(ev.run_id, { card, body, t0: Date.now() });
       } else {
         card = buildToolCard(`⚙ ${ev.name} …`, ev.input);
+        edLink(card, ev.input);
         if (ev.sub && run.subs.get(ev.sub)) host = run.subs.get(ev.sub).body;
       }
       card.open = true;
@@ -2600,8 +2602,282 @@ document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   // settings above recap: it can sit on top of it and is the top-most panel
   if (!$("#settings-panel").classList.contains("hidden")) closeSettings(false);
+  else if (!$("#editor-panel").classList.contains("hidden")) edClose();
   else if (!$("#recap-panel").classList.contains("hidden")) closeRecap();
 });
+
+// ---------- ✎ FILES: browse + edit text files on the server ----------
+// One buffer at a time. Saves carry the mtime_ns the buffer was loaded at, so
+// an agent write landing while you edit is a 409 resolved in #ed-confirm
+// (reload / overwrite) — never a silent clobber either way. Every path that
+// would drop unsaved edits (close, open another file, ESC, backdrop) goes
+// through edGuard's SAVE / DISCARD / KEEP bar (the viewer has no confirm()).
+const ED = { path: null, mtime: null, eol: "lf", orig: "", dir: null, lines: 0, indent: "    " };
+const edDirty = () => ED.path !== null && $("#ed-text").value !== ED.orig;
+
+function edStatus(msg, cls) {
+  const s = $("#ed-status");
+  s.textContent = msg || "";
+  s.className = cls || "";
+}
+
+function edRefreshChrome() {
+  const dirty = edDirty();
+  $("#ed-file").classList.toggle("dirty", dirty);
+  $("#btn-ed-save").disabled = ED.path === null || (!dirty && ED.mtime !== null);
+  $("#btn-ed-revert").disabled = !dirty;
+}
+
+function edGutter() {
+  const ta = $("#ed-text");
+  const n = ta.value.split("\n").length;
+  if (n !== ED.lines) {
+    ED.lines = n;
+    let s = "";
+    for (let i = 1; i <= n; i++) s += i + "\n";
+    $("#ed-gutter").textContent = s;
+  }
+  $("#ed-gutter").scrollTop = ta.scrollTop;
+}
+
+async function edFetch(url, opts) {
+  const r = await fetch(url, opts);
+  let body = null;
+  try { body = await r.json(); } catch {}
+  if (!r.ok) {
+    const err = new Error((body && body.detail) || "HTTP " + r.status);
+    err.status = r.status;
+    throw err;
+  }
+  return body;
+}
+
+function edConfirm(msg, buttons) {
+  const bar = $("#ed-confirm");
+  bar.replaceChildren(el("span", null, msg));
+  for (const [label, cls, fn] of buttons) {
+    const b = el("button", "btn " + cls, label);
+    b.onclick = () => { bar.classList.add("hidden"); fn(); };
+    bar.appendChild(b);
+  }
+  bar.classList.remove("hidden");
+}
+
+// run `fn` now, or after the user settles unsaved edits
+function edGuard(fn) {
+  if (!edDirty()) { fn(); return; }
+  edConfirm(`● UNSAVED CHANGES TO ${ED.path.split("/").pop()} —`, [
+    ["SAVE", "accent", async () => { if (await edSave()) fn(); }],
+    ["DISCARD", "ghost", fn],
+    ["KEEP EDITING", "ghost", () => $("#ed-text").focus()],
+  ]);
+}
+
+async function edBrowse(dir) {
+  const tree = $("#ed-tree");
+  let out;
+  try {
+    out = await edFetch("/api/fs/list?path=" + encodeURIComponent(dir));
+  } catch (e) {
+    edStatus("✕ " + dir + ": " + e.message, "err");
+    return false;
+  }
+  ED.dir = out.path;
+  try { localStorage.setItem("lb-ed-dir", out.path); } catch {}
+  const showHidden = $("#ed-hidden").checked;
+  tree.replaceChildren();
+  const row = (cls, label, onclick, size) => {
+    const r = el("div", "ed-row " + cls, label);
+    if (size != null) r.appendChild(el("span", "sz", fmtBytes(size)));
+    r.onclick = onclick;
+    tree.appendChild(r);
+    return r;
+  };
+  tree.appendChild(el("div", "ed-note", out.path));
+  if (out.parent) row("dir", "↰ ..", () => edBrowse(out.parent));
+  for (const e of out.entries) {
+    if (!showHidden && e.name.startsWith(".")) continue;
+    const full = (out.path === "/" ? "" : out.path) + "/" + e.name;
+    if (e.dir) row("dir", "▸ " + e.name, () => edBrowse(full));
+    else {
+      const r = row("file", e.name, () => edGuard(() => edLoad(full)), e.size);
+      r.dataset.path = full;
+      if (full === ED.path) r.classList.add("on");
+    }
+  }
+  if (out.truncated) tree.appendChild(el("div", "ed-note", "… listing truncated"));
+  return true;
+}
+
+function edMarkTree() {
+  for (const r of document.querySelectorAll("#ed-tree .ed-row.file"))
+    r.classList.toggle("on", r.dataset.path === ED.path);
+}
+
+function edSetBuffer(path, content, mtime, eol, note) {
+  ED.path = path;
+  ED.mtime = mtime;
+  ED.eol = eol || "lf";
+  ED.orig = content;
+  ED.lines = 0;
+  ED.indent = /^\t/m.test(content) ? "\t" : "    ";
+  const ta = $("#ed-text");
+  ta.disabled = false;
+  ta.value = content;
+  ta.scrollTop = 0;
+  ta.scrollLeft = 0;
+  $("#ed-file").textContent = path;
+  $("#ed-path").value = path;
+  $("#ed-confirm").classList.add("hidden");
+  edGutter();
+  edRefreshChrome();
+  edMarkTree();
+  edStatus(note);
+}
+
+async function edLoad(path) {
+  let f;
+  try {
+    f = await edFetch("/api/fs/read?path=" + encodeURIComponent(path));
+  } catch (e) {
+    edStatus("✕ " + path + ": " + e.message, "err");
+    SFX.play("error");
+    return false;
+  }
+  edSetBuffer(f.path, f.content, f.mtime_ns, f.eol,
+    `${f.content.split("\n").length} LINES · ${fmtBytes(f.size)} · ${f.eol.toUpperCase()}` +
+    (f.writable ? "" : " · ⚠ READ-ONLY ON DISK"));
+  const dir = f.path.slice(0, f.path.lastIndexOf("/")) || "/";
+  if (dir !== ED.dir) await edBrowse(dir);
+  return true;
+}
+
+async function edSave(force = false) {
+  if (ED.path === null) return false;
+  try {
+    const out = await edFetch("/api/fs/write", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: ED.path, content: $("#ed-text").value,
+        mtime_ns: ED.mtime, eol: ED.eol, force }),
+    });
+    const created = ED.mtime === null;
+    ED.path = out.path; // "~/x" new-file buffers come back expanded
+    $("#ed-file").textContent = out.path;
+    ED.mtime = out.mtime_ns;
+    ED.orig = $("#ed-text").value;
+    edRefreshChrome();
+    edStatus(`✓ SAVED ${new Date().toLocaleTimeString()} · ${fmtBytes(out.size)}`, "ok");
+    SFX.play("click");
+    if (created && ED.dir) await edBrowse(ED.dir); // new file joins the listing
+    return true;
+  } catch (e) {
+    SFX.play("error");
+    if (e.status === 409) {
+      edConfirm(`⚠ ${e.message.toUpperCase()} —`, [
+        ["RELOAD FROM DISK", "ghost", () => edLoad(ED.path)],
+        ["OVERWRITE", "accent", () => edSave(true)],
+        ["CANCEL", "ghost", () => $("#ed-text").focus()],
+      ]);
+    } else edStatus("✕ save failed: " + e.message, "err");
+    return false;
+  }
+}
+
+// Enter in the path box: folder → browse, file → open, nothing → new buffer
+async function edGo(raw) {
+  const path = raw.trim();
+  if (!path) return;
+  try {
+    await edFetch("/api/fs/list?path=" + encodeURIComponent(path));
+    await edBrowse(path);
+    return;
+  } catch (e) {
+    if (e.status !== 404) { edStatus("✕ " + e.message, "err"); return; }
+  }
+  try {
+    await edFetch("/api/fs/read?path=" + encodeURIComponent(path));
+  } catch (e) {
+    if (e.status === 404) {
+      edGuard(() => edSetBuffer(path, "", null, "lf", "NEW FILE — SAVE creates it (parent folder must exist)"));
+      return;
+    }
+  }
+  edGuard(() => edLoad(path));
+}
+
+async function openEditor(path) {
+  SFX.play("click");
+  $("#editor-panel").classList.remove("hidden");
+  if (path) {
+    edGuard(async () => {
+      // unloadable (binary, too big, gone): still land in its folder
+      if (!(await edLoad(path)) && !(await edBrowse(path.slice(0, path.lastIndexOf("/")) || "/")))
+        await edBrowse(ED.dir || "~");
+      $("#ed-text").focus();
+    });
+    return;
+  }
+  let dir = ED.dir;
+  try { dir = dir || localStorage.getItem("lb-ed-dir"); } catch {}
+  if (!(await edBrowse(dir || "~"))) await edBrowse("~");
+}
+
+function edClose() {
+  edGuard(() => {
+    // closing = discarding: next open starts from disk, not a stale buffer
+    if (ED.path !== null && edDirty()) $("#ed-text").value = ED.orig;
+    $("#ed-confirm").classList.add("hidden");
+    edRefreshChrome();
+    $("#editor-panel").classList.add("hidden");
+  });
+}
+
+// ✎ on a file-tool card (read_file/write_file/edit_file…): jump into the editor.
+// Lives INSIDE the card's <summary> — never a bare #chat child.
+function edLink(card, args) {
+  const p = args && typeof args.file_path === "string" ? args.file_path : null;
+  if (!p || !p.startsWith("/")) return;
+  const b = el("button", "ed-open", "✎ open");
+  b.title = "open " + p + " in the FILES editor";
+  b.onclick = (e) => { e.preventDefault(); e.stopPropagation(); openEditor(p); };
+  card.querySelector("summary").appendChild(b);
+}
+
+$("#btn-files").onclick = () => openEditor();
+$("#btn-ed-close").onclick = () => { SFX.play("click"); edClose(); };
+$("#btn-ed-save").onclick = () => edSave();
+$("#btn-ed-revert").onclick = () => {
+  SFX.play("click");
+  $("#ed-text").value = ED.orig;
+  edGutter();
+  edRefreshChrome();
+  edStatus("REVERTED to last loaded/saved version");
+};
+$("#editor-panel").onclick = (e) => { if (e.target.id === "editor-panel") edClose(); };
+$("#ed-hidden").onchange = () => { if (ED.dir) edBrowse(ED.dir); };
+$("#ed-path").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); edGo($("#ed-path").value); }
+});
+$("#ed-text").addEventListener("input", () => { edGutter(); edRefreshChrome(); });
+$("#ed-text").addEventListener("scroll", () => {
+  $("#ed-gutter").scrollTop = $("#ed-text").scrollTop;
+});
+$("#ed-text").addEventListener("keydown", (e) => {
+  if (e.key === "Tab" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    e.preventDefault();
+    // execCommand keeps the native undo stack (setting .value would wipe it)
+    if (!e.shiftKey) document.execCommand("insertText", false, ED.indent);
+  }
+});
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s" &&
+      !$("#editor-panel").classList.contains("hidden")) {
+    e.preventDefault();
+    if (ED.path !== null) edSave();
+  }
+});
+window.addEventListener("beforeunload", (e) => { if (edDirty()) e.preventDefault(); });
 $("#todo-head").onclick = () => {
   SFX.play("click");
   localStorage.setItem(

@@ -577,3 +577,56 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
 @media (hover: none) {
   .thread .a, .thread .x { display: inline-block; }
 }
+
+/* ✎ FILES editor — same overlay chrome as recap/config; tree | editor split */
+#editor-panel { position: fixed; inset: 0; background: rgba(2,6,12,.8); display: flex;
+  align-items: center; justify-content: center; z-index: 40; } /* over #jump-bottom (30) */
+.editor-inner { width: min(1400px, 96vw); height: 90vh; height: 90dvh; display: flex;
+  flex-direction: column; overflow: hidden; }
+.ed-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.ed-head h2 { margin: 0; }
+.panel-inner .ed-head input#ed-path { flex: 1; min-width: 0; margin: 0; }
+.panel-inner label.ed-hid { display: flex; align-items: center; gap: 5px; margin: 0;
+  white-space: nowrap; font-size: 11px; cursor: pointer; }
+.panel-inner .ed-hid input { width: auto; margin: 0; accent-color: var(--cyan); }
+.ed-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 260px) minmax(0, 1fr);
+  gap: 10px; }
+#ed-tree { overflow-y: auto; border: 1px solid var(--line); background: var(--panel);
+  font-size: 12px; padding: 4px 0; }
+.ed-row { padding: 2px 10px; cursor: pointer; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.ed-row:hover { background: #122448; color: var(--cyan); }
+.ed-row.dir { color: var(--cyan); }
+.ed-row.on { background: #122448; border-left: 2px solid var(--orange); }
+.ed-row .sz { color: var(--muted); float: right; padding-left: 8px; font-size: 10px; }
+.ed-note { color: var(--muted); padding: 4px 10px; font-size: 11px; }
+.ed-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+#ed-file { color: var(--orange); letter-spacing: 1px; font-size: 12px; margin-bottom: 4px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#ed-file.dirty::before { content: "● "; }
+.ed-wrap { flex: 1; min-height: 0; display: flex; border: 1px solid var(--line);
+  background: var(--bg); }
+.ed-wrap:focus-within { border-color: var(--cyan); }
+#ed-gutter { margin: 0; padding: 8px 6px 8px 8px; overflow: hidden; text-align: right;
+  color: var(--muted); user-select: none; border-right: 1px solid var(--line);
+  font: 13px/1.5 "JetBrains Mono", ui-monospace, monospace; min-width: 3.5em; }
+.panel-inner textarea#ed-text { flex: 1; min-width: 0; margin: 0; border: none; resize: none;
+  background: transparent; padding: 8px; font: 13px/1.5 "JetBrains Mono", ui-monospace, monospace;
+  tab-size: 4; white-space: pre; overflow: auto; }
+#ed-status { flex: 1; align-self: center; color: var(--muted); font-size: 11px; letter-spacing: 1px;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#ed-status.err { color: var(--danger); }
+#ed-status.ok { color: var(--green); }
+#ed-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px;
+  padding: 8px 10px; border: 1px solid var(--orange); background: var(--panel);
+  color: var(--orange); font-size: 12px; letter-spacing: 1px; clip-path: var(--clip); }
+#ed-confirm span { flex: 1 1 260px; }
+/* ✎ shortcut on file-tool cards (inside <summary>: must not toggle the card) */
+.ed-open { font: inherit; font-size: 11px; margin-left: 10px; padding: 0 6px; cursor: pointer;
+  background: none; color: var(--muted); border: 1px solid var(--line); }
+.ed-open:hover { color: var(--cyan); border-color: var(--cyan); }
+@media (max-width: 860px) {
+  .editor-inner { width: 100vw; height: 100dvh; max-height: 100dvh; }
+  .ed-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 30%) minmax(0, 1fr); }
+  .ed-head { flex-wrap: wrap; }
+}

@@ -77,6 +77,16 @@ but built on the LangChain/LangGraph ecosystem:
   inside code blocks; a path missing on disk collapses to a dim "missing"
   chip instead of a dead player.
 
+- **✎ FILES editor**: topbar ✎ FILES opens a browse-and-edit panel for any
+  text file on the server (folder tree, path box — Enter opens a folder or
+  file, an unknown path starts a new file — line gutter, Tab indents,
+  Ctrl+S saves). File-tool cards in the chat (`read_file`/`write_file`/
+  `edit_file`) carry a ✎ open shortcut. Saves are atomic and mtime-guarded
+  (`GET /api/fs/list|read`, `PUT /api/fs/write`): if the agent rewrites the
+  file while it's open you get RELOAD / OVERWRITE, never a silent clobber.
+  CRLF files round-trip; binary, non-UTF-8 and >2 MB files are refused.
+  Same LAN trust posture as `/api/shell`.
+
 ## Spark services wired in by default
 
 Both run on `spark-ee93` as the user's own long-lived services — LangBang just

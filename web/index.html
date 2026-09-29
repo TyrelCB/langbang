@@ -31,6 +31,7 @@
       <div class="topbar-right">
         <button id="tab-chat" class="btn ghost tab on" title="chat view">▣ CHAT</button>
         <button id="tab-traj" class="btn ghost tab" title="agent trajectory — steps, timing, sub-agents">≡ TRAJECTORY</button>
+        <button id="btn-files" class="btn ghost" title="browse + edit text files on the server (Ctrl+S saves)">✎ FILES</button>
         <button id="btn-recap" class="btn ghost" title="session recap — LLM summary of this thread for cold resume">✦ RECAP</button>
         <button id="btn-game" class="btn ghost" title="X-SIM platformer — G to open, ESC to bail back to chat">⚔ X-SIM</button>
         <button id="btn-reasoning" class="btn ghost" title="Show/hide model reasoning">◈ REASONING: ON</button>
@@ -244,6 +245,34 @@
       <div class="row end">
         <span id="recap-ts" class="recap-ts"></span>
         <button id="btn-recap-close" class="btn ghost">CLOSE</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="editor-panel" class="hidden">
+    <div class="panel-inner editor-inner">
+      <div class="ed-head">
+        <h2>FILES</h2>
+        <input id="ed-path" type="text" autocomplete="off" spellcheck="false"
+          placeholder="/absolute/path or ~/… — Enter opens a folder or file (a new path starts a new file)">
+        <label class="chk ed-hid"><input type="checkbox" id="ed-hidden"> .dotfiles</label>
+      </div>
+      <div class="ed-body">
+        <div id="ed-tree"></div>
+        <div class="ed-main">
+          <div id="ed-file">— NO FILE OPEN —</div>
+          <div class="ed-wrap">
+            <pre id="ed-gutter"></pre>
+            <textarea id="ed-text" spellcheck="false" wrap="off" disabled></textarea>
+          </div>
+        </div>
+      </div>
+      <div id="ed-confirm" class="hidden"></div>
+      <div class="row end">
+        <span id="ed-status"></span>
+        <button id="btn-ed-revert" class="btn ghost" disabled>REVERT</button>
+        <button id="btn-ed-close" class="btn ghost">CLOSE</button>
+        <button id="btn-ed-save" class="btn accent" disabled>SAVE</button>
       </div>
     </div>
   </div>
