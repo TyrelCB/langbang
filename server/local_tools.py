@@ -230,5 +230,11 @@ TOOLS_NOTE = (
     "it. list/update/set_enabled/run_now/delete siblings manage tasks. "
     "Parallelize: independent tool calls (several URLs, files, commands) go "
     "in ONE message as multiple calls — they run concurrently; never spend a "
-    "separate turn on a call that didn't depend on the last one's result."
+    "separate turn on a call that didn't depend on the last one's result. "
+    "Showing media: the chat UI renders an inline image/audio/video player "
+    "for every absolute file path (.png/.jpg/.gif/.webp/.mp4/.webm/.mov/"
+    ".mp3/.wav/.ogg/.m4a) written in your reply text — to show the user a "
+    "file, just cite its full path in the answer (plain or `inline code`, "
+    "not inside a fenced block). read_file on media only lets YOU look at it "
+    "(images when vision is on); it never displays anything to the user."
 )

@@ -152,7 +152,8 @@ body.hide-reasoning .block.thinking { display: none; }
 .media-item { max-width: 100%; }
 .media-item img, .media-item video { display: block; max-width: min(100%, 420px);
   max-height: 320px; border: 1px solid var(--line); clip-path: var(--clip); }
-.media-item audio { width: min(100%, 360px); }
+.media-item:has(> audio) { width: min(100%, 360px); } /* % on a shrink-to-fit flex item is circular → collapsed player */
+.media-item audio { width: 100%; display: block; }
 .media-cap { font-size: 10px; opacity: .55; }
 .media-cap a { color: inherit; text-decoration: none; }
 .media-cap a:hover { color: var(--cyan); }

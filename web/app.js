@@ -1688,7 +1688,7 @@ function voiceFail(msg) {
 // Absolute file paths to images/video/audio that appear in a FINAL answer get
 // players — agents love citing "saved: /tmp/render.mp4" and switching apps to
 // check is the worst. Finalization-only (attachSpeak's contract: mid-stream
-// these are half-typed tokens), and never inside <pre>/<code>/<a> (command
+// these are half-typed tokens), and never inside <pre>/<a> or mixed <code> (command
 // echoes and existing links must not fake players). Files that don't exist
 // collapse to a dim chip: agent prose cites paths that aren't there yet.
 const MEDIA_RE = /(?<![\w/])\/(?:[^/\s]+\/)*[^/\s]*\.(?:png|jpe?g|gif|webp|mp4|webm|mov|m4v|mp3|wav|ogg|opus|m4a)\b/gi;
@@ -1701,9 +1701,14 @@ function mediafy(msg) {
   const seen = new Set();
   const paths = [];
   const w = document.createTreeWalker(msg, NodeFilter.SHOW_TEXT, {
-    acceptNode: (n) =>
-      n.parentElement.closest("pre,code,a,.media")
-        ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+    acceptNode: (n) => {
+      if (n.parentElement.closest("pre,a,.media")) return NodeFilter.FILTER_REJECT;
+      // inline `code` is how models cite paths — accept it only when the
+      // span IS the path (a `cmd /x.png` echo stays inert)
+      const c = n.parentElement.closest("code");
+      if (c && !/^\/\S+$/.test(c.textContent.trim())) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    },
   });
   for (let n; (n = w.nextNode());)
     for (const m of n.nodeValue.match(MEDIA_RE) || [])

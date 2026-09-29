@@ -353,6 +353,7 @@ def model(s: dict) -> ChatOpenAI:
     extra_body = {
         "chat_template_kwargs": {"enable_thinking": bool(s.get("enable_thinking"))}
     }
+    vision = bool((s.get("capabilities") or {}).get("vision"))
     return SGlangChatOpenAI(
         model=s["model"],
         base_url=s["base_url"],
@@ -368,6 +369,19 @@ def model(s: dict) -> ChatOpenAI:
         # prefill, not a dead peer. Kills truly hung connections at 10 min.
         stream_chunk_timeout=600,
         extra_body=extra_body,
+        # deepagents' read_file returns media as base64 content blocks and
+        # only scrubs block types the profile marks False (missing = assumed
+        # supported). Unset, a read_file on a .wav/.mp4 shipped ~350k tokens
+        # of base64 audio to sglang → a 400 context overflow on EVERY later
+        # turn of that thread. The scrub runs at model-call time over the
+        # whole history, so declaring this also heals already-poisoned threads.
+        profile={
+            "image_inputs": vision,
+            "image_tool_message": vision,
+            "audio_inputs": False,
+            "video_inputs": False,
+            "pdf_inputs": False,
+        },
     )
 
 
@@ -759,6 +773,50 @@ class _FileArgAlias(AgentMiddleware):
             )
         return res
 
+class _MediaReadGuard(AgentMiddleware):
+    """Keep binary media that read_file returns out of the model's context.
+
+    deepagents' read_file answers media with a base64 content block, but
+    ToolNode's msg_content_output only passes TOOL_MESSAGE_BLOCK_TYPES
+    through as blocks — `audio`/`video` aren't on that list, so they get
+    json.dumps'd into one giant STRING. The profile-driven scrub (see
+    model()) only replaces blocks, so the string sailed through: a 260 KB
+    .wav became ~300k tokens of text and every later turn of that thread
+    400'd on context length (observed live, thread 0f455e549925).
+
+    Tool side: swap such results for a short note before they're stored.
+    Model side: the same swap over history, which heals threads
+    that were poisoned before this guard existed."""
+
+    @staticmethod
+    def _note(m: ToolMessage) -> str | None:
+        ak = m.additional_kwargs or {}
+        mime = ak.get("read_file_media_type")
+        if not mime or mime.startswith("image/"):
+            return None  # images: real blocks, profile scrub handles vision-off
+        return (
+            f"[read_file: {ak.get('read_file_path', 'file')} is {mime} media — "
+            "NOT attached (this model can't take audio/video input). To show "
+            "it to the user, cite its absolute path in your reply (the UI "
+            "renders an inline player); to inspect it, use run_bash "
+            "(ffprobe / ffmpeg frame grabs).]"
+        )
+
+    async def awrap_tool_call(self, request, handler):  # noqa: ANN001
+        res = await handler(request)
+        if isinstance(res, ToolMessage) and (note := self._note(res)):
+            res = res.model_copy(update={"content": note})
+        return res
+
+    async def awrap_model_call(self, request, handler):  # noqa: ANN001
+        msgs, hit = [], False
+        for m in request.messages:
+            if isinstance(m, ToolMessage) and (note := self._note(m)) and m.content != note:
+                m, hit = m.model_copy(update={"content": note}), True
+            msgs.append(m)
+        return await handler(request.override(messages=msgs) if hit else request)
+
+
 # Nudge the planner to use the concurrency the harness already supports:
 # ToolNode runs multiple tool calls from one message in parallel, and
 # several `task` sub-agents dispatched together crawl/research concurrently.
@@ -928,6 +986,7 @@ async def build_agent(s: dict, checkpointer=None):
             mw.append(_CompactionMiddleware(s))
         mw.append(_TodoReconcile())  # deterministic finish-line gate
         mw.append(_FileArgAlias())  # repair path->file_path arg drift pre-validation
+        mw.append(_MediaReadGuard())  # audio/video base64 never reaches the model
         perms = []
         if s.get("skills_enabled", True):
             mw.append(_FreshSkillsMiddleware(
