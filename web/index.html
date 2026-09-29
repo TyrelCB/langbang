@@ -40,6 +40,12 @@
         <div id="model-tag"></div>
       </div>
     </header>
+    <!-- sibling of #chat, never inside it (search-jump keys off child indices) -->
+    <div id="update-bar" class="hidden">
+      <span>⟳ LANGBANG WAS UPDATED — reload for the new version (runs keep going on the server; your draft and open thread are kept)</span>
+      <button id="btn-update-reload" class="btn accent sm">RELOAD</button>
+      <button id="btn-update-later" class="btn ghost sm">LATER</button>
+    </div>
     <div id="chat"></div>
     <!-- trajectory + todo panel are SIBLINGS of #chat: search-jump keys off
          #chat child indices and server pos-counting, so nothing may nest in there -->

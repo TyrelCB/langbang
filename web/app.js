@@ -2528,6 +2528,43 @@ $("#btn-sched-new").onclick = schedNew;
 $("#btn-sched-save").onclick = saveScheduleTask;
 
 // ---------- boot ----------
+// ---------- stale-tab guard: offer a reload when the frontend changed ----------
+// The first health reply pins the version this tab booted with; a later
+// different one means web/ changed under an open tab (which otherwise keeps
+// running the old JS forever — that's how inline media "didn't work" on a
+// tab opened before the fix). LATER hides it until the NEXT change.
+let bootUiVersion = null;
+let dismissedUiVersion = null;
+function checkUiVersion(v) {
+  if (!v) return;
+  if (bootUiVersion === null) { bootUiVersion = v; return; }
+  $("#update-bar").classList.toggle("hidden", v === bootUiVersion || v === dismissedUiVersion);
+  $("#update-bar").dataset.version = v;
+}
+function reloadForUpdate() {
+  // carry the unsent draft + open thread across the reload
+  try {
+    sessionStorage.setItem("lb-draft", JSON.stringify({ tid: threadId, text: $("#input").value }));
+  } catch {}
+  const u = new URL(location.href);
+  if (threadId) u.searchParams.set("thread", threadId);
+  else u.searchParams.delete("thread");
+  location.replace(u.toString());
+}
+$("#btn-update-reload").onclick = () => { SFX.play("click"); reloadForUpdate(); };
+$("#btn-update-later").onclick = () => {
+  SFX.play("click");
+  dismissedUiVersion = $("#update-bar").dataset.version;
+  $("#update-bar").classList.add("hidden");
+};
+(() => {
+  // restore a draft stashed by reloadForUpdate (only into the same thread)
+  let d = null;
+  try { d = JSON.parse(sessionStorage.getItem("lb-draft") || "null"); sessionStorage.removeItem("lb-draft"); } catch {}
+  const urlTid = new URLSearchParams(location.search).get("thread");
+  if (d && d.text && (d.tid || null) === (urlTid || null)) $("#input").value = d.text;
+})();
+
 async function checkHealth() {
   const h = await api.health();
   const el2 = $("#health");
@@ -2535,6 +2572,7 @@ async function checkHealth() {
   el2.className = "health " + (h.backend_up ? "up" : "down");
   $("#model-tag").textContent = h.model;
   supportsVision = !!h.supports_vision;
+  checkUiVersion(h.ui_version);
   // attach stays offered without vision: non-image files (and images as
   // plain files) ride the upload path — the agent opens them from disk
   if (!supportsVision && pendingImages.length) { pendingImages = []; renderAttachStrip(); }

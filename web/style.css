@@ -668,3 +668,9 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
   #btn-plan::before { content: "◇"; font-size: 14px; }
   #btn-plan.on::before { content: "◆"; }
 }
+
+/* stale-tab guard (checkUiVersion): web/ changed under this open tab */
+#update-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px;
+  padding: 6px 16px; background: var(--panel); border-bottom: 1px solid var(--orange);
+  color: var(--orange); font-size: 12px; letter-spacing: 1px; }
+#update-bar span { flex: 1 1 260px; min-width: 0; }

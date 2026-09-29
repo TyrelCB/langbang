@@ -52,6 +52,20 @@ async def _shutdown():
 
 # ---- settings & health ----
 
+def _ui_version() -> str:
+    """Fingerprint of the served frontend (name + mtime + size of web/'s
+    top-level files; a few stats per call). A tab remembers the value it
+    booted with and offers a reload when it changes — statics are no-store,
+    but a tab left open all day never re-requests them on its own."""
+    h = hashlib.sha1()
+    for name in sorted(os.listdir(WEB_DIR)):
+        p = os.path.join(WEB_DIR, name)
+        if os.path.isfile(p):
+            st = os.stat(p)
+            h.update(f"{name}:{st.st_mtime_ns}:{st.st_size};".encode())
+    return h.hexdigest()[:12]
+
+
 @app.get("/api/health")
 async def health():
     s = config.load()
@@ -67,6 +81,7 @@ async def health():
         "base_url": s["base_url"],
         "backend_up": up,
         "supports_vision": bool((s.get("capabilities") or {}).get("vision")),
+        "ui_version": _ui_version(),
     }
 
 

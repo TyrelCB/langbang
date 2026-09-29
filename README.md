@@ -79,6 +79,9 @@ but built on the LangChain/LangGraph ecosystem:
   chip instead of a dead player. `read_file` on audio/video never feeds the
   base64 to the model (a note tells it to cite the path instead).
 
+- **Stale-tab guard**: `/api/health` carries a fingerprint of `web/`; a tab
+  that was open when the frontend changed shows a ⟳ UPDATED bar (RELOAD keeps
+  the open thread and the unsent draft; LATER hides it until the next change).
 - **Human gates + plan mode**: the agent has an `ask_user` tool — when it's
   blocked on a decision only you can make it asks 1–4 questions (option
   chips + free text) and the run *pauses* (a langgraph `interrupt`, stored
