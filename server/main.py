@@ -523,6 +523,7 @@ class ChatIn(BaseModel):
     thread_id: str
     text: str = ""
     images: list[str] = []
+    plan: bool = False  # plan mode: read-only investigation → exit_plan_mode
 
 
 @app.post("/api/chat")
@@ -545,13 +546,26 @@ async def chat(body: ChatIn):
             if len(m.group(2)) > MAX_IMG_B64:
                 raise HTTPException(400, "image too large (max ~5 MB)")
 
+    # A message typed while the agent waits at a gate IS the answer: resume
+    # the interrupt with it (free text) rather than stacking a new turn on a
+    # paused graph. Plan gates read it as revision notes — approval is the
+    # card's explicit button only.
+    resume = None
+    if not runs.get(body.thread_id) or runs.get(body.thread_id).done:
+        gates = await agent.pending_gates(body.thread_id)
+        if gates:
+            if body.images:
+                raise HTTPException(409, "the agent is waiting for an answer — reply in text first")
+            resume = {"id": gates[0]["id"], "value": {"text": text}}
+
     # the run is server-owned (runs.Hub): this response is just a follower.
     # Closing it (phone sleep, refresh, app switch) no longer cancels the run
     # — GET /api/threads/{tid}/stream?since=N reattaches and replays.
     try:
         hub = runs.start(
             body.thread_id,
-            agent.run_chat(body.thread_id, text, s, images=body.images),
+            agent.run_chat(body.thread_id, text, s, images=body.images,
+                           resume=resume, plan=body.plan),
         )
     except runs.Busy as e:
         raise HTTPException(409, str(e))
@@ -566,6 +580,58 @@ def _sse(gen):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.get("/api/threads/{tid}/gate")
+async def thread_gate(tid: str):
+    """Pending human gates (ask_user questions / a plan awaiting review) —
+    how a reopened tab or second device finds a paused thread."""
+    try:
+        return {"gates": await agent.pending_gates(tid)}
+    except Exception:  # noqa: BLE001 - unknown thread / read trouble: nothing pending
+        return {"gates": []}
+
+
+class ResumeIn(BaseModel):
+    id: str
+    value: dict
+    plan: bool = False
+
+
+def _answer_text(v: dict) -> str:
+    """Trajectory/title text for a gate answer (the tool result carries the
+    real, model-facing formatting)."""
+    if "approved" in v:
+        return ("✓ PLAN APPROVED" if v.get("approved") else "↺ PLAN REVISION") + (
+            f": {v.get('feedback')}" if v.get("feedback") else "")
+    if v.get("text"):
+        return str(v["text"])
+    return " | ".join(
+        "; ".join([*(a.get("selected") or []), *([a["text"]] if a.get("text") else [])])
+        for a in v.get("answers") or [] if isinstance(a, dict)) or "[answer]"
+
+
+@app.post("/api/threads/{tid}/resume")
+async def thread_resume(tid: str, body: ResumeIn):
+    """Answer a pending gate: resumes the paused graph (Command(resume=…))
+    as a normal hub-backed run. Approving a plan ends plan mode for the rest
+    of that run — the agent goes straight on to implement."""
+    gates = await agent.pending_gates(tid)
+    g = next((g for g in gates if g["id"] == body.id), None)
+    if g is None:
+        raise HTTPException(409, "that question is no longer pending")
+    kind = (g["value"] or {}).get("kind") if isinstance(g["value"], dict) else None
+    plan = body.plan and not (kind == "plan" and body.value.get("approved"))
+    s = config.load()
+    try:
+        hub = runs.start(tid, agent.run_chat(
+            tid, _answer_text(body.value), s,
+            resume={"id": body.id, "value": body.value}, plan=plan))
+    except runs.Busy as e:
+        raise HTTPException(409, str(e))
+    except runs.TooMany as e:
+        raise HTTPException(429, str(e))
+    return _sse(runs.follow(hub, 0))
 
 
 @app.get("/api/threads/{tid}/stream")

@@ -71,12 +71,28 @@ but built on the LangChain/LangGraph ecosystem:
   heartbeats keep Caddy/phones attached). Only STOP cancels a run. Many
   threads can run at once (cap 4 — shared GPU), each with its own SEND/STOP,
   and busy threads get a pulsing ◉ in the sidebar.
-- **Inline media**: absolute file paths cited in an answer (`.png`, `.mp4`,
-  `.wav`, …) render as inline images/players via `GET /api/media?path=…`
+- **Inline media**: absolute file paths (`.png`, `.mp4`, `.wav`, …) cited
+  in an answer — plain text, or an inline-code span that is exactly the
+  path — render as inline images/players via `GET /api/media?path=…`
   (Range/206 → seekable video), scanned at finalization only and never
   inside code blocks; a path missing on disk collapses to a dim "missing"
-  chip instead of a dead player.
+  chip instead of a dead player. `read_file` on audio/video never feeds the
+  base64 to the model (a note tells it to cite the path instead).
 
+- **Human gates + plan mode**: the agent has an `ask_user` tool — when it's
+  blocked on a decision only you can make it asks 1–4 questions (option
+  chips + free text) and the run *pauses* (a langgraph `interrupt`, stored
+  in the checkpoint, so it survives reloads, other devices and server
+  restarts — `GET /api/threads/{tid}/gate`). Answering resumes the same graph
+  (`POST /api/threads/{tid}/resume`); typing in the composer while a gate
+  waits also counts as the answer. **◇ PLAN** (composer button or
+  Shift+Tab, per thread) turns on plan mode: the agent investigates
+  read-only (write/edit/schedule tools are withheld and hard-blocked;
+  `run_bash` is instructed inspect-only), asks what it needs, then calls
+  `exit_plan_mode` with a Markdown plan → ✓ APPROVE & BUILD (plan mode
+  switches off and it implements in the same run) or ↺ REVISE with notes.
+  Gates are main-agent only (`task` sub-agents never block on a human) and
+  disabled for scheduled runs, which have nobody to answer.
 - **✎ FILES editor**: topbar ✎ FILES opens a browse-and-edit panel for any
   text file on the server (folder tree, path box — Enter opens a folder or
   file, an unknown path starts a new file — line gutter, Tab indents,

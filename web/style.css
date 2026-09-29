@@ -125,14 +125,18 @@ button, .thread .a, .thread .x { touch-action: manipulation; }
   display: flex; justify-content: space-between; align-items: center;
   padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--bg2);
 }
-.topbar-right { display: flex; align-items: center; gap: 14px; }
+.topbar-right { display: flex; align-items: center; gap: 14px; min-width: 0; }
+/* labels never break mid-word ("X-/SIM"); the model tag gives way instead */
+.topbar-right .btn { white-space: nowrap; }
+#ctx-tag { white-space: nowrap; }
 #btn-reasoning { font: inherit; font-size: 12px; letter-spacing: 1px; padding: 3px 10px; }
 #btn-reasoning.on { color: var(--cyan); border-color: var(--cyan-dim); }
 body.hide-reasoning .block.thinking { display: none; }
 /* ellipsized so long titles can never re-flow the topbar (phone: one line) */
-#chat-title { color: var(--orange); letter-spacing: 2px; flex: 1; min-width: 0;
+#chat-title { color: var(--orange); letter-spacing: 2px; flex: 1; min-width: 90px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#model-tag { color: var(--muted); font-size: 12px; }
+#model-tag { color: var(--muted); font-size: 12px; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
 #chat { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
 
 .msg { max-width: 78%; padding: 10px 14px; background: var(--panel);
@@ -629,4 +633,38 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
   .editor-inner { width: 100vw; height: 100dvh; max-height: 100dvh; }
   .ed-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 30%) minmax(0, 1fr); }
   .ed-head { flex-wrap: wrap; }
+}
+
+/* ◇ PLAN toggle + human-gate cards (ask_user / exit_plan_mode) */
+#btn-plan.on { color: var(--orange); border-color: var(--orange); }
+#composer.plan-mode #input { border-color: var(--orange); }
+.msg.gate { align-self: stretch; max-width: 100%; border-color: var(--orange);
+  background: linear-gradient(0deg, var(--panel), #1a1a2e); }
+.gate-head { color: var(--orange); letter-spacing: 2px; font-size: 12px; font-weight: 700;
+  margin-bottom: 8px; }
+.gate-q { margin: 10px 0; }
+.gate-qt { margin-bottom: 6px; }
+.gate-opts { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.gate-opt { font: inherit; font-size: 12px; cursor: pointer; padding: 4px 10px;
+  background: var(--bg); color: var(--text); border: 1px solid var(--line); clip-path: var(--clip); }
+.gate-opt:hover { border-color: var(--cyan); color: var(--cyan); }
+.gate-opt.on { background: var(--cyan); color: #04101c; border-color: var(--cyan); font-weight: 700; }
+.gate-text { width: 100%; font: inherit; font-size: 13px; color: var(--text); background: var(--bg);
+  border: 1px solid var(--line); padding: 6px 8px; outline: none; margin: 4px 0; resize: vertical; }
+.gate-text:focus { border-color: var(--cyan); }
+.gate-text.need { border-color: var(--danger); }
+.gate-plan { border-left: 2px solid var(--orange); padding-left: 12px; margin: 6px 0 10px;
+  max-height: 50vh; overflow-y: auto; }
+.gate-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.gate-done { color: var(--green); font-size: 12px; letter-spacing: 1px; }
+.msg.gate.sealed { border-color: var(--line); opacity: .85; }
+.msg.gate.sealed .gate-opt:not(.on) { opacity: .45; }
+.block.gate-hist > summary { color: var(--orange); }
+/* phone composer: ATTACH + PLAN collapse to their glyphs so the textarea
+   keeps its width (cdp_mobile COMPOSER_OK: input >= 100px at 390px) */
+@media (max-width: 720px) {
+  #btn-attach, #btn-plan { font-size: 0; padding: 8px 10px; }
+  #btn-attach::before { content: "📎"; font-size: 14px; }
+  #btn-plan::before { content: "◇"; font-size: 14px; }
+  #btn-plan.on::before { content: "◆"; }
 }

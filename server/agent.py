@@ -31,9 +31,13 @@ from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.config import get_config
-from langgraph.errors import GraphRecursionError
+from langgraph.errors import GraphInterrupt, GraphRecursionError
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.prebuilt import create_react_agent
+from langgraph.types import Command, interrupt
+from langchain_core.tools import tool
+from pydantic import BaseModel, Field
+from deepagents.middleware._utils import append_to_system_message
 
 from . import config, local_tools, mcp
 
@@ -667,6 +671,10 @@ class _TodoReconcile(AgentMiddleware):
         return request.override(messages=[*request.messages, nudge])
 
     async def awrap_model_call(self, request, handler):  # noqa: ANN001
+        if _gate_flags()[0]:
+            # plan mode: read-only investigation IS the job and the plan goes
+            # to exit_plan_mode — "make a todo list" nudges would fight that
+            return await handler(request)
         req = self._init_nudge(request)  # pre-handler: sees the pristine request
         if req is not None:
             request = req
@@ -815,6 +823,162 @@ class _MediaReadGuard(AgentMiddleware):
                 m, hit = m.model_copy(update={"content": note}), True
             msgs.append(m)
         return await handler(request.override(messages=msgs) if hit else request)
+
+
+# ---- human gates: ask_user + plan mode ----
+# Both tools pause the graph with langgraph `interrupt()`: the run ends with a
+# `gate` event (run_chat checks the checkpoint for pending interrupts after the
+# stream), the UI renders a question / plan-review card, and the answer comes
+# back as Command(resume=...) through /api/threads/{tid}/resume — which may be
+# hours later, after a restart: the pause lives in the SQLite checkpoint, not
+# in memory. On resume LangGraph re-runs the tool and interrupt() returns the
+# answer. Main agent only: create_deep_agent never hands custom middleware
+# (or its tools) to `task` sub-agents, so a sub-agent can't block on a human.
+#
+# Per-run flags ride the graph config: lb_plan (plan mode: read-only +
+# exit_plan_mode) and lb_nogate (scheduled runs — nobody is there to answer).
+
+class _Question(BaseModel):
+    question: str = Field(description="One clear question.")
+    options: list[str] = Field(
+        default_factory=list,
+        description="2-5 short concrete choices (recommended first). The user "
+        "can always type their own answer instead.")
+    multi_select: bool = Field(
+        default=False, description="True if several options may be picked.")
+
+
+def _gate_flags() -> tuple[bool, bool]:
+    try:
+        c = (get_config() or {}).get("configurable") or {}
+    except RuntimeError:  # outside a graph run
+        c = {}
+    return bool(c.get("lb_plan")), bool(c.get("lb_nogate"))
+
+
+def _fmt_answers(questions: list[dict], ans) -> str:
+    if not isinstance(ans, dict):
+        ans = {"text": str(ans)}
+    if ans.get("text") and not ans.get("answers"):
+        return ("The user answered in free text (not per question):\n"
+                + str(ans["text"]).strip())
+    lines = ["The user answered:"]
+    got = ans.get("answers") or []
+    for i, q in enumerate(questions):
+        a = got[i] if i < len(got) and isinstance(got[i], dict) else {}
+        picked = [str(x) for x in (a.get("selected") or [])]
+        extra = str(a.get("text") or "").strip()
+        parts = picked + ([extra] if extra else [])
+        lines.append(f"Q{i + 1}. {q.get('question')}\n   A: "
+                     + ("; ".join(parts) if parts else "(skipped — use your judgment)"))
+    return "\n".join(lines)
+
+
+@tool
+def ask_user(questions: list[_Question | str]) -> str:
+    """Ask the user 1-4 questions and WAIT for the answers (a human gate:
+    the run pauses until they reply). Use it when you are blocked on a
+    decision only the user can make — an ambiguous requirement, a
+    preference between real alternatives, anything destructive or
+    irreversible — instead of guessing or ending your reply with a question.
+    Batch related questions into ONE call and give concrete options. Never
+    ask what you can find out yourself with tools."""
+    # bare strings tolerated: local models often drop the object wrapper
+    qs = [q.model_dump() if isinstance(q, BaseModel)
+          else {"question": q, "options": [], "multi_select": False} if isinstance(q, str)
+          else dict(q) for q in questions][:4]
+    ans = interrupt({"kind": "ask", "questions": qs})
+    return _fmt_answers(qs, ans)
+
+
+@tool
+def exit_plan_mode(plan: str) -> str:
+    """PLAN MODE ONLY. Present your finished plan (Markdown: goal, ordered
+    steps, files/services touched, risks, how you'll verify) for the user's
+    approval and WAIT. The user either approves — plan mode ends and you
+    implement it right away — or sends revision notes."""
+    ans = interrupt({"kind": "plan", "plan": plan})
+    if not isinstance(ans, dict):
+        ans = {"text": str(ans)}
+    fb = str(ans.get("feedback") or ans.get("text") or "").strip()
+    if ans.get("approved"):
+        return ("The user APPROVED the plan" + (f", adding: {fb}" if fb else "")
+                + ". Plan mode is OFF — implement it now: write_todos from the "
+                "plan's steps, then execute and verify each one.")
+    return ("NOT approved — the user wants changes:\n" + (fb or "(no details given)")
+            + "\nYou are still in plan mode (read-only). Revise the plan — "
+            "ask_user if anything is unclear — and call exit_plan_mode again.")
+
+
+GATE_TOOLS = {"ask_user", "exit_plan_mode"}
+PLAN_BLOCKED = {
+    "write_file", "edit_file", "delete_file", "delete",
+    "create_scheduled_task", "update_scheduled_task", "delete_scheduled_task",
+    "set_scheduled_task_enabled", "run_scheduled_task_now",
+}
+PLAN_NOTE = """## PLAN MODE (active — set by the user)
+Investigate and design; do NOT change anything yet.
+- Read-only: read files, ls/glob/grep, crawl, and run_bash ONLY to inspect
+  (no writes, installs, git commits/pushes, restarts, moves or deletes).
+  write_file/edit_file and scheduled-task changes are blocked outright.
+- Decisions that are genuinely the user's: ask_user (batched, with options).
+- When the plan is ready, call exit_plan_mode with the full plan in
+  Markdown. Do not start implementing until it comes back APPROVED."""
+
+
+def _tname(t) -> str | None:  # noqa: ANN001
+    return getattr(t, "name", None) or (t.get("name") if isinstance(t, dict) else None)
+
+
+class _HumanGate(AgentMiddleware):
+    """Registers ask_user/exit_plan_mode, trims them per run flags, injects
+    PLAN_NOTE into the system prompt while plan mode is on, and hard-blocks
+    the mutating tools in plan mode (run_bash stays available for
+    inspection — its read-only rule is prompt-level; the shell is trusted
+    by design, see README ⚠ Security)."""
+
+    def __init__(self):
+        super().__init__()
+        self.tools = [ask_user, exit_plan_mode]
+
+    async def awrap_model_call(self, request, handler):  # noqa: ANN001
+        plan, nogate = _gate_flags()
+        drop = GATE_TOOLS if nogate else (set() if plan else {"exit_plan_mode"})
+        if plan and not nogate:
+            drop = drop | PLAN_BLOCKED  # don't even offer them
+        tools = [t for t in request.tools if _tname(t) not in drop]
+        if len(tools) != len(request.tools):
+            request = request.override(tools=tools)
+        if plan and not nogate:
+            request = request.override(
+                system_message=append_to_system_message(request.system_message, PLAN_NOTE))
+        return await handler(request)
+
+    async def awrap_tool_call(self, request, handler):  # noqa: ANN001
+        plan, nogate = _gate_flags()
+        name = request.tool_call.get("name")
+        msg = None
+        if plan and name in PLAN_BLOCKED:
+            msg = (f"BLOCKED: {name} changes things and plan mode is read-only. "
+                   "Put this step in your plan and call exit_plan_mode; it runs "
+                   "after the user approves.")
+        elif nogate and name in GATE_TOOLS:
+            msg = ("No user is present (scheduled run) — decide yourself, and "
+                   "state the assumption you made in your answer.")
+        elif not plan and name == "exit_plan_mode":
+            msg = "Plan mode is not active — just do the work."
+        if msg:
+            return ToolMessage(content=msg, name=name, status="error",
+                               tool_call_id=request.tool_call["id"])
+        return await handler(request)
+
+
+async def pending_gates(thread_id: str) -> list[dict]:
+    """Interrupts waiting in the thread's checkpoint (a question / plan the
+    user hasn't answered). Survives restarts — it's checkpoint state."""
+    a = await _read_agent()
+    snap = await a.aget_state({"configurable": {"thread_id": thread_id}})
+    return [{"id": i.id, "value": i.value} for i in (snap.interrupts or ())]
 
 
 # Nudge the planner to use the concurrency the harness already supports:
@@ -987,6 +1151,7 @@ async def build_agent(s: dict, checkpointer=None):
         mw.append(_TodoReconcile())  # deterministic finish-line gate
         mw.append(_FileArgAlias())  # repair path->file_path arg drift pre-validation
         mw.append(_MediaReadGuard())  # audio/video base64 never reaches the model
+        mw.append(_HumanGate())  # ask_user / plan mode (interrupt-based gates)
         perms = []
         if s.get("skills_enabled", True):
             mw.append(_FreshSkillsMiddleware(
@@ -1503,9 +1668,13 @@ async def run_chat(
     s: dict,
     images: list[str] | None = None,
     sched: dict | None = None,
+    resume: dict | None = None,
+    plan: bool = False,
 ) -> AsyncIterator[dict]:
     """Yield SSE-ready dicts: token | thinking | tool_start | tool_end |
-    todos | sub | usage | done | error. Trajectory rows are persisted to
+    todos | sub | usage | gate | done | error. `resume` = {id, value}
+    answers a pending gate (ask_user / exit_plan_mode interrupt) instead of
+    sending a new message; `plan` runs in plan mode. Trajectory rows are persisted to
     `run_events` as the run progresses (persist-before-yield, so the
     post-done refresh always sees what the client was already shown)."""
     turn_id = uuid.uuid4().hex[:12]
@@ -1513,14 +1682,20 @@ async def run_chat(
     try:
         await _touch(thread_id, user_text or "[image]")
         await _log(
-            thread_id, turn_id, "user", meta={"text": _cap(user_text or "[image]", 800)}
+            thread_id, turn_id, "user",
+            meta={"text": _cap(user_text or "[image]", 800),
+                  **({"gate": True} if resume else {}), **({"plan": True} if plan else {})},
         )
         agent = await build_agent(s)
         deep = bool(s.get("deep_agent", True))
         # Deep mode grants headroom for write_todos bookkeeping rounds (each
         # todo update is a full model+tool round that isn't "real" iteration).
         cfg = {
-            "configurable": {"thread_id": thread_id},
+            "configurable": {
+                "thread_id": thread_id,
+                "lb_plan": bool(plan),
+                "lb_nogate": sched is not None,  # nobody's there to answer
+            },
             "recursion_limit": 2 * int(s.get("max_react_iterations", 12)) + 2 + (16 if deep else 0),
         }
         if images:
@@ -1547,8 +1722,8 @@ async def run_chat(
         # their LLM seconds get persisted even though their SSE is suppressed.
         tool_t0: dict[str, tuple[float, str | None, object]] = {}
         sub_m_t0: dict[str, float] = {}
-        async for ev in agent.astream_events(
-            {
+        graph_in = (
+            Command(resume={resume["id"]: resume["value"]}) if resume else {
                 "messages": [
                     HumanMessage(
                         content=content,
@@ -1557,10 +1732,9 @@ async def run_chat(
                         additional_kwargs={"lb_sched": sched} if sched else {},
                     )
                 ]
-            },
-            cfg,
-            version="v2",
-        ):
+            }
+        )
+        async for ev in agent.astream_events(graph_in, cfg, version="v2"):
             kind = ev["event"]
             if kind == "on_tool_start" and ev["name"] == "task":
                 sub_runs.add(str(ev["run_id"]))
@@ -1699,6 +1873,11 @@ async def run_chat(
                 }
                 if ev["name"] == "task":
                     yield {"type": "sub", "state": "end", "sub_id": rid, "dur": dur}
+            elif kind == "on_tool_error" and isinstance(ev["data"].get("error"), GraphInterrupt):
+                # a human gate pausing (ask_user / exit_plan_mode) is not a
+                # failure: drop the timing entry; the `gate` event after the
+                # stream renders it, and the resumed run re-emits the tool
+                tool_t0.pop(str(ev["run_id"]), None)
             elif kind == "on_tool_error":
                 # Validation/invocation failure (e.g. the model emitted a
                 # tool call with empty or wrong-schema args — sglang drops
@@ -1722,6 +1901,11 @@ async def run_chat(
                     "sub": sub0,
                     "dur": dur,
                 }
+        # an interrupt() ends the stream quietly — the pause lives in the
+        # checkpoint; surface it so the UI can render the question / plan
+        for g in await pending_gates(thread_id):
+            await _log(thread_id, turn_id, "gate", meta={"value": g["value"]})
+            yield {"type": "gate", "id": g["id"], "value": _safe(g["value"])}
         yield {"type": "done", "seconds": round(time.time() - t_run0, 1)}
     except GraphRecursionError:
         # LangGraph's own text ("set the recursion_limit config key", docs URL)

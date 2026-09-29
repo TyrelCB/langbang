@@ -432,13 +432,28 @@ function renderHistory(msgs) {
         attachSpeak(b, textOf(m.content));
       }
       for (const tc of m.tool_calls || []) {
+        if (tc.name === "ask_user") {
+          const b = addBlock("tool gate-hist", "◆ AGENT ASKED YOU");
+          b.querySelector("pre").textContent = (tc.args?.questions || [])
+            .map((q, i) => `Q${i + 1}. ${typeof q === "string" ? q : q.question}` +
+              (q.options?.length ? `\n    [${q.options.join(" | ")}]` : "")).join("\n");
+          continue;
+        }
+        if (tc.name === "exit_plan_mode") {
+          const b = addBlock("tool gate-hist", "◆ PLAN PROPOSED");
+          b.querySelector("pre").textContent = tc.args?.plan || "";
+          continue;
+        }
         const b = addBlock("tool", `⚙ ${tc.name}`);
         b.querySelector("pre").textContent = "→ " + JSON.stringify(tc.args, null, 2);
         edLink(b, tc.args);
       }
     } else if (m.role === "tool") {
-      const b = addBlock("tool", `⚙ ${m.tool_name} result`);
+      const gate = GATE_TOOLS.has(m.tool_name);
+      const b = addBlock(gate ? "tool gate-hist" : "tool",
+        gate ? "◆ YOUR ANSWER" : `⚙ ${m.tool_name} result`);
       b.querySelector("pre").textContent = textOf(m.content).slice(0, 20000);
+      if (gate) b.open = true;
     }
   }
 }
@@ -497,6 +512,11 @@ async function send() {
   pendingImages = [];
   pendingFiles = [];
   renderAttachStrip();
+  // the server routes this text into the pending gate (free-text answer /
+  // plan revision notes) — retire the open card so it can't be answered twice
+  for (const c of document.querySelectorAll("#chat .gate:not(.sealed)"))
+    gateSeal(c, "answered in chat ↓");
+  syncComposerHint();
   $("#chat")._pinned = true; // sending always reveals your own message
   const userBubble = addMsg("user", msgText, images);
   SFX.play("message_sent");
@@ -532,7 +552,7 @@ async function send() {
   try {
     const res = await fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ thread_id: run.tid, text: msgText, images }),
+      body: JSON.stringify({ thread_id: run.tid, text: msgText, images, plan: planOn() }),
     });
     if (!res.ok) {
       // rejected before the run started (busy thread / concurrency cap):
@@ -658,6 +678,7 @@ function runPipeline(run) {
         attachSpeak(asstMsg, asstRaw);
         asstMsg = null;
       }
+      if (GATE_TOOLS.has(ev.name) && !ev.sub) return; // the `gate` event renders it
       let card, host = null;
       if (ev.name === "task") {
         // sub-agent run: the card IS the live activity container — inner
@@ -682,7 +703,9 @@ function runPipeline(run) {
       if (ev.name !== "task" && typeof ev.dur === "number") run.stats.tool_s += ev.dur;
       const card = run.tools.get(ev.run_id);
       run.tools.delete(ev.run_id);
-      if (!card) {
+      if (!card && GATE_TOOLS.has(ev.name)) {
+        // resumed gate tool finished: its card was sealed at answer time
+      } else if (!card) {
         console.debug("tool_end for unknown run_id", ev.run_id); // e.g. run teardown raced it
       } else if (ev.name === "task") {
         card.querySelector("summary").textContent = `✓ DEEP DIVING — ${fmtClock(ev.dur || 0)}`;
@@ -711,6 +734,14 @@ function runPipeline(run) {
         card.classList.add("errored");
         run.subs.delete(ev.run_id);
       }
+    } else if (ev.type === "gate") {
+      // the run paused on a human gate (ask_user / exit_plan_mode) — its
+      // `done` follows; the answer starts a NEW hub run via /resume
+      if (!document.querySelector(`[data-gate-id="${ev.id}"]`)) {
+        put(gateCard(run.tid, ev));
+        SFX.play("message_received");
+      }
+      if (run.viewing) syncComposerHint();
     } else if (ev.type === "todos") {
       run.todosTouched = true;
       // the to-do panel shows the OPEN thread's list — a parked run must not
@@ -1433,6 +1464,8 @@ async function openThread(t) {
   if (r) $("#sb-live").classList.remove("hidden");
   else $("#sb-live").classList.add("hidden");
   if (!r && serverRuns.has(t.id)) attachRun(t.id, 0);
+  else if (!r) showPendingGates(t.id, seq);
+  syncComposerHint();
   ensureTodosCard(t.id, msgs); // last write_todos call re-draws the panel on
                                // switch/reload; /todos covers dropped args /
                                // lost commits the messages scan can't see
@@ -1455,13 +1488,16 @@ async function newThread() {
   $("#sb-live").classList.add("hidden");
   resetTrajView();
   syncSendBtn(); // a run streaming elsewhere must NOT leave STOP in the draft
+  syncComposerHint();
   SFX.play("thread_new");
   refreshThreads();
 }
 
 async function createThreadNow() {
   const t = await api.newThread("New chat");
+  const draftPlan = planOn(null);
   threadId = t.id;
+  if (draftPlan) { setPlan(true, t.id); setPlan(false, null); } // plan toggled on the draft carries over
   refreshThreads();
 }
 
@@ -2605,6 +2641,176 @@ document.addEventListener("keydown", (e) => {
   else if (!$("#editor-panel").classList.contains("hidden")) edClose();
   else if (!$("#recap-panel").classList.contains("hidden")) closeRecap();
 });
+
+// ---------- human gates: ask_user questions + plan mode ----------
+// The agent pauses on a langgraph interrupt; the run ends with a `gate`
+// event and this card collects the answer, which POSTs /resume — a NEW
+// hub-backed run of the same thread. The pause lives in the server
+// checkpoint, so a reopened tab / phone finds it again via GET .../gate.
+const GATE_TOOLS = new Set(["ask_user", "exit_plan_mode"]);
+
+// plan mode is per thread (a draft "New chat" keeps its own until created)
+const planKey = (tid) => "lb-plan:" + (tid || "draft");
+function planOn(tid = threadId) {
+  try { return localStorage.getItem(planKey(tid)) === "on"; } catch { return false; }
+}
+function setPlan(on, tid = threadId) {
+  try {
+    if (on) localStorage.setItem(planKey(tid), "on");
+    else localStorage.removeItem(planKey(tid));
+  } catch {}
+  if (tid === threadId) syncComposerHint();
+}
+
+const INPUT_HINT = $("#input").placeholder;
+function syncComposerHint() {
+  const on = planOn();
+  $("#btn-plan").classList.toggle("on", on);
+  $("#btn-plan").textContent = on ? "◆ PLAN: ON" : "◇ PLAN";
+  $("#composer").classList.toggle("plan-mode", on);
+  const waiting = !!document.querySelector("#chat .gate:not(.sealed)");
+  $("#input").placeholder = waiting
+    ? "The agent is waiting on you — answer in the card above, or type a reply here…"
+    : on ? "PLAN MODE — the agent investigates read-only, asks what it needs, and proposes a plan for your approval (Shift+Tab toggles)…"
+    : INPUT_HINT;
+}
+
+function gateSeal(card, summary) {
+  card.classList.add("sealed");
+  for (const n of card.querySelectorAll("button, input, textarea")) n.disabled = true;
+  const act = card.querySelector(".gate-actions");
+  if (act) act.replaceChildren(el("div", "gate-done", "✓ " + summary));
+}
+
+function gateCard(tid, g) {
+  const v = g.value || {};
+  const card = el("div", "msg gate");
+  card.dataset.gateId = g.id;
+  const act = el("div", "gate-actions");
+  if (v.kind === "plan") {
+    card.appendChild(el("div", "gate-head", "◆ PLAN READY FOR REVIEW"));
+    const body = el("div", "gate-plan");
+    setMarkdown(body, v.plan || "");
+    card.appendChild(body);
+    const fb = el("textarea", "gate-text");
+    fb.rows = 2;
+    fb.placeholder = "Notes — required for REVISE, optional with APPROVE…";
+    card.appendChild(fb);
+    const ok = el("button", "btn accent", "✓ APPROVE & BUILD");
+    const rev = el("button", "btn ghost", "↺ REVISE");
+    ok.onclick = () => {
+      const notes = fb.value.trim();
+      gateSeal(card, "APPROVED" + (notes ? " — " + notes : "") + " · plan mode off");
+      setPlan(false, tid); // the agent implements now; next turns run normally
+      resumeGate(tid, g.id, { approved: true, feedback: notes }, card);
+    };
+    rev.onclick = () => {
+      const notes = fb.value.trim();
+      if (!notes) { fb.focus(); fb.classList.add("need"); return; }
+      gateSeal(card, "REVISION REQUESTED — " + notes);
+      resumeGate(tid, g.id, { approved: false, feedback: notes }, card);
+    };
+    act.append(ok, rev);
+  } else {
+    card.appendChild(el("div", "gate-head", "◆ THE AGENT NEEDS YOUR INPUT"));
+    const qs = v.questions || [];
+    const rows = qs.map((q, i) => {
+      const box = el("div", "gate-q");
+      box.appendChild(el("div", "gate-qt", `${qs.length > 1 ? i + 1 + ". " : ""}${q.question}`));
+      const picked = new Set();
+      if (q.options?.length) {
+        const chips = el("div", "gate-opts");
+        for (const o of q.options) {
+          const c = el("button", "gate-opt", o);
+          c.onclick = () => {
+            if (!q.multi_select) {
+              picked.clear();
+              for (const x of chips.children) x.classList.remove("on");
+            }
+            if (picked.has(o)) { picked.delete(o); c.classList.remove("on"); }
+            else { picked.add(o); c.classList.add("on"); }
+          };
+          chips.appendChild(c);
+        }
+        box.appendChild(chips);
+      }
+      const t = el("input", "gate-text");
+      t.type = "text";
+      t.placeholder = q.options?.length ? "…or your own answer / details" : "Your answer";
+      t.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submit.click(); } });
+      box.appendChild(t);
+      card.appendChild(box);
+      return { q, picked, t };
+    });
+    const submit = el("button", "btn accent", "SUBMIT ▶");
+    submit.onclick = () => {
+      const answers = rows.map((r) => ({ selected: [...r.picked], text: r.t.value.trim() }));
+      gateSeal(card, answers.map((a, i) =>
+        (qs.length > 1 ? i + 1 + ". " : "") + ([...a.selected, a.text].filter(Boolean).join("; ") || "(skipped)")
+      ).join("  ·  "));
+      resumeGate(tid, g.id, { answers }, card);
+    };
+    act.appendChild(submit);
+  }
+  card.appendChild(act);
+  return card;
+}
+
+// answer → /resume: same bundle/pipeline dance as send(), minus the bubble
+async function resumeGate(tid, gid, value, card) {
+  if (RUNS.has(tid)) return;
+  syncComposerHint();
+  SFX.play("message_sent");
+  const run = newBundle(tid);
+  if (card && card.parentNode === $("#chat")) run.nodes.push(card); // parks with the run
+  RUNS.set(tid, run);
+  run.iv = setInterval(() => tickRun(run), 250);
+  syncSendBtn();
+  const pipe = runPipeline(run);
+  if (run.viewing) {
+    $("#chat")._pinned = true;
+    $("#sb-live").classList.remove("hidden");
+    run.waitLabel = "⏳ RESUMING WITH YOUR ANSWER";
+    run.waiting = pipe.put(addBlock("waiting", run.waitLabel + " …", pipe.CH()));
+    run.waiting.open = true;
+    tickRun(run);
+  }
+  try {
+    const res = await fetch(`/api/threads/${encodeURIComponent(tid)}/resume`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: gid, value, plan: planOn(tid) }),
+    });
+    if (!res.ok) {
+      let why = "";
+      try { await J(res); } catch (e) { why = e.message; }
+      SFX.play("error");
+      pipe.put(addMsg("error", "ANSWER REJECTED — " + why, null, pipe.CH()));
+      endRun(run, true); // repaint from the server's truth (gate may be gone)
+      return;
+    }
+    await pipeSSE(res, pipe.handleEvent);
+    await afterStream(run, pipe);
+  } catch (e) {
+    detachedNote(run, e);
+  }
+}
+
+async function showPendingGates(tid, seq) {
+  let gates = [];
+  try { gates = (await (await fetch(`/api/threads/${encodeURIComponent(tid)}/gate`)).json()).gates || []; }
+  catch { return; }
+  if (seq !== openSeq || threadId !== tid || RUNS.has(tid)) return;
+  for (const g of gates)
+    if (!document.querySelector(`[data-gate-id="${g.id}"]`)) $("#chat").appendChild(gateCard(tid, g));
+  if (gates.length) scrollBottom();
+  syncComposerHint();
+}
+
+$("#btn-plan").onclick = () => { SFX.play("click"); setPlan(!planOn()); };
+$("#input").addEventListener("keydown", (e) => {
+  if (e.key === "Tab" && e.shiftKey) { e.preventDefault(); SFX.play("click"); setPlan(!planOn()); }
+});
+syncComposerHint();
 
 // ---------- ✎ FILES: browse + edit text files on the server ----------
 // One buffer at a time. Saves carry the mtime_ns the buffer was loaded at, so
