@@ -2813,12 +2813,12 @@ $("#input").addEventListener("keydown", (e) => {
 syncComposerHint();
 
 // ---------- ✎ FILES: browse + edit text files on the server ----------
-// One buffer at a time. Saves carry the mtime_ns the buffer was loaded at, so
+// One buffer at a time. Saves carry the content hash the buffer was loaded at, so
 // an agent write landing while you edit is a 409 resolved in #ed-confirm
 // (reload / overwrite) — never a silent clobber either way. Every path that
 // would drop unsaved edits (close, open another file, ESC, backdrop) goes
 // through edGuard's SAVE / DISCARD / KEEP bar (the viewer has no confirm()).
-const ED = { path: null, mtime: null, eol: "lf", orig: "", dir: null, lines: 0, indent: "    " };
+const ED = { path: null, ver: null, eol: "lf", orig: "", dir: null, lines: 0, indent: "    " };
 const edDirty = () => ED.path !== null && $("#ed-text").value !== ED.orig;
 
 function edStatus(msg, cls) {
@@ -2830,7 +2830,7 @@ function edStatus(msg, cls) {
 function edRefreshChrome() {
   const dirty = edDirty();
   $("#ed-file").classList.toggle("dirty", dirty);
-  $("#btn-ed-save").disabled = ED.path === null || (!dirty && ED.mtime !== null);
+  $("#btn-ed-save").disabled = ED.path === null || (!dirty && ED.ver !== null);
   $("#btn-ed-revert").disabled = !dirty;
 }
 
@@ -2920,9 +2920,9 @@ function edMarkTree() {
     r.classList.toggle("on", r.dataset.path === ED.path);
 }
 
-function edSetBuffer(path, content, mtime, eol, note) {
+function edSetBuffer(path, content, ver, eol, note) {
   ED.path = path;
-  ED.mtime = mtime;
+  ED.ver = ver;
   ED.eol = eol || "lf";
   ED.orig = content;
   ED.lines = 0;
@@ -2950,7 +2950,7 @@ async function edLoad(path) {
     SFX.play("error");
     return false;
   }
-  edSetBuffer(f.path, f.content, f.mtime_ns, f.eol,
+  edSetBuffer(f.path, f.content, f.version, f.eol,
     `${f.content.split("\n").length} LINES · ${fmtBytes(f.size)} · ${f.eol.toUpperCase()}` +
     (f.writable ? "" : " · ⚠ READ-ONLY ON DISK"));
   const dir = f.path.slice(0, f.path.lastIndexOf("/")) || "/";
@@ -2965,12 +2965,12 @@ async function edSave(force = false) {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: ED.path, content: $("#ed-text").value,
-        mtime_ns: ED.mtime, eol: ED.eol, force }),
+        version: ED.ver, eol: ED.eol, force }),
     });
-    const created = ED.mtime === null;
+    const created = ED.ver === null;
     ED.path = out.path; // "~/x" new-file buffers come back expanded
     $("#ed-file").textContent = out.path;
-    ED.mtime = out.mtime_ns;
+    ED.ver = out.version;
     ED.orig = $("#ed-text").value;
     edRefreshChrome();
     edStatus(`✓ SAVED ${new Date().toLocaleTimeString()} · ${fmtBytes(out.size)}`, "ok");

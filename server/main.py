@@ -400,14 +400,19 @@ async def media(path: str):
 # ---- file editor (✎ FILES) ----
 # Same trust posture as /api/media and /api/shell: a LAN/tailnet-only personal
 # tool whose agent already has an unsandboxed shell (README ⚠ Security).
-# Writes are optimistic-concurrency guarded: the client sends the mtime_ns it
-# loaded, so an agent edit landing while the buffer is open is a 409 the UI
-# resolves (reload / overwrite) instead of a silent clobber. mtime_ns rides as
-# a STRING: ~1.8e18 is past JS's 2^53, and a JSON number came back rounded —
-# every first save of an existing file was a false 409.
+# Writes are optimistic-concurrency guarded: the client sends back the
+# `version` it loaded (sha256 of the bytes on disk), so an agent edit landing
+# while the buffer is open is a 409 the UI resolves (reload / overwrite)
+# instead of a silent clobber. Content hash, not mtime: two writes inside one
+# timestamp tick share an mtime (the headless suite caught the miss), and an
+# mtime_ns JSON number is past JS's 2^53 anyway.
 
 EDIT_MAX_BYTES = 2_000_000
 FS_LIST_MAX = 2000
+
+
+def _version(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
 
 
 def _abs(path: str) -> str:
@@ -462,14 +467,14 @@ async def fs_read(path: str):
     # <textarea> normalizes CRLF to LF; remember it so a save round-trips
     eol = "crlf" if "\r\n" in text else "lf"
     return {"path": p, "content": text.replace("\r\n", "\n") if eol == "crlf" else text,
-            "eol": eol, "mtime_ns": str(st.st_mtime_ns), "size": st.st_size,
+            "eol": eol, "version": _version(raw), "size": st.st_size,
             "writable": os.access(p, os.W_OK)}
 
 
 class FsWriteIn(BaseModel):
     path: str
     content: str
-    mtime_ns: str | None = None  # None = creating a new file (string: see above)
+    version: str | None = None  # None = creating a new file
     eol: str = "lf"
     force: bool = False
 
@@ -484,13 +489,14 @@ async def fs_write(body: FsWriteIn):
     if not os.path.isdir(os.path.dirname(p)):
         raise HTTPException(400, "parent directory does not exist")
     if not body.force:
-        if body.mtime_ns is None and exists:
+        if body.version is None and exists:
             raise HTTPException(409, "file already exists on disk")
-        if body.mtime_ns is not None:
+        if body.version is not None:
             if not exists:
                 raise HTTPException(409, "file was deleted on disk")
-            if str(os.stat(p).st_mtime_ns) != body.mtime_ns:
-                raise HTTPException(409, "file changed on disk since it was opened")
+            with open(p, "rb") as fh:
+                if _version(fh.read()) != body.version:
+                    raise HTTPException(409, "file changed on disk since it was opened")
     text = body.content.replace("\n", "\r\n") if body.eol == "crlf" else body.content
     data = text.encode("utf-8")
     if len(data) > EDIT_MAX_BYTES:
@@ -508,8 +514,7 @@ async def fs_write(body: FsWriteIn):
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
-    st = os.stat(p)
-    return {"path": shown, "mtime_ns": str(st.st_mtime_ns), "size": st.st_size}
+    return {"path": shown, "version": _version(data), "size": len(data)}
 
 
 # ---- chat (SSE stream) ----

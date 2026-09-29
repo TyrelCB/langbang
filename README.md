@@ -97,7 +97,7 @@ but built on the LangChain/LangGraph ecosystem:
   text file on the server (folder tree, path box — Enter opens a folder or
   file, an unknown path starts a new file — line gutter, Tab indents,
   Ctrl+S saves). File-tool cards in the chat (`read_file`/`write_file`/
-  `edit_file`) carry a ✎ open shortcut. Saves are atomic and mtime-guarded
+  `edit_file`) carry a ✎ open shortcut. Saves are atomic and content-hash-guarded
   (`GET /api/fs/list|read`, `PUT /api/fs/write`): if the agent rewrites the
   file while it's open you get RELOAD / OVERWRITE, never a silent clobber.
   CRLF files round-trip; binary, non-UTF-8 and >2 MB files are refused.
