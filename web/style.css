@@ -674,3 +674,20 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
   padding: 6px 16px; background: var(--panel); border-bottom: 1px solid var(--orange);
   color: var(--orange); font-size: 12px; letter-spacing: 1px; }
 #update-bar span { flex: 1 1 260px; min-width: 0; }
+
+/* ✎ FILES path box: autocomplete (paths) + recursive name search (words) */
+.ed-pathbox { flex: 1; min-width: 0; position: relative; }
+.panel-inner .ed-pathbox input#ed-path { width: 100%; margin: 0; }
+#ed-suggest { position: absolute; left: 0; right: 0; top: 100%; z-index: 5; margin-top: 2px;
+  max-height: 50vh; overflow-y: auto; background: var(--bg2); border: 1px solid var(--cyan-dim);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .6); font-size: 12px; }
+.ed-sug { display: flex; gap: 8px; align-items: baseline; padding: 4px 10px; cursor: pointer;
+  white-space: nowrap; overflow: hidden; }
+.ed-sug .nm { color: var(--text); }
+.ed-sug.dir .nm { color: var(--cyan); }
+.ed-sug .rel { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0; direction: rtl; text-align: left; } /* keep the tail of long paths visible */
+.ed-sug.sel, .ed-sug:hover { background: #122448; }
+.ed-sug.sel { border-left: 2px solid var(--orange); }
+.ed-sug mark { background: none; color: var(--orange); }
+.ed-sug-note { padding: 4px 10px; color: var(--muted); font-size: 11px; letter-spacing: 1px; }

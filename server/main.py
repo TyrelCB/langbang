@@ -1,4 +1,5 @@
 """LangBang server: FastAPI app with a llama.cpp-style web UI."""
+import asyncio
 import hashlib
 import json
 import os
@@ -458,6 +459,103 @@ async def fs_list(path: str = "~"):
     entries.sort(key=lambda x: (not x["dir"], x["name"].lower()))
     return {"path": p, "parent": os.path.dirname(p) if p != "/" else None,
             "entries": entries[:FS_LIST_MAX], "truncated": len(entries) > FS_LIST_MAX}
+
+
+FIND_BUDGET = 2.5      # seconds of rg streaming per search — ~ is huge (ComfyUI, SDKs)
+FIND_MAX = 60
+FIND_PRUNE = ("node_modules", ".git", ".venv", "venv", "__pycache__", ".cache",
+              ".npm", ".cargo", "site-packages")
+
+
+_SEP_RE = re.compile(r"[_\-\s]+")
+
+
+def _norm(s: str) -> str:
+    """Case- and separator-insensitive: `Jane_Doe_` meets
+    `Jane Doe - Resume.pdf`."""
+    return _SEP_RE.sub(" ", s.lower())
+
+
+def _find_score(rel: str, terms: list[str]) -> int | None:
+    """Every term must appear in the relative path (case/separator-
+    insensitive); hits in the basename, at its start, and short paths rank
+    first."""
+    low = _norm(rel)
+    if not all(t in low for t in terms):
+        return None
+    base = low.rsplit("/", 1)[-1]
+    score = 0
+    for t in terms:
+        if base.startswith(t):
+            score += 300
+        elif t in base:
+            score += 150
+    return score - len(rel) - 20 * rel.count("/")
+
+
+@app.get("/api/fs/find")
+async def fs_find(root: str = "~", q: str = "", hidden: bool = False):
+    """Recursive name search for the ✎ FILES box: streams `rg --files` under
+    `root` (respects .gitignore, prunes FIND_PRUNE) and ranks files AND
+    their parent dirs by the query terms. Time-boxed: whatever matched when
+    FIND_BUDGET runs out is the answer (`partial: true`)."""
+    base = _abs(root)
+    terms = _norm(q).split()
+    if not terms:
+        return {"root": base, "results": [], "partial": False}
+    if not os.path.isdir(base):
+        raise HTTPException(404, "not a directory")
+    cmd = ["rg", "--files", "--no-messages", "--max-depth", "12"]
+    if hidden:
+        cmd.append("--hidden")
+    for d in FIND_PRUNE:
+        cmd += ["-g", f"!**/{d}/**"]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, cwd=base, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    hits: dict[str, tuple[int, bool]] = {}
+    seen_dirs: set[str] = set()
+    deadline = time.monotonic() + FIND_BUDGET
+    partial = False
+    try:
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                partial = True
+                break
+            try:
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=left)
+            except asyncio.TimeoutError:
+                partial = True
+                break
+            if not line:
+                break
+            rel = line.decode("utf-8", "replace").rstrip("\n")
+            if rel.startswith("./"):
+                rel = rel[2:]
+            sc = _find_score(rel, terms)
+            if sc is not None:
+                hits[rel] = (sc, False)
+            # folders only surface through the files under them
+            parts = rel.split("/")[:-1]
+            for i in range(1, len(parts) + 1):
+                d = "/".join(parts[:i])
+                if d in seen_dirs:
+                    continue
+                seen_dirs.add(d)
+                sc = _find_score(d, terms)
+                if sc is not None:
+                    hits[d] = (sc + 50, True)  # a matching folder beats files inside it
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.wait()
+    top = sorted(hits.items(), key=lambda kv: -kv[1][0])[:FIND_MAX]
+    return {
+        "root": base,
+        "partial": partial,
+        "results": [{"rel": rel, "path": os.path.join(base, rel), "dir": is_dir}
+                    for rel, (_, is_dir) in top],
+    }
 
 
 @app.get("/api/fs/read")

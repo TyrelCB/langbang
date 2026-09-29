@@ -98,7 +98,11 @@ but built on the LangChain/LangGraph ecosystem:
   disabled for scheduled runs, which have nobody to answer.
 - **✎ FILES editor**: topbar ✎ FILES opens a browse-and-edit panel for any
   text file on the server (folder tree, path box — Enter opens a folder or
-  file, an unknown path starts a new file — line gutter, Tab indents,
+  file, an unknown path starts a new file. Typing a path autocompletes from
+  that folder (↑↓, Tab = shell-style completion); plain words search file
+  and folder names recursively under the current folder via `rg --files`
+  (`GET /api/fs/find`, time-boxed, .gitignore-aware, separator-insensitive).
+  Line gutter, Tab indents,
   Ctrl+S saves). File-tool cards in the chat (`read_file`/`write_file`/
   `edit_file`) carry a ✎ open shortcut. Saves are atomic and content-hash-guarded
   (`GET /api/fs/list|read`, `PUT /api/fs/write`): if the agent rewrites the

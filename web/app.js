@@ -3013,6 +3013,7 @@ async function edSave(force = false) {
     edRefreshChrome();
     edStatus(`✓ SAVED ${new Date().toLocaleTimeString()} · ${fmtBytes(out.size)}`, "ok");
     SFX.play("click");
+    if (created) SUG.dirs.clear(); // autocomplete must see the new file
     if (created && ED.dir) await edBrowse(ED.dir); // new file joins the listing
     return true;
   } catch (e) {
@@ -3099,9 +3100,175 @@ $("#btn-ed-revert").onclick = () => {
   edStatus("REVERTED to last loaded/saved version");
 };
 $("#editor-panel").onclick = (e) => { if (e.target.id === "editor-panel") edClose(); };
-$("#ed-hidden").onchange = () => { if (ED.dir) edBrowse(ED.dir); };
+$("#ed-hidden").onchange = () => {
+  if (ED.dir) edBrowse(ED.dir);
+  if (!$("#ed-suggest").classList.contains("hidden")) sugUpdate();
+};
+// ---- path box: autocomplete (/… ~/…) + recursive name search (anything else)
+// Path mode lists the typed folder (cached 10s) and filters by the last
+// segment; a segment that matches nothing there falls through to a search
+// BELOW that folder. Search mode asks /api/fs/find (rg, time-boxed) under
+// the folder the tree shows. Seq-tokened: a slow reply for an older
+// keystroke never paints over a newer one.
+const SUG = { items: [], sel: -1, moved: false, seq: 0, abort: null, timer: null, dirs: new Map() };
+const isPathish = (v) => v.startsWith("/") || v.startsWith("~");
+const sepNorm = (x) => x.toLowerCase().replace(/[_\-\s]+/g, " ");
+
+function sugClose() {
+  clearTimeout(SUG.timer);
+  SUG.seq++;
+  if (SUG.abort) SUG.abort.abort();
+  $("#ed-suggest").classList.add("hidden");
+  SUG.items = [];
+  SUG.sel = -1;
+}
+
+function sugRender(items, note) {
+  const box = $("#ed-suggest");
+  SUG.items = items;
+  SUG.sel = items.length ? 0 : -1;
+  SUG.moved = false;
+  box.replaceChildren();
+  items.forEach((it, i) => {
+    const r = el("div", "ed-sug" + (it.dir ? " dir" : "") + (i === 0 ? " sel" : ""));
+    // trailing LRM: .rel is direction:rtl (ellipsis eats the HEAD of long
+    // paths); without it the bidi algorithm moves the final "/" to the front
+    r.append(el("span", "nm", (it.dir ? "▸ " : "") + it.name),
+             el("span", "rel", it.sub ? it.sub + "\u200E" : ""));
+    r.title = it.path;
+    // mousedown, not click: fires before the input's blur closes the list
+    r.addEventListener("mousedown", (e) => { e.preventDefault(); sugPick(i); });
+    box.appendChild(r);
+  });
+  if (note) box.appendChild(el("div", "ed-sug-note", note));
+  box.classList.toggle("hidden", !items.length && !note);
+}
+
+function sugMove(d) {
+  const n = SUG.items.length;
+  if (!n) return;
+  SUG.sel = (SUG.sel + d + n) % n;
+  SUG.moved = true;
+  const rows = $("#ed-suggest").querySelectorAll(".ed-sug");
+  rows.forEach((r, i) => r.classList.toggle("sel", i === SUG.sel));
+  rows[SUG.sel].scrollIntoView({ block: "nearest" });
+}
+
+async function sugPath(v, seq) {
+  const cut = v.lastIndexOf("/");
+  const dir = v.slice(0, cut + 1);
+  const prefix = v.slice(cut + 1);
+  let hit = SUG.dirs.get(dir);
+  if (!hit || Date.now() - hit.t > 10000) {
+    try {
+      hit = { t: Date.now(), out: await edFetch("/api/fs/list?path=" + encodeURIComponent(dir)) };
+    } catch (e) {
+      if (seq === SUG.seq) sugRender([], "✕ " + dir + ": " + e.message);
+      return;
+    }
+    SUG.dirs.set(dir, hit);
+  }
+  if (seq !== SUG.seq) return;
+  const out = hit.out;
+  const hid = $("#ed-hidden").checked || prefix.startsWith(".");
+  const np = sepNorm(prefix);
+  const ents = out.entries.filter((e) => hid || !e.name.startsWith("."));
+  const starts = ents.filter((e) => sepNorm(e.name).startsWith(np));
+  const inner = np ? ents.filter((e) => !sepNorm(e.name).startsWith(np) && sepNorm(e.name).includes(np)) : [];
+  const base = out.path === "/" ? "" : out.path;
+  const items = [...starts, ...inner].slice(0, 100).map((e) => ({
+    name: e.name, dir: e.dir, path: base + "/" + e.name,
+    value: dir + e.name + (e.dir ? "/" : ""), starts: sepNorm(e.name).startsWith(np),
+  }));
+  if (items.length || !prefix) { sugRender(items, items.length ? null : "(empty folder)"); return; }
+  sugRender([], `nothing named “${prefix}” in ${dir} — searching below…`);
+  await sugSearch(prefix, out.path, seq);
+}
+
+async function sugSearch(q, root, seq) {
+  if (SUG.abort) SUG.abort.abort();
+  SUG.abort = new AbortController();
+  let out;
+  try {
+    out = await edFetch(`/api/fs/find?root=${encodeURIComponent(root)}&q=${encodeURIComponent(q)}` +
+      `&hidden=${$("#ed-hidden").checked}`, { signal: SUG.abort.signal });
+  } catch (e) {
+    if (e.name !== "AbortError" && seq === SUG.seq) sugRender([], "✕ search failed: " + e.message);
+    return;
+  }
+  if (seq !== SUG.seq) return;
+  const items = out.results.map((r) => {
+    const i = r.rel.lastIndexOf("/");
+    return { name: r.rel.slice(i + 1), sub: i > 0 ? r.rel.slice(0, i) + "/" : "",
+             dir: r.dir, path: r.path, value: r.path + (r.dir ? "/" : "") };
+  });
+  sugRender(items, !items.length ? `no matches under ${out.root}`
+    : out.partial ? "… search time-boxed — add words to narrow" : null);
+}
+
+function sugUpdate() {
+  const raw = $("#ed-path").value.trim();
+  const seq = ++SUG.seq;
+  clearTimeout(SUG.timer);
+  if (!raw) { sugClose(); return; }
+  if (isPathish(raw)) {
+    const v = raw === "~" ? "~/" : raw;
+    SUG.timer = setTimeout(() => sugPath(v, seq), 60);
+  } else {
+    const root = ED.dir || "~";
+    sugRender([], `searching ${root} …`);
+    SUG.timer = setTimeout(() => sugSearch(raw, root, seq), 250);
+  }
+}
+
+function sugPick(i) {
+  const it = SUG.items[i];
+  if (!it) return;
+  if (it.dir) {
+    // drill in: box shows the folder, tree follows, list shows its contents
+    $("#ed-path").value = it.value;
+    edBrowse(it.path);
+    sugUpdate();
+  } else {
+    $("#ed-path").value = it.path;
+    sugClose();
+    edGuard(() => edLoad(it.path));
+  }
+}
+
+// Tab: shell-style — extend to the longest common prefix of the matches;
+// when that adds nothing (or you've arrowed to one), take the selection
+function sugTab() {
+  const v = $("#ed-path").value;
+  if (!SUG.items.length) return;
+  if (isPathish(v) && !SUG.moved) {
+    const vals = SUG.items.filter((it) => it.starts).map((it) => it.value);
+    if (vals.length > 1) {
+      let p = vals[0];
+      for (const x of vals) while (!x.toLowerCase().startsWith(p.toLowerCase())) p = p.slice(0, -1);
+      if (p.length > v.length) { $("#ed-path").value = p; sugUpdate(); return; }
+    }
+  }
+  const it = SUG.items[Math.max(SUG.sel, 0)];
+  $("#ed-path").value = it.value;
+  if (it.dir) edBrowse(it.path);
+  sugUpdate();
+}
+
+$("#ed-path").addEventListener("input", sugUpdate);
+$("#ed-path").addEventListener("focus", () => { if ($("#ed-path").value.trim()) sugUpdate(); });
+$("#ed-path").addEventListener("blur", () => setTimeout(sugClose, 120));
 $("#ed-path").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") { e.preventDefault(); edGo($("#ed-path").value); }
+  const open = !$("#ed-suggest").classList.contains("hidden");
+  if (e.key === "ArrowDown" && open) { e.preventDefault(); sugMove(1); }
+  else if (e.key === "ArrowUp" && open) { e.preventDefault(); sugMove(-1); }
+  else if (e.key === "Tab" && !e.shiftKey) { e.preventDefault(); sugTab(); }
+  else if (e.key === "Escape" && open) { e.preventDefault(); e.stopPropagation(); sugClose(); } // list only, not the panel
+  else if (e.key === "Enter") {
+    e.preventDefault();
+    if (open && SUG.sel >= 0) sugPick(SUG.sel);
+    else { sugClose(); edGo($("#ed-path").value); }
+  }
 });
 $("#ed-text").addEventListener("input", () => { edGutter(); edRefreshChrome(); });
 $("#ed-text").addEventListener("scroll", () => {

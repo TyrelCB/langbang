@@ -260,8 +260,11 @@
     <div class="panel-inner editor-inner">
       <div class="ed-head">
         <h2>FILES</h2>
-        <input id="ed-path" type="text" autocomplete="off" spellcheck="false"
-          placeholder="/absolute/path or ~/… — Enter opens a folder or file (a new path starts a new file)">
+        <div class="ed-pathbox">
+          <input id="ed-path" type="text" autocomplete="off" spellcheck="false"
+            placeholder="~/path… autocompletes (Tab) · or type a name to search this folder · Enter opens">
+          <div id="ed-suggest" class="hidden"></div>
+        </div>
         <label class="chk ed-hid"><input type="checkbox" id="ed-hidden"> .dotfiles</label>
       </div>
       <div class="ed-body">
