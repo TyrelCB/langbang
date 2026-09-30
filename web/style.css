@@ -722,3 +722,22 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
 .ed-sug.sel { border-left: 2px solid var(--orange); }
 .ed-sug mark { background: none; color: var(--orange); }
 .ed-sug-note { padding: 4px 10px; color: var(--muted); font-size: 11px; letter-spacing: 1px; }
+
+/* trajectory: failed tool calls + ⧉ copy (row / run / raw JSON) */
+.traj-row.err .traj-pre, .traj-row.err .traj-name { color: var(--danger); }
+.traj-row.err { background: rgba(255, 77, 94, .06); }
+.traj-tick.err { background: var(--danger); width: 3px; }
+.traj-fails { color: var(--danger); }
+.traj-badge.gate { border-color: var(--orange); color: var(--orange); }
+.traj-copy { flex: 0 0 auto; font: inherit; font-size: 11px; line-height: 1; cursor: pointer;
+  background: none; color: var(--muted); border: 1px solid var(--line); padding: 1px 5px;
+  visibility: hidden; }
+.traj-row:hover .traj-copy, .traj-head:hover .traj-copy, .traj-copy.done { visibility: visible; }
+.traj-copy:hover { color: var(--cyan); border-color: var(--cyan); }
+.traj-copy.done { color: var(--green); border-color: var(--green); }
+.traj-head { display: flex; align-items: center; gap: 0; }
+.traj-head .traj-copy { margin-left: 10px; }
+.traj-meta-wrap { position: relative; }
+.traj-meta-wrap > .traj-copy { visibility: visible; position: absolute; top: 6px; right: 6px;
+  background: var(--panel); }
+@media (hover: none) { .traj-copy { visibility: visible; } }

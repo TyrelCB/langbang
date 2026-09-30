@@ -1201,6 +1201,55 @@ function showTab(which) {
   else refreshStats();
 }
 
+// ---- trajectory helpers: failure detection + copy ----
+// A tool row whose meta carries `err` never ran (bad/lost args — e.g. a
+// write_todos whose args arrived as {}): it's logged by on_tool_error.
+const trajFailed = (e) => e.type === "tool" && !!(e.meta && e.meta.err);
+function gateSummary(v) {
+  if (!v || typeof v !== "object") return String(v ?? "");
+  if (v.kind === "plan") return "◆ plan proposed for approval";
+  return "◆ asked: " + (v.questions || []).map((q) => q.question).join(" | ");
+}
+// Human-readable text for one row (what ⧉ copies). Note: the trajectory
+// log stores tool I/O capped at ~2 KB and model text at ~500 chars — the
+// full values live in the chat transcript.
+function trajRowText(e) {
+  const m = e.meta || {};
+  const when = new Date(e.ts * 1000).toLocaleTimeString();
+  const dur = e.dur != null ? " · " + fmtShort(e.dur) : "";
+  const fmtv = (v) => (typeof v === "string" ? v : JSON.stringify(v, null, 2));
+  if (e.type === "tool") {
+    const lines = [`[${when}] TOOL ${e.name || ""}${dur}${trajFailed(e) ? " — FAILED" : ""}` +
+      (m.sub ? " (sub-agent)" : "")];
+    if (m.desc) lines.push("task: " + m.desc);
+    if (m.in != null && m.in !== "") lines.push("→ " + fmtv(m.in));
+    if (m.err) lines.push("✕ " + m.err);
+    else if (m.out != null && m.out !== "") lines.push("← " + fmtv(m.out));
+    return lines.join("\n");
+  }
+  if (e.type === "model") {
+    const tok = e.tok_in != null ? ` · in ${e.tok_in} → out ${e.tok_out}` : "";
+    return `[${when}] ASSISTANT ${e.name || ""}${dur}${tok}\n${m.text || ""}`.trimEnd();
+  }
+  if (e.type === "user") return `[${when}] USER\n${m.text || ""}`;
+  if (e.type === "error") return `[${when}] ERROR\n${m.message || ""}`;
+  if (e.type === "gate") return `[${when}] GATE\n${fmtv(m.value)}`;
+  return `[${when}] ${e.type}\n${fmtv(m)}`;
+}
+function trajCopyBtn(getText, tip) {
+  const b = el("button", "traj-copy", "⧉");
+  b.dataset.label = "⧉";
+  b.title = tip;
+  b.onclick = async (ev) => {
+    ev.stopPropagation(); // the row's own click toggles the JSON panel
+    const ok = await copyText(getText());
+    b.textContent = ok ? "✓" : "✕";
+    b.classList.toggle("done", ok);
+    setTimeout(() => { b.textContent = b.dataset.label; b.classList.remove("done"); }, 1200);
+  };
+  return b;
+}
+
 function renderTraj() {
   const body = $("#traj-body");
   const keepScroll = body.scrollTop; // live refresh rebuilds the DOM — hold the view
@@ -1217,7 +1266,7 @@ function renderTraj() {
     if (g && g.turn_id === e.turn_id) g.rows.push(e);
     else groups.push({ turn_id: e.turn_id, rows: [e] });
   }
-  const BADGE = { user: "USER", model: "ASSISTANT", tool: "TOOL", error: "ERROR" };
+  const BADGE = { user: "USER", model: "ASSISTANT", tool: "TOOL", error: "ERROR", gate: "GATE" };
   // Rows land in seq order, but tool rows are logged at span END — a task's
   // children would render above it. Sort by effective START (end - dur); the
   // sort is stable, so ties keep log order.
@@ -1227,15 +1276,17 @@ function renderTraj() {
     const t0 = Math.min(...g.rows.map(st));
     const span = Math.max(Math.max(...g.rows.map((e) => e.ts)) - t0, 0.001);
     const card = el("div", "traj-card");
-    card.appendChild(
-      el("div", "traj-head",
-        `RUN ${gi + 1} · ${new Date(t0 * 1000).toLocaleTimeString()} · ${fmtShort(span)}`)
-    );
+    const fails = g.rows.filter(trajFailed).length;
+    const head = el("div", "traj-head",
+      `RUN ${gi + 1} · ${new Date(t0 * 1000).toLocaleTimeString()} · ${fmtShort(span)}`);
+    if (fails) head.appendChild(el("span", "traj-fails", ` · ✕ ${fails} FAILED`));
+    head.appendChild(trajCopyBtn(() => g.rows.map(trajRowText).join("\n\n"), "copy this whole run as text"));
+    card.appendChild(head);
     const strip = el("div", "traj-strip");
     strip.appendChild(el("i", "traj-tick input")); // input sits at 0 (CSS left:0)
     for (const e of g.rows) {
       if (e.type !== "model" && e.type !== "tool") continue;
-      const tk = el("i", "traj-tick " + e.type);
+      const tk = el("i", "traj-tick " + e.type + (trajFailed(e) ? " err" : ""));
       tk.style.left = (100 * (st(e) - t0)) / span + "%";
       tk.title = `${e.name || e.type}${e.dur != null ? " · " + fmtShort(e.dur) : ""}`;
       strip.appendChild(tk);
@@ -1244,20 +1295,29 @@ function renderTraj() {
     for (const e of g.rows) {
       const m = e.meta || {};
       const label = BADGE[e.type] || e.type;
+      const failed = trajFailed(e);
       const preview =
-        e.type === "tool" ? (m.desc ? "◈ " + m.desc : String(m.in || ""))
+        failed ? "✕ " + String(m.err).split("\n")[0] + "  ← " + String(m.in || "")
+        : e.type === "tool" ? (m.desc ? "◈ " + m.desc : String(m.in || ""))
         : e.type === "error" ? String(m.message || "")
+        : e.type === "gate" ? gateSummary(m.value)
         : String(m.text || "");
-      const row = el("div", "traj-row" + (m.sub ? " sub" : ""));
-      row.appendChild(el("span", "traj-badge " + e.type, label));
+      const row = el("div", "traj-row" + (m.sub ? " sub" : "") + (failed ? " err" : ""));
+      row.appendChild(el("span", "traj-badge " + (failed ? "error" : e.type), failed ? "TOOL ✕" : label));
       row.appendChild(el("span", "traj-name", e.name || (e.dur != null ? fmtShort(e.dur) : "")));
       row.appendChild(el("span", "traj-pre", preview));
+      row.appendChild(trajCopyBtn(() => trajRowText(e), "copy this step as text"));
       if (q && !(label + " " + (e.name || "") + " " + preview).toLowerCase().includes(q))
         row.classList.add("hidden");
       row.onclick = () => {
         if (row._meta) { row._meta.remove(); row._meta = null; return; }
         // meta pre is a SIBLING of the row — keep a direct ref to toggle it
-        row._meta = el("pre", "traj-meta", JSON.stringify({ ...e, meta: m }, null, 2));
+        const json = JSON.stringify({ ...e, meta: m }, null, 2);
+        row._meta = el("div", "traj-meta-wrap");
+        const b = trajCopyBtn(() => json, "copy the raw JSON");
+        b.textContent = "⧉ JSON";
+        b.dataset.label = "⧉ JSON";
+        row._meta.append(b, el("pre", "traj-meta", json));
         row.after(row._meta);
       };
       card.appendChild(row);
