@@ -102,6 +102,11 @@ but built on the LangChain/LangGraph ecosystem:
   that folder (↑↓, Tab = shell-style completion); plain words search file
   and folder names recursively under the current folder via `rg --files`
   (`GET /api/fs/find`, time-boxed, .gitignore-aware, separator-insensitive).
+  Syntax highlighting for ~36 languages (the vendored highlight.js,
+  picked by extension; a colored layer mirrors a transparent textarea, so
+  native undo/selection/IME keep working — files over 400 KB stay plain),
+  and Markdown files get EDIT / SPLIT / PREVIEW (chat's renderer; relative
+  images resolve through `/api/media`, relative links open in the editor).
   Line gutter, Tab indents,
   Ctrl+S saves). File-tool cards in the chat (`read_file`/`write_file`/
   `edit_file`) carry a ✎ open shortcut. Saves are atomic and content-hash-guarded

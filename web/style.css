@@ -605,8 +605,12 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
 .ed-row .sz { color: var(--muted); float: right; padding-left: 8px; font-size: 10px; }
 .ed-note { color: var(--muted); padding: 4px 10px; font-size: 11px; }
 .ed-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-#ed-file { color: var(--orange); letter-spacing: 1px; font-size: 12px; margin-bottom: 4px;
+.ed-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; min-width: 0; }
+#ed-file { color: var(--orange); letter-spacing: 1px; font-size: 12px; flex: 1; min-width: 0;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#ed-lang { color: var(--muted); font-size: 10px; letter-spacing: 2px; white-space: nowrap; }
+#ed-modes { display: flex; gap: 4px; }
+#ed-modes .btn.on { color: var(--cyan); border-color: var(--cyan); }
 #ed-file.dirty::before { content: "● "; }
 .ed-wrap { flex: 1; min-height: 0; display: flex; border: 1px solid var(--line);
   background: var(--bg); }
@@ -614,9 +618,32 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
 #ed-gutter { margin: 0; padding: 8px 6px 8px 8px; overflow: hidden; text-align: right;
   color: var(--muted); user-select: none; border-right: 1px solid var(--line);
   font: 13px/1.5 "JetBrains Mono", ui-monospace, monospace; min-width: 3.5em; }
-.panel-inner textarea#ed-text { flex: 1; min-width: 0; margin: 0; border: none; resize: none;
-  background: transparent; padding: 8px; font: 13px/1.5 "JetBrains Mono", ui-monospace, monospace;
-  tab-size: 4; white-space: pre; overflow: auto; }
+/* textarea + #ed-hl are pixel twins stacked in .ed-stack: same font, padding,
+   tab-size and no-wrap; the textarea's glyphs are transparent (caret and
+   selection stay visible) and its scroll offsets are mirrored onto #ed-hl.
+   Any metric that differs between the two misplaces the caret — which is
+   why hljs bold/italic are neutralized in here. */
+.ed-stack { flex: 1; min-width: 0; position: relative; }
+#ed-hl, .panel-inner textarea#ed-text {
+  position: absolute; inset: 0; margin: 0; border: none; padding: 8px;
+  font: 13px/1.5 "JetBrains Mono", ui-monospace, monospace; letter-spacing: 0;
+  tab-size: 4; white-space: pre; overflow-wrap: normal; word-break: normal; }
+#ed-hl { overflow: hidden; pointer-events: none; color: var(--text); background: none; }
+#ed-hl code { font: inherit; padding: 0; background: none; white-space: inherit; }
+#ed-hl * { font-style: normal !important; font-weight: normal !important; }
+.panel-inner textarea#ed-text { width: 100%; height: 100%; resize: none; overflow: auto;
+  background: transparent; color: transparent; caret-color: var(--text); z-index: 1; }
+.panel-inner textarea#ed-text::selection { background: rgba(63, 214, 255, .28); color: transparent; }
+/* plain mode (unknown language / huge file): the textarea draws its own text */
+.ed-wrap.plain #ed-hl { display: none; }
+.panel-inner .ed-wrap.plain textarea#ed-text { color: var(--text); }
+/* markdown preview: borrows .msg markdown styles, sheds the bubble chrome */
+#ed-preview { flex: 1; min-width: 0; max-width: none; overflow-y: auto; margin: 0;
+  padding: 10px 16px; border: none; border-left: 1px solid var(--line); clip-path: none;
+  background: var(--panel); }
+.ed-wrap.mode-preview #ed-gutter, .ed-wrap.mode-preview .ed-stack { display: none; }
+.ed-wrap.mode-preview #ed-preview { border-left: none; }
+#ed-preview img { max-width: 100%; }
 #ed-status { flex: 1; align-self: center; color: var(--muted); font-size: 11px; letter-spacing: 1px;
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #ed-status.err { color: var(--danger); }
@@ -632,6 +659,10 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
 @media (max-width: 860px) {
   .editor-inner { width: 100vw; height: 100dvh; max-height: 100dvh; }
   .ed-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 30%) minmax(0, 1fr); }
+  .ed-wrap.mode-split { flex-direction: column; }
+  .ed-wrap.mode-split .ed-stack, .ed-wrap.mode-split #ed-preview { flex: 1 1 50%; min-height: 0; }
+  .ed-wrap.mode-split #ed-gutter { display: none; }
+  .ed-wrap.mode-split #ed-preview { border-left: none; border-top: 1px solid var(--line); }
   .ed-head { flex-wrap: wrap; }
 }
 

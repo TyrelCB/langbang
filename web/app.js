@@ -2881,8 +2881,129 @@ function edGutter() {
     for (let i = 1; i <= n; i++) s += i + "\n";
     $("#ed-gutter").textContent = s;
   }
-  $("#ed-gutter").scrollTop = ta.scrollTop;
+  edPaint();
+  edSchedulePreview();
+  edSyncScroll();
 }
+
+// ---- syntax highlighting: #ed-hl mirrors the textarea underneath it ----
+// Every input repaints SYNCHRONOUSLY (the textarea's own glyphs are
+// transparent — a deferred paint would make typing invisible). Big files
+// paint plain text now and colors a beat later; huge ones stay plain.
+const ED_EXT_LANG = {
+  py: "python", pyw: "python", js: "javascript", mjs: "javascript", cjs: "javascript",
+  jsx: "javascript", ts: "typescript", tsx: "typescript", json: "json", jsonl: "json",
+  sh: "bash", bash: "bash", zsh: "bash", yml: "yaml", yaml: "yaml", toml: "toml",
+  ini: "ini", cfg: "ini", conf: "ini", service: "ini", timer: "ini", md: "markdown",
+  markdown: "markdown", html: "xml", htm: "xml", xml: "xml", svg: "xml", css: "css",
+  scss: "scss", less: "less", c: "c", h: "c", cpp: "cpp", cc: "cpp", hpp: "cpp",
+  cs: "csharp", go: "go", rs: "rust", java: "java", kt: "kotlin", swift: "swift",
+  rb: "ruby", php: "php", pl: "perl", r: "r", lua: "lua", sql: "sql", diff: "diff",
+  patch: "diff", graphql: "graphql", gql: "graphql", vb: "vbnet", m: "objectivec",
+  mk: "makefile",
+};
+const ED_NAME_LANG = { makefile: "makefile", gnumakefile: "makefile", caddyfile: "ini",
+  ".bashrc": "bash", ".zshrc": "bash", ".profile": "bash", ".bash_profile": "bash" };
+const ED_HL_SYNC = 60_000;   // chars: highlight inline on every keystroke
+const ED_HL_MAX = 400_000;   // beyond: plain text, no colors
+function edLangFor(path) {
+  const name = (path || "").split("/").pop().toLowerCase();
+  const lang = ED_NAME_LANG[name] ||
+    (name.includes(".") ? ED_EXT_LANG[name.split(".").pop()] : null);
+  return lang && typeof hljs !== "undefined" && hljs.getLanguage(lang) ? lang : null;
+}
+const edEsc = (t) => t.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+let edHlTimer = null;
+function edPaint() {
+  const text = $("#ed-text").value;
+  const code = $("#ed-hl code");
+  const plain = !ED.lang || text.length > ED_HL_MAX;
+  $(".ed-wrap").classList.toggle("plain", plain);
+  clearTimeout(edHlTimer);
+  if (plain) { code.textContent = ""; return; }
+  // trailing " ": a <pre> ignores a final newline the textarea still shows
+  // as an empty last line — one space keeps both heights equal (a "\n "
+  // here made the layer a line TALLER; the suite's height check caught it)
+  const hl = () => hljs.highlight(text, { language: ED.lang, ignoreIllegals: true }).value + " ";
+  if (text.length <= ED_HL_SYNC) { code.innerHTML = hl(); return; }
+  code.innerHTML = edEsc(text) + " ";
+  edHlTimer = setTimeout(() => {
+    if ($("#ed-text").value === text) code.innerHTML = hl();
+  }, 180);
+}
+function edSyncScroll() {
+  const ta = $("#ed-text");
+  $("#ed-gutter").scrollTop = ta.scrollTop;
+  const hlPre = $("#ed-hl");
+  hlPre.scrollTop = ta.scrollTop;
+  hlPre.scrollLeft = ta.scrollLeft;
+  // split view: preview follows proportionally (markdown ≠ line-aligned)
+  const pv = $("#ed-preview");
+  if (ED.md && ED.mode === "split") {
+    const r = ta.scrollTop / Math.max(1, ta.scrollHeight - ta.clientHeight);
+    pv.scrollTop = r * (pv.scrollHeight - pv.clientHeight);
+  }
+}
+
+// ---- markdown preview (EDIT / SPLIT / PREVIEW for .md files) ----
+// Same renderer as chat bubbles (marked + DOMPurify + code-block toolbar).
+// Relative image srcs resolve against the file's folder through /api/media;
+// relative links to local files open in this editor instead of 404ing.
+let edPvTimer = null;
+function edSchedulePreview(now) {
+  if (!ED.md || ED.mode === "edit") return;
+  clearTimeout(edPvTimer);
+  edPvTimer = setTimeout(edRenderPreview, now ? 0 : 200);
+}
+function edResolve(ref) {
+  if (/^[a-z][a-z0-9+.-]*:/i.test(ref) || ref.startsWith("#") || ref.startsWith("//")) return null;
+  const clean = decodeURIComponent(ref.split("#")[0].split("?")[0]);
+  if (!clean) return null;
+  const base = clean.startsWith("/") ? [] : ED.path.split("/").slice(0, -1);
+  for (const seg of clean.split("/")) {
+    if (seg === "..") base.pop();
+    else if (seg && seg !== ".") base.push(seg);
+  }
+  return "/" + base.filter(Boolean).join("/");
+}
+function edRenderPreview() {
+  const pv = $("#ed-preview");
+  const keep = pv.scrollTop;
+  setMarkdown(pv, $("#ed-text").value);
+  for (const img of pv.querySelectorAll("img[src]")) {
+    const p = edResolve(img.getAttribute("src"));
+    if (p) img.src = "/api/media?path=" + encodeURIComponent(p);
+  }
+  for (const a of pv.querySelectorAll("a[href]")) {
+    const p = edResolve(a.getAttribute("href"));
+    if (p) {
+      a.href = "#";
+      a.title = p;
+      a.onclick = (e) => { e.preventDefault(); edGuard(() => edLoad(p)); };
+    } else a.target = "_blank";
+  }
+  pv.scrollTop = keep;
+}
+function edSetMode(mode) {
+  ED.mode = mode;
+  try { localStorage.setItem("lb-ed-mdmode", mode); } catch {}
+  edApplyMode();
+}
+function edApplyMode() {
+  const wrap = $(".ed-wrap");
+  const mode = ED.md ? ED.mode : "edit";
+  wrap.classList.remove("mode-edit", "mode-split", "mode-preview");
+  wrap.classList.add("mode-" + mode);
+  $("#ed-preview").classList.toggle("hidden", mode === "edit");
+  $("#ed-modes").classList.toggle("hidden", !ED.md);
+  for (const b of $("#ed-modes").querySelectorAll("button"))
+    b.classList.toggle("on", b.dataset.mode === mode);
+  if (mode !== "edit") edSchedulePreview(true);
+  if (mode === "preview") $("#ed-preview").focus?.();
+}
+ED.mode = (() => { try { return localStorage.getItem("lb-ed-mdmode") || "split"; } catch { return "split"; } })();
+for (const b of $("#ed-modes").querySelectorAll("button"))
+  b.onclick = () => { SFX.play("click"); edSetMode(b.dataset.mode); };
 
 async function edFetch(url, opts) {
   const r = await fetch(url, opts);
@@ -2961,6 +3082,9 @@ function edMarkTree() {
 function edSetBuffer(path, content, ver, eol, note) {
   ED.path = path;
   ED.ver = ver;
+  ED.lang = edLangFor(path);
+  ED.md = ED.lang === "markdown";
+  $("#ed-lang").textContent = (ED.lang || "plain text").toUpperCase();
   ED.eol = eol || "lf";
   ED.orig = content;
   ED.lines = 0;
@@ -2974,6 +3098,7 @@ function edSetBuffer(path, content, ver, eol, note) {
   $("#ed-path").value = path;
   $("#ed-confirm").classList.add("hidden");
   edGutter();
+  edApplyMode();
   edRefreshChrome();
   edMarkTree();
   edStatus(note);
@@ -3271,9 +3396,7 @@ $("#ed-path").addEventListener("keydown", (e) => {
   }
 });
 $("#ed-text").addEventListener("input", () => { edGutter(); edRefreshChrome(); });
-$("#ed-text").addEventListener("scroll", () => {
-  $("#ed-gutter").scrollTop = $("#ed-text").scrollTop;
-});
+$("#ed-text").addEventListener("scroll", edSyncScroll);
 $("#ed-text").addEventListener("keydown", (e) => {
   if (e.key === "Tab" && !e.ctrlKey && !e.altKey && !e.metaKey) {
     e.preventDefault();

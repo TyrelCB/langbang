@@ -270,10 +270,24 @@
       <div class="ed-body">
         <div id="ed-tree"></div>
         <div class="ed-main">
-          <div id="ed-file">— NO FILE OPEN —</div>
+          <div class="ed-bar">
+            <div id="ed-file">— NO FILE OPEN —</div>
+            <span id="ed-lang"></span>
+            <span id="ed-modes" class="hidden">
+              <button class="btn ghost sm" data-mode="edit">EDIT</button>
+              <button class="btn ghost sm" data-mode="split">SPLIT</button>
+              <button class="btn ghost sm" data-mode="preview">PREVIEW</button>
+            </span>
+          </div>
           <div class="ed-wrap">
             <pre id="ed-gutter"></pre>
-            <textarea id="ed-text" spellcheck="false" wrap="off" disabled></textarea>
+            <!-- highlighted copy UNDER a transparent textarea: native editing
+                 (undo, IME, selection) with colors; scroll is mirrored -->
+            <div class="ed-stack">
+              <pre id="ed-hl" aria-hidden="true"><code class="hljs"></code></pre>
+              <textarea id="ed-text" spellcheck="false" wrap="off" disabled></textarea>
+            </div>
+            <div id="ed-preview" class="msg hidden"></div>
           </div>
         </div>
       </div>
