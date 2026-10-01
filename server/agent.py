@@ -527,15 +527,22 @@ class _TodoReconcile(AgentMiddleware):
     tool work counts (a plan-only turn legitimately ends with everything
     open — that's what planning is).
 
-    Discarding the intercepted response is safe: amodel_node persists only
-    what the wrap chain RETURNS (_execute_model_async is side-effect-free),
-    so the intercepted answer never reaches thread history — only the
-    retry's messages do. (Its streamed tokens stay briefly visible in the
-    live UI; harmless.)"""
+    The intercepted answer is HELD, not regenerated (2026-10-01): the old
+    retry discarded it and made the model answer again after write_todos —
+    the user saw two full answers (the first had already streamed), voice
+    auto-read raced between them, and Qwen spent ~50 s re-deriving facts
+    for the copy. Now the nudge asks for ONLY the write_todos call; when
+    that tool result comes back, the next model call is short-circuited and
+    returns the held answer verbatim (persisted after the todo update, so
+    history reads: todo card → answer). If the model instead starts other
+    tool work, the hold is dropped and it answers again itself; if it
+    ignores the order and answers, the ORIGINAL answer is delivered. Safe
+    because amodel_node persists only what the wrap chain RETURNS."""
 
     def __init__(self):
         super().__init__()
         self._nudged = False
+        self._held = None  # intercepted final answer, delivered after write_todos
         self._init_stage = 0  # 0=watching, 1=nudge #1 sent, 2=done (escalated or list exists)
         self._stale_nudges = 0  # staleness gate: max 2 per run, never a spiral
 
@@ -675,6 +682,13 @@ class _TodoReconcile(AgentMiddleware):
             # plan mode: read-only investigation IS the job and the plan goes
             # to exit_plan_mode — "make a todo list" nudges would fight that
             return await handler(request)
+        if self._held is not None:
+            held, self._held = self._held, None
+            last = request.messages[-1] if request.messages else None
+            if isinstance(last, ToolMessage) and (getattr(last, "name", None) or "") == "write_todos":
+                logger.warning("todo-reconcile: list reconciled; delivering the held answer as-is")
+                return held  # no model call: the answer already streamed once
+            # anything else came back (other tools ran): the model will answer itself
         req = self._init_nudge(request)  # pre-handler: sees the pristine request
         if req is not None:
             request = req
@@ -709,12 +723,13 @@ class _TodoReconcile(AgentMiddleware):
             f"[{t.get('status')}] {t.get('content')}" for t in open_items[:15]
         )
         nudge = HumanMessage(content=(
-            "[todo-enforcer] Do NOT answer yet. Your todo list still has "
-            f"{len(open_items)} open item(s): {listed}. Call write_todos NOW "
-            "with the FULL list updated to match reality — completed for "
-            "what this run actually finished, in_progress for what you are "
-            "mid-way through, pending only for genuinely remaining work. "
-            "Only after that tool call may you give your answer."
+            "[todo-enforcer] Your answer above is final and will be delivered "
+            "to the user exactly as written — do NOT repeat, re-check or "
+            f"rewrite it. Your todo list still has {len(open_items)} open "
+            f"item(s): {listed}. Reply with ONLY a write_todos call (no text) "
+            "carrying the FULL list updated to match reality — completed for "
+            "what this run actually finished, in_progress for anything "
+            "mid-way, pending only for genuinely remaining work."
         ))
         logger.warning(
             "todo-reconcile: final answer intercepted, forcing one reconciliation (%d open items)",
@@ -722,13 +737,27 @@ class _TodoReconcile(AgentMiddleware):
         )  # warning-level on purpose: no logging handler is configured,
         # so INFO would sink to nowhere (logging lastResort = WARNING+)
         try:
-            return await handler(request.override(messages=[*request.messages, nudge]))
+            retry = await handler(request.override(messages=[*request.messages, nudge]))
         except Exception as e:  # noqa: BLE001 - never lose the user's answer
             logger.warning(
                 "todo-reconcile: forced retry failed (%s); delivering original answer",
                 str(e)[:200],
             )
             return resp
+        rmr = retry if getattr(retry, "result", None) is not None else getattr(
+            retry, "model_response", None)
+        rmsgs = getattr(rmr, "result", None)
+        if rmsgs is None and isinstance(retry, AIMessage):
+            rmsgs = [retry]
+        rai = next((m for m in reversed(rmsgs or []) if isinstance(m, AIMessage)), None)
+        names = [tc.get("name") for tc in (rai.tool_calls if rai else [])]
+        if names and all(n == "write_todos" for n in names):
+            self._held = resp  # delivered on the call after the tool result
+            return retry
+        if names:
+            return retry  # it wants more real work — it will answer again itself
+        logger.warning("todo-reconcile: retry answered instead of updating; delivering original answer")
+        return resp
 
 
 # Provided by the deepagents harness itself in deep mode (on the real FS, with

@@ -698,6 +698,7 @@ function runPipeline(run) {
         flushRender();
         asstMsg.classList.remove("cursor");
         attachSpeak(asstMsg, asstRaw);
+        if (asstRaw.trim()) run.lastBubble = { msg: asstMsg, raw: asstRaw };
         asstMsg = null;
       }
       if (GATE_TOOLS.has(ev.name) && !ev.sub) return; // the `gate` event renders it
@@ -801,7 +802,13 @@ function runPipeline(run) {
       if (run.viewing && !run.todosTouched) markTodosStale();
       // read the FINAL answer bubble only — mid-run "let me check…" bubbles
       // keep their manual 🔊 (auto-reading play-by-play is filler audio)
-      if (voiceMode === "speak" && asstRaw.trim()) speakRaw(asstRaw, asstMsg);
+      // The todo gate can deliver the answer that streamed BEFORE its
+      // write_todos card (server holds it, no re-generation) — then the
+      // final segment is empty and the answer is the last sealed bubble.
+      if (voiceMode === "speak") {
+        if (asstMsg && asstRaw.trim()) speakRaw(asstRaw, asstMsg);
+        else if (!asstMsg && run.lastBubble) speakRaw(run.lastBubble.raw, run.lastBubble.msg);
+      }
     }
     if (run.viewing) scrollBottom();
   }
@@ -1719,6 +1726,7 @@ function buildPlayer(msg) {
   };
   pp.onclick = (e) => {
     e.stopPropagation();
+    if (msg._stale) { stopSpeaking(); playBubble(msg); return; } // stream was released
     const a = msg._aud;
     if (a.paused) a.play().catch(() => {}); else a.pause();
   };
@@ -1738,7 +1746,7 @@ function buildPlayer(msg) {
 }
 
 async function synth(msg) {
-  if (msg._aud) return true; // one fetch per bubble, forever
+  if (msg._aud && !msg._stale) return true; // one fetch per bubble (until released)
   let res;
   try {
     res = await fetch("/api/tts", {
@@ -1761,6 +1769,8 @@ async function synth(msg) {
     // reload gets the finished file from the cache, fully seekable.
     const out = await res.json();
     msg._aud = new Audio(out.stream);
+    msg._stale = false;
+    voiceBubbles.add(msg);
   } else {
     msg._blob = URL.createObjectURL(await res.blob());
     msg._aud = new Audio(msg._blob);
@@ -1770,7 +1780,31 @@ async function synth(msg) {
   return true;
 }
 
+// A Pocket clip that is still streaming keeps its HTTP connection — and its
+// server-side synthesis — alive even while paused (browsers keep buffering
+// a paused element). Synthesis is one-at-a-time, so a clip you moved away
+// from would make the one you asked for wait until it finished. Starting
+// a clip therefore releases every OTHER bubble's unfinished stream; that
+// bubble re-requests (cache hit if it completed) when played again.
+const voiceBubbles = new Set();
+function releaseStreams(except) {
+  for (const b of voiceBubbles) {
+    // "still streaming": Chrome reports duration=Infinity until the stream
+    // ends; Firefox reports a GROWING finite estimate instead (measured:
+    // 4.3 → 10.3 → … 73.3 s) — but networkState stays LOADING (2) until the
+    // last byte, then IDLE (1). Firefox also keeps downloading a PAUSED
+    // element to the end, so a duration-only check never released it.
+    const a = b._aud;
+    if (b === except || !a || (a.networkState !== 2 && isFinite(a.duration))) continue;
+    a.pause();
+    a.removeAttribute("src");
+    a.load(); // closes the connection → server cancels within ~1 s
+    b._stale = true;
+  }
+}
+
 async function playBubble(msg) {
+  releaseStreams(msg);
   const gen = ++playSeq;
   markSpeaking(msg); // immediate ■ STOP feedback — first synthesis may take seconds
   synthing = true;
@@ -1779,6 +1813,12 @@ async function playBubble(msg) {
   if (!ok || gen !== playSeq) return; // STOP (or newer play) landed mid-synth
   if (voiceCur && voiceCur !== msg) voiceCur._aud.pause(); // onpause clears voiceCur
   await msg._aud.play().catch((e) => {
+    // AbortError = WE interrupted it (another 🔊 / STOP paused this clip
+    // while it was still buffering — Firefox words it "fetching process …
+    // aborted by the user agent"). Expected, not a failure; the newer
+    // action owns the voice now, so leave speakOwner alone.
+    if (e && e.name === "AbortError") return;
+    if (gen !== playSeq) return;
     markSpeaking(null);
     voiceFail("VOICE: playback failed — " + e);
   });

@@ -29,7 +29,8 @@ from . import voice
 
 logger = logging.getLogger("langbang.ttsjobs")
 
-ABANDON_S = 20.0   # no follower this long (and unfinished) → cancel
+ABANDON_S = 20.0   # never-joined job (POST but no GET yet) → cancel after this
+LEFT_S = 1.0       # every listener left (released / closed tab) → cancel after this
 LINGER_S = 120.0   # finished/failed jobs stay joinable this long
 POLL_S = 0.05
 # input side: no probing/analysis buffer — ffmpeg otherwise sat on the first
@@ -51,6 +52,8 @@ class Job:
         self.cancelled = False
         self.stop = threading.Event()
         self.followers = 0
+        self.ever_followed = False
+        self.preempted = False  # a newer clip was requested after every listener left
         self.last_seen = time.time()
         self.t0 = time.time()
         self.done_ts = 0.0
@@ -59,7 +62,13 @@ class Job:
     # -- producer side (worker threads) --
     def _abandoned(self) -> bool:
         with self._lock:
-            return self.followers == 0 and time.time() - self.last_seen > ABANDON_S
+            # a listener that LEFT means the UI released this clip (another
+            # 🔊 started, tab closed): free the single synthesis slot fast so
+            # the clip the user asked for isn't queued behind this one
+            grace = LEFT_S if self.ever_followed else ABANDON_S
+            if self.followers == 0 and self.preempted:
+                return True
+            return self.followers == 0 and time.time() - self.last_seen > grace
 
     def run(self) -> None:
         proc = None
@@ -114,6 +123,7 @@ class Job:
     async def follow(self) -> AsyncIterator[bytes]:
         with self._lock:
             self.followers += 1
+            self.ever_followed = True
             self.last_seen = time.time()
         i = 0
         try:
@@ -159,6 +169,11 @@ def start(key: str, text: str, v: dict, final: str) -> Job:
         with j._lock:
             j.last_seen = time.time()  # a fresh request keeps it alive
         return j
+    # a NEW clip is the user moving on: any running job nobody listens to
+    # anymore yields the single synthesis slot now, not after LEFT_S
+    for other in JOBS.values():
+        if not other.done and other.ever_followed and other.followers == 0:
+            other.preempted = True
     if _worker is None:
         from concurrent.futures import ThreadPoolExecutor
         _worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pocket-tts")

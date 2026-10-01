@@ -50,7 +50,11 @@ def speakable(text: str) -> str:
     t = re.sub(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$", "", t, flags=re.M)  # table sep rows
     t = re.sub(r"^\s{0,3}#{1,6}\s*", "", t, flags=re.M)      # heading markers
     t = re.sub(r"^\s{0,3}>\s?", "", t, flags=re.M)           # blockquotes
-    t = re.sub(r"^\s*[-*+]\s+(?=\S)", "", t, flags=re.M)     # bullets
+    t = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+(?=\S)", "", t, flags=re.M)  # bullets / numbered items
+    # every line is its own sentence: without a period, a bullet list collapses
+    # into one run-on — TTS prosody flattens and pocket-tts's chunker
+    # overflows ("Chunk has 51 tokens (max 50), may skip words")
+    t = re.sub(r"([^\s.!?:;,…])[ \t]*(?=\n|$)", r"\1.", t)
     t = re.sub(r"[ \t]*\|[ \t]*", " ", t)                    # table pipes
     t = t.replace("**", "").replace("__", "").replace("~~", "")
     t = re.sub(r"`+", "", t)                                 # inline code ticks
