@@ -260,9 +260,16 @@ when it's the active provider), **first audio ~0.2 s**, ~4.5x realtime,
 while it's generated (`server/ttsjobs.py`: model → ffmpeg → followers); the
 finished stream becomes the `data/tts/` cache file, so replays are instant
 and seekable. STOP on a long reply cancels the synthesis after ~20 s without
-a listener. Preset voices need no Hugging Face account; a custom voice file
-(cloning — only voices you have consent for) needs kyutai's gated weights:
-accept the terms on the model page, `.venv/bin/hf auth login`, restart.
+a listener. CONFIG → VOICE's **Pocket voice** dropdown lists MY VOICES (saved clones),
+the 27 PRESETS and **＋ Clone a new voice…**; ▶ previews any of them
+without saving, ✕ deletes a saved one (two clicks). Cloning: upload 10–30 s
+of one speaker (any audio/video ffmpeg reads; first 30 s used; consent box
+required — kyutai's terms forbid cloning without permission). The server
+encodes it once into a voice state, `data/voices/<name>.safetensors`
+(gitignored; the uploaded clip is deleted), which then loads on the normal
+ungated model like a preset. Presets and saved voices need no Hugging Face
+account; the clone step itself needs kyutai's gated weights once: accept
+the terms on the model page and run `.venv/bin/hf auth login` (no restart).
 Needs `ffmpeg` on PATH for streaming (falls back to whole-clip WAV).
 
 The mic/voice-chat half is **ready server-side but not wired client-side**:

@@ -1897,6 +1897,145 @@ const DEFAULT_VOICE = {
 };
 let loadedVoice = { ...DEFAULT_VOICE };
 
+// ---- Pocket voice picker: presets / my (cloned) voices / ＋ clone ----
+const PV_CLONE = "__clone__";
+let pvPrev = "alba";      // selection to fall back to when the clone form closes
+let pvAudio = null;       // the ▶ preview player (one at a time)
+
+function pvValue() {
+  const v = $("#set-voice-pocket_voice").value;
+  return v === PV_CLONE ? pvPrev : v;
+}
+
+async function pvLoad(selected) {
+  let lib = { presets: [], saved: [] };
+  try { lib = await (await fetch("/api/voices")).json(); } catch {}
+  pvLib = lib;
+  const sel = $("#set-voice-pocket_voice");
+  sel.replaceChildren();
+  const group = (label, items) => {
+    const g = el("optgroup");
+    g.label = label;
+    for (const [value, text] of items) {
+      const o = el("option", null, text);
+      o.value = value;
+      g.appendChild(o);
+    }
+    sel.appendChild(g);
+  };
+  if (lib.saved.length)
+    group("MY VOICES", lib.saved.map((v) => [v.name, v.name + (v.language && v.language !== "english" ? ` (${v.language})` : "")]));
+  group("PRESETS", lib.presets.map((n) => [n, n]));
+  // a legacy free-text value (absolute path to a clip) stays selectable
+  if (selected && ![...sel.options].some((o) => o.value === selected))
+    group("CUSTOM", [[selected, "custom: " + selected.split("/").pop()]]);
+  const add = el("option", null, "＋ Clone a new voice…");
+  add.value = PV_CLONE;
+  sel.appendChild(add);
+  sel.value = selected || "alba";
+  pvPrev = sel.value;
+  pvSync();
+}
+let pvLib = { presets: [], saved: [] };
+
+function pvSync() {
+  const v = $("#set-voice-pocket_voice").value;
+  const cloning = v === PV_CLONE;
+  $("#pv-clone").classList.toggle("hidden", !cloning);
+  $("#btn-pv-preview").disabled = cloning;
+  $("#btn-pv-delete").classList.toggle("hidden", !pvLib.saved.some((x) => x.name === v));
+  if (cloning) {
+    $("#pv-status").textContent = pvLib.cloning_ready ? "" :
+      "⚠ no Hugging Face login on this box yet — cloning will fail until you accept the terms + hf auth login";
+    $("#pv-status").className = "pv-status" + (pvLib.cloning_ready ? "" : " warn");
+    $("#pv-name").focus();
+  } else pvPrev = v;
+}
+
+async function pvPreview() {
+  const voice = pvValue();
+  if (pvAudio) { pvAudio.pause(); pvAudio = null; }
+  $("#btn-pv-preview").textContent = "…";
+  try {
+    const r = await fetch("/api/tts", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: `Hi, I'm ${voice.replace(/_/g, " ")}. This is how I'd sound reading your LangBang replies.`,
+        voice, language: $("#set-voice-pocket_language").value,
+      }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.stream) throw new Error(out.detail || "HTTP " + r.status);
+    pvAudio = new Audio(out.stream);
+    pvAudio.onended = () => { $("#btn-pv-preview").textContent = "▶"; };
+    await pvAudio.play();
+    $("#btn-pv-preview").textContent = "■";
+  } catch (e) {
+    $("#btn-pv-preview").textContent = "▶";
+    $("#pv-status").textContent = "✕ preview failed: " + e.message;
+    $("#pv-status").className = "pv-status warn";
+    SFX.play("error");
+  }
+}
+
+async function pvClone() {
+  const name = $("#pv-name").value.trim();
+  const file = $("#pv-file").files[0];
+  const st = $("#pv-status");
+  const fail = (m) => { st.textContent = "✕ " + m; st.className = "pv-status warn"; SFX.play("error"); };
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(name)) return fail("name: letters, digits, _ or - (max 40)");
+  if (!file) return fail("pick an audio file");
+  if (!$("#pv-consent").checked) return fail("confirm you have permission to clone this voice");
+  const fd = new FormData();
+  fd.append("name", name);
+  fd.append("language", $("#set-voice-pocket_language").value);
+  fd.append("consent", "true");
+  fd.append("file", file);
+  $("#btn-pv-clone").disabled = true;
+  st.textContent = "⏳ cloning… (loads the cloning model once, ~10 s)";
+  st.className = "pv-status";
+  try {
+    const r = await fetch("/api/voices", { method: "POST", body: fd });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok) return fail(out.detail || "HTTP " + r.status);
+    await pvLoad(out.name);        // selected — SAVE makes it the reading voice
+    cfgDirtyCompute();
+    $("#pv-name").value = ""; $("#pv-file").value = ""; $("#pv-consent").checked = false;
+    st.textContent = `✓ saved “${out.name}” — ▶ to hear it, SAVE to use it`;
+    st.className = "pv-status ok";
+    SFX.play("message_received");
+  } catch (e) {
+    fail(e.message);
+  } finally {
+    $("#btn-pv-clone").disabled = false;
+  }
+}
+
+async function pvDelete() {
+  const name = $("#set-voice-pocket_voice").value;
+  const b = $("#btn-pv-delete");
+  if (!b.classList.contains("arm")) { // two-click confirm (no confirm() in this app)
+    b.classList.add("arm"); b.textContent = "✕ sure?";
+    setTimeout(() => { b.classList.remove("arm"); b.textContent = "✕"; }, 3000);
+    return;
+  }
+  b.classList.remove("arm"); b.textContent = "✕";
+  const r = await fetch("/api/voices/" + encodeURIComponent(name), { method: "DELETE" });
+  if (!r.ok) { SFX.play("error"); return; }
+  if (loadedVoice.pocket_voice === name) loadedVoice.pocket_voice = "alba"; // server reset it too
+  await pvLoad(pvPrev === name ? "alba" : pvPrev);
+  cfgDirtyCompute();
+}
+
+$("#set-voice-pocket_voice").addEventListener("change", pvSync);
+$("#btn-pv-preview").onclick = () => {
+  if (pvAudio && !pvAudio.paused) { pvAudio.pause(); $("#btn-pv-preview").textContent = "▶"; return; }
+  pvPreview();
+};
+$("#btn-pv-clone").onclick = pvClone;
+$("#btn-pv-cancel").onclick = () => { $("#set-voice-pocket_voice").value = pvPrev; pvSync(); cfgDirtyCompute(); };
+$("#btn-pv-delete").onclick = pvDelete;
+
 async function openSettings() {
   const s = await api.settings();
   for (const k of ["base_url", "model", "temperature", "max_tokens", "max_react_iterations", "system_prompt",
@@ -1928,6 +2067,7 @@ async function openSettings() {
   $("#set-deep_agent").checked = !!s.deep_agent;
   $("#set-skills_enabled").checked = !!s.skills_enabled;
   loadedVoice = { ...DEFAULT_VOICE, ...(s.voice || {}) };
+  await pvLoad(loadedVoice.pocket_voice); // options must exist before .value is set
   for (const k of Object.keys(DEFAULT_VOICE))
     $("#set-voice-" + k).value = loadedVoice[k];
   $("#cfg-confirm").classList.add("hidden");
@@ -1977,7 +2117,7 @@ async function saveSettings() {
       gcloud_key_file: $("#set-voice-gcloud_key_file").value.trim(),
       gcloud_tts_lang: $("#set-voice-gcloud_tts_lang").value.trim() || "en-US",
       gcloud_tts_voice: $("#set-voice-gcloud_tts_voice").value.trim() || "en-US-Wavenet-J",
-      pocket_voice: $("#set-voice-pocket_voice").value.trim() || "alba",
+      pocket_voice: pvValue() || "alba",
       pocket_language: $("#set-voice-pocket_language").value || "english",
       pocket_threads: Math.max(1, Math.min(8, parseInt($("#set-voice-pocket_threads").value, 10) || 2)),
     },
@@ -1999,7 +2139,8 @@ let cfgBase = null;
 // #mcp-list/#mcp-editor/#soundboard-list rebuild their DOM wholesale on
 // every action — their inputs can't be identity-keyed snapshot members (the
 // MCP state rides the __mcp JSON instead; the soundboard saves per-cue)
-const cfgMember = (el0) => !el0.closest("#mcp-list,#mcp-editor,#soundboard-list");
+// #pv-clone is a one-shot form (clone saves itself) — not a setting
+const cfgMember = (el0) => !el0.closest("#mcp-list,#mcp-editor,#soundboard-list,#pv-clone");
 function cfgDirtyCompute() {
   if (!cfgBase) return;
   let n = 0;

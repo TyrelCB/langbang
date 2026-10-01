@@ -10,3 +10,4 @@ web/sounds/*.wav
 data/perf.log
 data/uploads/
 data/tts/
+data/voices/

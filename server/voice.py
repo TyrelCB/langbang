@@ -13,9 +13,11 @@ Error taxonomy: ValueError = client-fixable (bad audio body -> 400);
 RuntimeError = provider/config trouble (missing key/lib, quota, network -> 502).
 """
 import io
+import json
 import os
 import re
 import threading
+import time
 import wave
 
 MAX_TTS_CHARS = 20_000
@@ -171,10 +173,23 @@ def pocket_ready(v: dict):
             _pk_models[lang] = model
         st = _pk_states.get((lang, voice))
         if st is None:
-            if voice not in POCKET_VOICES:
+            saved = _saved_path(voice)
+            if voice in POCKET_VOICES:
+                pass
+            elif saved:
+                # a cloned voice saved as a voice-state .safetensors: loads on
+                # the plain (ungated, no-cloning) model like the presets do
+                meta = _saved_meta(voice)
+                if meta.get("language") and meta["language"] != lang:
+                    raise RuntimeError(
+                        f"voice {voice!r} was cloned for {meta['language']}; switch Pocket "
+                        f"language back or clone it again for {lang}")
+                from pathlib import Path
+                voice = Path(saved)
+            else:
                 path = os.path.expanduser(voice)
                 if not os.path.isfile(path):
-                    raise RuntimeError(f"Pocket TTS voice {voice!r} is neither a preset nor an existing audio file")
+                    raise RuntimeError(f"Pocket TTS voice {voice!r} is neither a preset, a saved voice, nor an audio file")
                 if not getattr(model, "has_voice_cloning", False):
                     raise RuntimeError(_POCKET_GATED_HINT)
                 voice = path
@@ -184,6 +199,117 @@ def pocket_ready(v: dict):
                 raise RuntimeError(f"Pocket TTS voice load failed ({type(e).__name__}: {e})") from e
             _pk_states[(lang, (v.get("pocket_voice") or "alba").strip())] = st
     return model, st
+
+
+# ---- saved (cloned) voices: data/voices/<name>.safetensors + <name>.json ----
+VOICES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "voices")
+VOICE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
+_pk_clone = threading.Lock()
+
+
+def _saved_path(name: str) -> str | None:
+    if not VOICE_NAME_RE.match(name or ""):
+        return None
+    p = os.path.join(VOICES_DIR, name + ".safetensors")
+    return p if os.path.isfile(p) else None
+
+
+def _saved_meta(name: str) -> dict:
+    try:
+        with open(os.path.join(VOICES_DIR, name + ".json")) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def saved_voices() -> list[dict]:
+    if not os.path.isdir(VOICES_DIR):
+        return []
+    out = []
+    for f in sorted(os.listdir(VOICES_DIR)):
+        if f.endswith(".safetensors"):
+            name = f[:-12]
+            out.append({"name": name, **{k: v for k, v in _saved_meta(name).items() if k != "name"}})
+    return out
+
+
+def _forget_voice(name: str) -> None:
+    for k in [k for k in _pk_states if k[1] == name]:
+        _pk_states.pop(k, None)
+
+
+def cloning_ready() -> bool:
+    """Best-effort: an HF token is present (the gated download needs one;
+    accepting the model terms is still on the user)."""
+    try:
+        from huggingface_hub import get_token
+        return bool(get_token())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def clone_voice(name: str, audio_path: str, language: str, source: str = "") -> dict:
+    """Encode up to 30 s of `audio_path` into a voice state and save it as
+    data/voices/<name>.safetensors. Needs Pocket's GATED weights (they hold
+    the audio encoder): loaded just for this and released after, so the
+    resident model stays the light no-cloning one. RuntimeError -> 502."""
+    if not VOICE_NAME_RE.match(name or ""):
+        raise ValueError("voice name: 1-40 letters, digits, _ or - (start with a letter/digit)")
+    if name in POCKET_VOICES:
+        raise ValueError(f"{name!r} is a preset voice name — pick another")
+    if language not in POCKET_LANGS:
+        raise ValueError(f"unknown language {language!r}")
+    try:
+        import gc
+
+        from pocket_tts import TTSModel
+        from pocket_tts.models.model_state import export_model_state
+    except ImportError as e:
+        raise RuntimeError("pocket-tts not installed — run: uv add pocket-tts") from e
+    from pathlib import Path
+
+    with _pk_clone:
+        t0 = time.time()
+        try:
+            model = TTSModel.load_model(language=language)
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(f"Pocket TTS model load failed ({type(e).__name__}: {e})") from e
+        try:
+            if not getattr(model, "has_voice_cloning", False):
+                raise RuntimeError(
+                    "voice cloning needs Pocket TTS's gated weights: accept the terms at "
+                    "https://huggingface.co/kyutai/pocket-tts, then run `.venv/bin/hf auth login` "
+                    "on the LangBang host (no restart needed) and try again")
+            try:
+                st = model.get_state_for_audio_prompt(Path(audio_path), truncate=True)
+            except Exception as e:  # noqa: BLE001
+                raise RuntimeError(f"could not encode that audio ({type(e).__name__}: {e})") from e
+            os.makedirs(VOICES_DIR, exist_ok=True)
+            tmp = os.path.join(VOICES_DIR, f".{name}.tmp.safetensors")
+            export_model_state(st, tmp)
+            os.replace(tmp, os.path.join(VOICES_DIR, name + ".safetensors"))
+            meta = {"name": name, "language": language, "created": time.time(),
+                    "source": source[:200], "clone_s": round(time.time() - t0, 1)}
+            with open(os.path.join(VOICES_DIR, name + ".json"), "w") as fh:
+                json.dump(meta, fh)
+            _forget_voice(name)  # re-cloned under the same name → drop the stale state
+            return meta
+        finally:
+            del model
+            gc.collect()
+
+
+def delete_voice(name: str) -> bool:
+    p = _saved_path(name)
+    if not p:
+        return False
+    os.remove(p)
+    try:
+        os.remove(os.path.join(VOICES_DIR, name + ".json"))
+    except FileNotFoundError:
+        pass
+    _forget_voice(name)
+    return True
 
 
 def pocket_pcm(text: str, v: dict, stop: threading.Event | None = None):

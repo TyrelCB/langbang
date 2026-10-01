@@ -744,3 +744,16 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
 /* image a read_file result showed the model (history cards; lazy) */
 .block .tool-media { display: block; max-width: min(100%, 360px); max-height: 240px;
   margin: 6px 0 2px; border: 1px solid var(--line); }
+
+/* CONFIG → VOICE: Pocket voice picker + clone form */
+.pv-row { display: flex; gap: 6px; align-items: center; margin-top: 4px; }
+.pv-row select { flex: 1; min-width: 0; margin-top: 0 !important; }
+.pv-row .btn { flex: 0 0 auto; }
+#btn-pv-delete.arm { color: var(--danger); border-color: var(--danger); }
+.pv-clone { border: 1px dashed var(--orange); padding: 10px 12px; margin: 4px 0 12px; }
+.pv-clone .group-label { color: var(--orange); }
+.panel-inner label.pv-consent { display: flex; align-items: center; gap: 6px; color: var(--text); }
+.panel-inner .pv-consent input { width: auto; margin: 0; accent-color: var(--orange); }
+.pv-status { align-self: center; font-size: 11px; letter-spacing: 1px; color: var(--muted); }
+.pv-status.warn { color: var(--danger); }
+.pv-status.ok { color: var(--green); }

@@ -9,7 +9,7 @@ import time
 import uuid
 
 import httpx
-from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -818,6 +818,10 @@ MAX_STT_BYTES = 10_000_000  # ~5 min of 16 kHz mono PCM16
 
 class TTSIn(BaseModel):
     text: str
+    # CONFIG ▶ preview: speak with this Pocket voice (and language) without
+    # saving settings — forces the pocket provider for this one request
+    voice: str | None = None
+    language: str | None = None
 
 
 TTS_CACHE_DIR = os.path.join(config.DATA_DIR, "tts")
@@ -861,6 +865,10 @@ async def tts(body: TTSIn):
     if not clean:
         raise HTTPException(400, "nothing speakable in text")
     s = config.load()
+    if body.voice:
+        s = {**s, "voice": {**(s.get("voice") or {}), "tts_provider": "pocket",
+                            "pocket_voice": body.voice,
+                            **({"pocket_language": body.language} if body.language else {})}}
     key = _tts_key(clean, s)
     v = s.get("voice") or {}
     if (v.get("tts_provider") or "gtts") == "pocket" and shutil.which("ffmpeg"):
@@ -906,6 +914,70 @@ async def tts(body: TTSIn):
             pass  # cache is best-effort; the audio still reaches the UI
     return Response(content=audio, media_type=mime,
                     headers={"Cache-Control": "no-store", "X-TTS-Cache": hit})
+
+
+# ---- Pocket voice library (CONFIG → VOICE dropdown, cloning) ----
+
+MAX_CLONE_BYTES = 25_000_000
+
+
+@app.get("/api/voices")
+async def voices_list():
+    return {"presets": list(voice.POCKET_VOICES), "languages": list(voice.POCKET_LANGS),
+            "saved": voice.saved_voices(), "cloning_ready": voice.cloning_ready()}
+
+
+@app.post("/api/voices")
+async def voices_clone(name: str = Form(...), language: str = Form("english"),
+                       consent: bool = Form(False), file: UploadFile = File(...)):
+    """Clone a voice from an uploaded clip (first 30 s used) and save it to
+    the library. Any audio/video ffmpeg reads is accepted (phone voice memo,
+    webm, m4a…); it's normalized to 24 kHz mono WAV first. The consent box
+    is required — kyutai's terms forbid cloning a voice without permission."""
+    if not consent:
+        raise HTTPException(400, "confirm this is your voice or that you have the speaker's permission")
+    if not shutil.which("ffmpeg"):
+        raise HTTPException(500, "ffmpeg is required to read the uploaded audio")
+    work = os.path.join(config.DATA_DIR, "uploads", "clone-" + uuid.uuid4().hex[:12])
+    os.makedirs(work, exist_ok=True)
+    try:
+        src = os.path.join(work, "src")
+        size = 0
+        with open(src, "wb") as fh:
+            while chunk := await file.read(1 << 20):
+                size += len(chunk)
+                if size > MAX_CLONE_BYTES:
+                    raise HTTPException(413, "audio too large (max 25 MB — 30 s is all it uses)")
+                fh.write(chunk)
+        wav = os.path.join(work, "voice.wav")
+        p = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-t", "30",
+            "-vn", "-ac", "1", "-ar", "24000", wav,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        _, err = await p.communicate()
+        if p.returncode != 0 or not os.path.isfile(wav):
+            raise HTTPException(400, "couldn't read that audio: " + err.decode(errors="replace").strip()[-200:])
+        try:
+            meta = await run_in_threadpool(voice.clone_voice, name.strip(), wav, language,
+                                           file.filename or "")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except RuntimeError as e:
+            raise HTTPException(502, str(e))
+        return meta
+    finally:
+        shutil.rmtree(work, ignore_errors=True)  # the source clip is never kept
+
+
+@app.delete("/api/voices/{name}")
+async def voices_delete(name: str):
+    if not voice.delete_voice(name):
+        raise HTTPException(404, "no such saved voice")
+    s = config.load()
+    v = s.get("voice") or {}
+    if v.get("pocket_voice") == name:  # deleting the active voice → back to a preset
+        config.save({**s, "voice": {**v, "pocket_voice": "alba"}})
+    return {"ok": True}
 
 
 _CLIP_RE = re.compile(r"^[0-9a-f]{64}\.mp3$")
