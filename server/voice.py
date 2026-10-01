@@ -297,6 +297,13 @@ def clone_voice(name: str, audio_path: str, language: str, source: str = "") -> 
         finally:
             del model
             gc.collect()
+            # glibc keeps the freed ~1 GB clone model in its arenas otherwise:
+            # measured +141 MB resident after del+gc, +36 MB after trim
+            try:
+                import ctypes
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except (OSError, AttributeError):
+                pass  # not glibc — nothing to trim
 
 
 def delete_voice(name: str) -> bool:
