@@ -1753,8 +1753,18 @@ async function synth(msg) {
     try { m = (await res.json()).detail || m; } catch {}
     return voiceFail("VOICE: " + m);
   }
-  msg._blob = URL.createObjectURL(await res.blob());
-  msg._aud = new Audio(msg._blob);
+  if ((res.headers.get("content-type") || "").includes("application/json")) {
+    // streaming provider (Pocket TTS): the server hands back a clip URL the
+    // <audio> element plays progressively while it's synthesized — speech
+    // starts in ~0.1 s. Duration reads Infinity until the stream ends (the
+    // player shows 0:00 and seek no-ops until then); a later replay or a
+    // reload gets the finished file from the cache, fully seekable.
+    const out = await res.json();
+    msg._aud = new Audio(out.stream);
+  } else {
+    msg._blob = URL.createObjectURL(await res.blob());
+    msg._aud = new Audio(msg._blob);
+  }
   wireAudio(msg);
   buildPlayer(msg);
   return true;
@@ -1883,6 +1893,7 @@ const DEFAULT_VOICE = {
   tts_provider: "gtts", tts_lang: "en", tts_tld: "com",
   stt_provider: "sr", stt_lang: "en-US",
   gcloud_key_file: "", gcloud_tts_lang: "en-US", gcloud_tts_voice: "en-US-Wavenet-J",
+  pocket_voice: "alba", pocket_language: "english", pocket_threads: 2,
 };
 let loadedVoice = { ...DEFAULT_VOICE };
 
@@ -1966,6 +1977,9 @@ async function saveSettings() {
       gcloud_key_file: $("#set-voice-gcloud_key_file").value.trim(),
       gcloud_tts_lang: $("#set-voice-gcloud_tts_lang").value.trim() || "en-US",
       gcloud_tts_voice: $("#set-voice-gcloud_tts_voice").value.trim() || "en-US-Wavenet-J",
+      pocket_voice: $("#set-voice-pocket_voice").value.trim() || "alba",
+      pocket_language: $("#set-voice-pocket_language").value || "english",
+      pocket_threads: Math.max(1, Math.min(8, parseInt($("#set-voice-pocket_threads").value, 10) || 2)),
     },
   });
   $("#settings-panel").classList.add("hidden");

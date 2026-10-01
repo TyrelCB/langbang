@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import agent, config, mcp, runs, schedule, sfxgen, voice
+from . import agent, config, mcp, runs, schedule, sfxgen, ttsjobs, voice
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -41,6 +41,9 @@ async def _startup():
     schedule.start_loop()
     agent.start_sweeper()  # hourly: delete abandoned empty "New chat"s
     _prune_tts_cache()     # TTS disk cache is a replay aid, not an archive
+    # Pocket TTS active → load model + voice off the event loop now, so the
+    # first 🔊 after a restart doesn't wait ~7 s (no-op for other providers)
+    asyncio.get_running_loop().run_in_executor(None, voice.prewarm, config.load())
 
 
 @app.on_event("shutdown")
@@ -829,7 +832,10 @@ def _tts_key(clean: str, s: dict) -> str:
     tag = "|".join(
         str(v.get(k) or "")
         for k in ("tts_provider", "tts_lang", "tts_tld",
-                  "gcloud_key_file", "gcloud_tts_lang", "gcloud_tts_voice"))
+                  "gcloud_key_file", "gcloud_tts_lang", "gcloud_tts_voice")
+        # pocket knobs only for pocket: adding them unconditionally would
+        # re-key (orphan) every existing gTTS/gcloud cache entry
+        + (("pocket_voice", "pocket_language") if v.get("tts_provider") == "pocket" else ()))
     return hashlib.sha256(f"{clean}|{tag}".encode()).hexdigest()
 
 
@@ -856,6 +862,21 @@ async def tts(body: TTSIn):
         raise HTTPException(400, "nothing speakable in text")
     s = config.load()
     key = _tts_key(clean, s)
+    v = s.get("voice") or {}
+    if (v.get("tts_provider") or "gtts") == "pocket" and shutil.which("ffmpeg"):
+        # Streaming provider: answer with a URL the <audio> element plays
+        # progressively (speech starts in ~0.1 s). A cached clip is the same
+        # URL served as a seekable file. Load errors (model/voice) surface
+        # here as a readable 502 rather than a silent empty stream.
+        clip = f"/api/tts/clip/{key}.mp3"
+        if os.path.isfile(os.path.join(TTS_CACHE_DIR, key + ".mp3")):
+            return {"stream": clip, "cache": "hit"}
+        try:
+            await run_in_threadpool(voice.pocket_ready, v)
+        except RuntimeError as e:
+            raise HTTPException(502, str(e))
+        ttsjobs.start(key, clean, v, os.path.join(TTS_CACHE_DIR, key + ".mp3"))
+        return {"stream": clip, "cache": "miss"}
     path = next((os.path.join(TTS_CACHE_DIR, key + ext)
                  for ext in (".mp3", ".wav")
                  if os.path.isfile(os.path.join(TTS_CACHE_DIR, key + ext))), None)
@@ -885,6 +906,26 @@ async def tts(body: TTSIn):
             pass  # cache is best-effort; the audio still reaches the UI
     return Response(content=audio, media_type=mime,
                     headers={"Cache-Control": "no-store", "X-TTS-Cache": hit})
+
+
+_CLIP_RE = re.compile(r"^[0-9a-f]{64}\.mp3$")
+
+
+@app.get("/api/tts/clip/{name}")
+async def tts_clip(name: str):
+    """A Pocket TTS clip: the cached file (Range/206 → seekable) once
+    finished, else the live stream of its synthesis job (progressive MP3)."""
+    if not _CLIP_RE.match(name):
+        raise HTTPException(404, "no such clip")
+    path = os.path.join(TTS_CACHE_DIR, name)
+    if os.path.isfile(path):
+        return FileResponse(path, media_type="audio/mpeg",
+                            headers={"Cache-Control": "no-store", "X-TTS-Cache": "hit"})
+    job = ttsjobs.get(name[:-4])
+    if job is None:
+        raise HTTPException(404, "clip not cached and not being synthesized")
+    return StreamingResponse(job.follow(), media_type="audio/mpeg",
+                             headers={"Cache-Control": "no-store", "X-TTS-Cache": "stream"})
 
 
 @app.post("/api/stt")

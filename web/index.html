@@ -142,6 +142,7 @@
             <select id="set-voice-tts_provider">
               <option value="gtts">gtts — free, no key</option>
               <option value="gcloud">google cloud — key file</option>
+              <option value="pocket">pocket — local CPU (kyutai), streams</option>
             </select>
           </label>
           <label>TTS lang <input id="set-voice-tts_lang" type="text" placeholder="en"></label>
@@ -155,6 +156,19 @@
             </select>
           </label>
           <label>STT lang <input id="set-voice-stt_lang" type="text" placeholder="en-US"></label>
+        </div>
+        <div class="row">
+          <label>Pocket voice <input id="set-voice-pocket_voice" type="text" list="pocket-voices" autocomplete="off" spellcheck="false" placeholder="alba" title="27 presets in the list; or an absolute path to a .wav/.mp3 of a voice you have consent to clone (needs the gated weights: accept terms on huggingface.co/kyutai/pocket-tts + hf auth login)"></label>
+          <datalist id="pocket-voices"><option value="alba"></option><option value="anna"></option><option value="azelma"></option><option value="bill_boerst"></option><option value="caro_davy"></option><option value="charles"></option><option value="cosette"></option><option value="daan"></option><option value="eponine"></option><option value="estelle"></option><option value="eve"></option><option value="fantine"></option><option value="george"></option><option value="giovanni"></option><option value="jane"></option><option value="javert"></option><option value="jean"></option><option value="juergen"></option><option value="lola"></option><option value="marius"></option><option value="mary"></option><option value="michael"></option><option value="paul"></option><option value="peter_yearsley"></option><option value="rafael"></option><option value="stuart_bell"></option><option value="vera"></option></datalist>
+          <label>Pocket language
+            <select id="set-voice-pocket_language">
+              <option value="english">english</option><option value="french">french</option>
+              <option value="german">german</option><option value="spanish">spanish</option>
+              <option value="italian">italian</option><option value="portuguese">portuguese</option>
+              <option value="dutch">dutch</option>
+            </select>
+          </label>
+          <label>Pocket CPU threads <input id="set-voice-pocket_threads" type="number" min="1" max="8" step="1" title="2 benchmarked as fast as 4 or 8 on this box (~4.5x realtime)"></label>
         </div>
         <div class="row">
           <label>gcloud key file <input id="set-voice-gcloud_key_file" type="text" placeholder="data/keys/tts.json — blank = keyless providers only" size="38"></label>

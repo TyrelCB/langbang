@@ -89,7 +89,7 @@ DEFAULTS = {
     # occasional 429s possible; the "gcloud" providers (service-account key in
     # data/keys/, never committed) are the supported escape hatch.
     "voice": {
-        "tts_provider": "gtts",  # "gtts" | "gcloud"
+        "tts_provider": "gtts",  # "gtts" | "gcloud" | "pocket" (local CPU, kyutai)
         "tts_lang": "en",
         "tts_tld": "com",  # accent: com=US, co.uk=UK, co.in=IN
         "stt_provider": "sr",  # "sr" | "gcloud"
@@ -97,6 +97,12 @@ DEFAULTS = {
         "gcloud_key_file": "",  # e.g. "data/keys/tts.json"; blank = keyless
         "gcloud_tts_lang": "en-US",
         "gcloud_tts_voice": "en-US-Wavenet-J",
+        # Pocket TTS (kyutai, 100M params, CPU): preset voice name — or an
+        # absolute path to a .wav/.mp3 to clone (needs the gated weights:
+        # accept terms on huggingface.co/kyutai/pocket-tts + `hf auth login`)
+        "pocket_voice": "alba",
+        "pocket_language": "english",
+        "pocket_threads": 2,  # benchmarked: 2 = 4 = 8 on this i9 (~4.5x realtime)
     },
 }
 
@@ -106,6 +112,8 @@ def _backfill(merged: dict) -> dict:
     # was written — CONFIG builds its LOCAL TOOLS checkboxes from this dict,
     # so old files must still see the new tools (default: enabled)
     merged["local_tools"] = {**DEFAULTS["local_tools"], **(merged.get("local_tools") or {})}
+    # same for voice: new provider keys (pocket_*) must reach old files
+    merged["voice"] = {**DEFAULTS["voice"], **(merged.get("voice") or {})}
     return merged
 
 

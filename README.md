@@ -248,6 +248,23 @@ VOICE switches either direction to Google Cloud behind a service-account key
 (`uv sync --extra voice-gcloud`, key file dropped under `data/keys/` — that
 directory is gitignored; never commit keys).
 
+**Pocket TTS (local, CPU-only, streaming)** — CONFIG → VOICE → `pocket`:
+kyutai's 100M-param [pocket-tts](https://huggingface.co/kyutai/pocket-tts)
+runs inside the LangBang process on CPU torch (pinned to PyTorch's CPU wheel
+index in `pyproject.toml` — no CUDA download). 27 preset voices (alba, eve,
+marius, …), English plus French/German/Spanish/Italian/Portuguese/Dutch.
+Measured on this box (i9-12900HK): model load ~6 s (prewarmed at startup
+when it's the active provider), **first audio ~0.2 s**, ~4.5x realtime,
+2 threads as fast as 8, ~1.3 GB RSS. 🔊 doesn't wait for the whole reply:
+`POST /api/tts` returns a clip URL and the bubble's `<audio>` plays the MP3
+while it's generated (`server/ttsjobs.py`: model → ffmpeg → followers); the
+finished stream becomes the `data/tts/` cache file, so replays are instant
+and seekable. STOP on a long reply cancels the synthesis after ~20 s without
+a listener. Preset voices need no Hugging Face account; a custom voice file
+(cloning — only voices you have consent for) needs kyutai's gated weights:
+accept the terms on the model page, `.venv/bin/hf auth login`, restart.
+Needs `ffmpeg` on PATH for streaming (falls back to whole-clip WAV).
+
 The mic/voice-chat half is **ready server-side but not wired client-side**:
 `POST /api/stt` takes 16 kHz mono PCM16 WAV (or bare PCM) and returns text.
 Browser recording needs a secure context, so on `http://<LAN-IP>` (or

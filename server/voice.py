@@ -15,6 +15,7 @@ RuntimeError = provider/config trouble (missing key/lib, quota, network -> 502).
 import io
 import os
 import re
+import threading
 import wave
 
 MAX_TTS_CHARS = 20_000
@@ -67,6 +68,8 @@ def synthesize(text: str, cfg: dict) -> tuple[bytes, str]:
     provider = v.get("tts_provider") or "gtts"
     if provider == "gcloud":
         return _synthesize_gcloud(text, v)
+    if provider == "pocket":
+        return _synthesize_pocket_wav(text, v)
     return _synthesize_gtts(text, v)
 
 
@@ -117,6 +120,106 @@ def _synthesize_gcloud(text: str, v: dict) -> tuple[bytes, str]:
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"Google Cloud TTS failed ({e}) — check key file / voice name") from e
     return audio.audio_content, "audio/mpeg"
+
+
+# ---- Pocket TTS (kyutai/pocket-tts): local, CPU-only ----
+# 100M-param model; benchmarked on this box (i9-12900HK): first audio in
+# ~0.1 s, ~4-5x realtime, no gain past 2 threads, ~1.3 GB RSS once loaded.
+# Preset voices load from kyutai's UNGATED no-cloning weights (no HF token);
+# a custom voice file needs the gated repo (terms + `hf auth login`).
+# Streaming lives in ttsjobs.py; this module owns the model.
+POCKET_VOICES = (
+    "alba", "anna", "azelma", "bill_boerst", "caro_davy", "charles", "cosette",
+    "daan", "eponine", "estelle", "eve", "fantine", "george", "giovanni", "jane",
+    "javert", "jean", "juergen", "lola", "marius", "mary", "michael", "paul",
+    "peter_yearsley", "rafael", "stuart_bell", "vera",
+)
+POCKET_LANGS = ("english", "french", "german", "portuguese", "italian", "spanish", "dutch")
+POCKET_RATE = 24_000  # model.sample_rate (mimi); asserted at load
+_pk_load = threading.Lock()  # model/voice loading
+_pk_gen = threading.Lock()   # ONE generation at a time: the model is documented not thread-safe
+_pk_models: dict = {}
+_pk_states: dict = {}
+_POCKET_GATED_HINT = (
+    "custom voice files need Pocket TTS's gated weights: accept the terms at "
+    "https://huggingface.co/kyutai/pocket-tts, run `.venv/bin/hf auth login`, "
+    "then restart LangBang — or pick a preset voice in CONFIG → VOICE")
+
+
+def pocket_ready(v: dict):
+    """(model, voice_state) for the configured language/voice, loading and
+    caching on first use (~6 s model, ~0.6 s voice). RuntimeError -> 502."""
+    try:
+        import torch
+        from pocket_tts import TTSModel
+    except ImportError as e:
+        raise RuntimeError("pocket-tts not installed — run: uv add pocket-tts") from e
+    torch.set_num_threads(max(1, int(v.get("pocket_threads") or 2)))
+    lang = v.get("pocket_language") or "english"
+    if lang not in POCKET_LANGS:
+        raise RuntimeError(f"unknown Pocket TTS language {lang!r} (one of: {', '.join(POCKET_LANGS)})")
+    voice = (v.get("pocket_voice") or "alba").strip()
+    with _pk_load:
+        model = _pk_models.get(lang)
+        if model is None:
+            try:
+                model = TTSModel.load_model(language=lang)
+            except Exception as e:  # noqa: BLE001 - download/HF trouble, readable
+                raise RuntimeError(f"Pocket TTS model load failed ({type(e).__name__}: {e})") from e
+            if model.sample_rate != POCKET_RATE:
+                raise RuntimeError(f"unexpected Pocket TTS sample rate {model.sample_rate}")
+            _pk_models[lang] = model
+        st = _pk_states.get((lang, voice))
+        if st is None:
+            if voice not in POCKET_VOICES:
+                path = os.path.expanduser(voice)
+                if not os.path.isfile(path):
+                    raise RuntimeError(f"Pocket TTS voice {voice!r} is neither a preset nor an existing audio file")
+                if not getattr(model, "has_voice_cloning", False):
+                    raise RuntimeError(_POCKET_GATED_HINT)
+                voice = path
+            try:
+                st = model.get_state_for_audio_prompt(voice)
+            except Exception as e:  # noqa: BLE001
+                raise RuntimeError(f"Pocket TTS voice load failed ({type(e).__name__}: {e})") from e
+            _pk_states[(lang, (v.get("pocket_voice") or "alba").strip())] = st
+    return model, st
+
+
+def pocket_pcm(text: str, v: dict, stop: threading.Event | None = None):
+    """Yield mono PCM16 little-endian @ POCKET_RATE as it's generated. Holds
+    the generation lock for the whole utterance (callers queue behind it)."""
+    import torch
+
+    model, st = pocket_ready(v)
+    with _pk_gen:
+        for ch in model.generate_audio_stream(st, text, stop=stop):  # copy_state=True: voice reusable
+            yield (ch.clamp(-1, 1) * 32767).to(torch.int16).numpy().tobytes()
+
+
+def _synthesize_pocket_wav(text: str, v: dict) -> tuple[bytes, str]:
+    """Whole-clip WAV — the no-ffmpeg fallback (main.py streams MP3 otherwise)."""
+    pcm = b"".join(pocket_pcm(text, v))
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(POCKET_RATE)
+        w.writeframes(pcm)
+    return buf.getvalue(), "audio/wav"
+
+
+def prewarm(cfg: dict) -> None:
+    """Load the model + voice in the background at startup when Pocket is
+    the active provider, so the first 🔊 doesn't pay ~7 s of loading."""
+    v = _voice_cfg(cfg)
+    if (v.get("tts_provider") or "gtts") != "pocket":
+        return
+    try:
+        pocket_ready(v)
+    except Exception as e:  # noqa: BLE001 - surfaced again on first real use
+        import logging
+        logging.getLogger("langbang.voice").warning("pocket prewarm failed: %s", e)
 
 
 def transcribe(data: bytes, cfg: dict) -> str:
