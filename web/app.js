@@ -324,7 +324,13 @@ function addBlock(kind, label, host) {
   return d;
 }
 
+// renderHistory sets this: every addMsg/addBlock calls scrollBottom(), and
+// each call reads scrollHeight = a forced synchronous layout of the whole
+// growing #chat — O(n) layouts per thread open (~650 ms of a 1 s switch on a
+// 100-message thread). Bulk renders scroll ONCE at the end instead.
+let bulkRender = false;
 function scrollBottom() {
+  if (bulkRender) return;
   // sticky: stream appends only follow while the user is parked at the
   // bottom — scrolling up pins the view (and raises the jump pill)
   const c = $("#chat");
@@ -398,6 +404,12 @@ function runChip(s) {
 }
 
 function renderHistory(msgs) {
+  bulkRender = true;
+  try { renderHistoryInner(msgs); } finally { bulkRender = false; }
+  scrollBottom();
+}
+
+function renderHistoryInner(msgs) {
   $("#chat").innerHTML = "";
   $("#chat")._pinned = true; // opening a thread always shows its newest message
   // run provenance: a scheduled firing's segment = the stamped prompt up to
@@ -454,6 +466,16 @@ function renderHistory(msgs) {
         gate ? "◆ YOUR ANSWER" : `⚙ ${m.tool_name} result`);
       b.querySelector("pre").textContent = textOf(m.content).slice(0, 20000);
       if (gate) b.open = true;
+      // what the agent LOOKED at (server strips the base64 — see _slim):
+      // lazy, and a closed <details> never fetches it until opened
+      for (const md of m.media || []) {
+        if (!/^image\//.test(md.mime || "")) continue;
+        const img = el("img", "tool-media");
+        img.loading = "lazy";
+        img.src = "/api/media?path=" + encodeURIComponent(md.path);
+        img.title = md.path;
+        b.appendChild(img);
+      }
     }
   }
 }

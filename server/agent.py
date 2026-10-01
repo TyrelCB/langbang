@@ -1251,15 +1251,55 @@ async def _live_messages(thread_id: str) -> list:
     return list(msgs or [])
 
 
+_MEDIA_BLOCKS = {"image", "audio", "video", "file"}
+
+
+def _slim(d: dict) -> dict:
+    """Strip binary payloads from a TOOL result before it goes to the UI.
+
+    read_file on an image returns the whole base64 file as a content block;
+    the chat card only ever renders text (blocks showed as empty), yet the
+    UI downloaded every byte on each thread open — 57 MB for one thread of
+    screenshot checks, 99.6 % of its transcript. Each block becomes a short
+    note plus a `media` entry ({path, mime}) the card can show lazily via
+    /api/media. Human messages keep their images (the user's own pastes)."""
+    if d.get("role") != "tool" or not isinstance(d.get("content"), list):
+        return d
+    path = d.pop("read_file_path", None)
+    content, media = [], []
+    for b in d["content"]:
+        if isinstance(b, dict) and b.get("type") in _MEDIA_BLOCKS:
+            mime = b.get("mime_type") or b.get("type")
+            n = len(b.get("base64") or b.get("data") or "") * 3 // 4
+            content.append({"type": "text",
+                            "text": f"[{b['type']} {mime}, {n / 1e6:.1f} MB"
+                                    + (f": {path}" if path else "") + " — shown to the model]"})
+            if path:
+                media.append({"path": path, "mime": mime})
+        elif isinstance(b, dict) and b.get("type") == "image_url":
+            content.append({"type": "text", "text": "[image — shown to the model]"})
+        else:
+            content.append(b)
+    out = {**d, "content": content}
+    if media:
+        out["media"] = media
+    return out
+
+
 async def history(thread_id: str) -> list:
-    live = [_msg_dict(m) for m in await _live_messages(thread_id)]
+    live = []
+    for m in await _live_messages(thread_id):
+        d = _msg_dict(m)
+        if isinstance(m, ToolMessage) and (m.additional_kwargs or {}).get("read_file_path"):
+            d["read_file_path"] = m.additional_kwargs["read_file_path"]
+        live.append(_slim(d))
     # Pre-compaction originals were dropped from graph state; replay them so
     # the UI still shows the full transcript while the model sees the summary.
     cur = await _db.execute(
         "SELECT msg FROM archived_messages WHERE thread_id=? ORDER BY seq",
         (thread_id,),
     )
-    archived = [json.loads(r[0]) for r in await cur.fetchall()]
+    archived = [_slim(json.loads(r[0])) for r in await cur.fetchall()]
     return archived + live
 
 
@@ -1448,24 +1488,41 @@ def prompt_overhead_tokens() -> int:
     return count_tokens_approximately([SystemMessage(content=p)])
 
 
+# tid -> (latest checkpoint_id, ctx tokens w/o prompt overhead, n_msgs, chars)
+_thread_stats: dict[str, tuple] = {}
+
+
 async def list_threads() -> list:
+    """Sidebar rows. The per-thread numbers need the LIVE graph state
+    (_live_messages = aget_state + delta replay) — ~1.2 s for all 68 threads,
+    and the UI polls this every 4 s per open tab, which kept the event loop
+    and DB busy exactly when a thread switch needed /messages. Now cached
+    per thread, keyed by its newest checkpoint_id (every superstep / compaction
+    writes a new one), so only threads that actually changed are recomputed."""
     cur = await _db.execute("SELECT id,title,created_at,updated_at,orig FROM threads ORDER BY updated_at DESC")
     rows = await cur.fetchall()
+    cur = await _db.execute(
+        "SELECT thread_id, MAX(checkpoint_id) FROM checkpoints "
+        "WHERE checkpoint_ns='' GROUP BY thread_id")
+    latest = dict(await cur.fetchall())
     base = prompt_overhead_tokens()
     out = []
     for r in rows:
-        # What the *next* model call would replay: live graph state (post-
-        # compaction), not the full archived transcript the UI shows.
-        # _live_messages also reconstructs delta-stored messages (deep mode).
-        msgs = await _live_messages(r[0])
-        ctx = base + count_tokens_approximately(msgs)
+        key = latest.get(r[0])
+        hit = _thread_stats.get(r[0])
+        if not hit or hit[0] != key:
+            # What the *next* model call would replay: live graph state (post-
+            # compaction), not the full archived transcript the UI shows.
+            msgs = await _live_messages(r[0])
+            hit = (key, count_tokens_approximately(msgs), len(msgs),
+                   sum(len(str(getattr(m, "content", "") or "")) for m in msgs))
+            _thread_stats[r[0]] = hit
         out.append(
             {"id": r[0], "title": r[1], "created_at": r[2], "updated_at": r[3],
-             "context_tokens": ctx, "orig": r[4],
+             "context_tokens": base + hit[1], "orig": r[4],
              # cheap content signal the sidebar uses to decide whether the ✕
              # needs a confirm click (see web/app.js refreshThreads)
-             "n_msgs": len(msgs),
-             "chars": sum(len(str(getattr(m, "content", "") or "")) for m in msgs)}
+             "n_msgs": hit[2], "chars": hit[3]}
         )
     return out
 
@@ -2014,6 +2071,8 @@ def _tool_text(out):
         out = out.content
     if isinstance(out, list):  # content blocks
         out = "\n".join(
-            b.get("text", "") if isinstance(b, dict) else str(b) for b in out
+            (b.get("text", "") or (f"[{b.get('type')} — shown to the model]"
+                                    if b.get("type") in _MEDIA_BLOCKS else ""))
+            if isinstance(b, dict) else str(b) for b in out
         )
     return _safe(out)

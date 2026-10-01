@@ -741,3 +741,6 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
 .traj-meta-wrap > .traj-copy { visibility: visible; position: absolute; top: 6px; right: 6px;
   background: var(--panel); }
 @media (hover: none) { .traj-copy { visibility: visible; } }
+/* image a read_file result showed the model (history cards; lazy) */
+.block .tool-media { display: block; max-width: min(100%, 360px); max-height: 240px;
+  margin: 6px 0 2px; border: 1px solid var(--line); }
