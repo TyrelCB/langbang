@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import agent, config, mcp, runs, schedule, sfxgen, ttsjobs, voice
+from . import agent, config, mcp, notify, runs, schedule, sfxgen, ttsjobs, voice
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -246,18 +246,21 @@ async def recap_thread(tid: str):
 class SchedIn(BaseModel):
     title: str
     prompt: str
-    cron: str
+    cron: str = ""                # repeating: 5-field cron …
+    run_at: float | None = None   # … or one-off: epoch seconds
 
 
 class SchedPatch(BaseModel):
     title: str | None = None
     prompt: str | None = None
     cron: str | None = None
+    run_at: float | None = None
     enabled: bool | None = None
 
 
 def _sched_view(row: dict) -> dict:
-    return {**row, "human": schedule.humanize(row["cron"])}
+    return {**row, "human": schedule.describe(row),
+            "expires_at": (row["done_at"] + schedule.ONEOFF_KEEP_S) if row.get("done_at") else None}
 
 
 @app.get("/api/schedules")
@@ -274,7 +277,7 @@ async def schedule_next(cron: str = ""):
 @app.post("/api/schedules")
 async def new_schedule(body: SchedIn):
     try:
-        row = await schedule.create(body.title, body.prompt, body.cron)
+        row = await schedule.create(body.title, body.prompt, body.cron, body.run_at)
     except ValueError as e:
         raise HTTPException(422, str(e))
     return _sched_view(row)
@@ -776,9 +779,50 @@ async def thread_cancel(tid: str):
 
 
 @app.get("/api/runs")
-async def list_runs():
-    """Active runs (interactive AND scheduler-fired) → sidebar indicators."""
+async def list_runs(tab: str = "", view: str = "", vis: int = 0):
+    """Active runs (interactive AND scheduler-fired) → sidebar indicators.
+    The same 4 s poll reports which thread this tab shows and whether the
+    tab is visible — notify.watching() uses it to skip phone pushes for a
+    run you're looking at."""
+    notify.touch(tab, view, bool(vis))
     return runs.active_map()
+
+
+# ---- notifications ----
+
+@app.get("/api/notify/events")
+async def notify_events(since: int = -1):
+    """Run events for the tabs' toasts/desktop notifications. since=-1 (a
+    fresh tab) returns only the cursor — no backlog of old alerts."""
+    if since < 0:
+        return {"last": notify.since(0)["last"], "events": []}
+    return notify.since(since)
+
+
+@app.post("/api/notify/test")
+async def notify_test(request: Request):
+    """CONFIG → NOTIFICATIONS ▶ SEND TEST: one push with the form's current
+    values (no SAVE needed), falling back to the saved settings."""
+    s = notify.settings()
+    try:
+        form = await request.json()
+    except Exception:  # noqa: BLE001 - empty body = saved settings
+        form = None
+    if isinstance(form, dict):
+        s = {**s, **{k: form[k] for k in ("ntfy_server", "ntfy_topic", "preview", "click_base") if k in form}}
+    if not s.get("ntfy_topic"):
+        raise HTTPException(400, "no ntfy topic yet — tick “send pushes” to get one")
+    out = await notify.send_ntfy({"kind": "done", "tid": "", "title": "LangBang",
+                                  "text": "Test notification — phone push works."}, s)
+    if not out["ok"]:
+        raise HTTPException(502, out["error"])
+    return out
+
+
+@app.get("/api/notify/topic")
+async def notify_topic():
+    """A fresh random topic for the CONFIG form (the topic name is the secret)."""
+    return {"topic": notify.new_topic()}
 
 
 # ---- shell mode (`!cmd` from the chat box) ----

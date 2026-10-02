@@ -23,7 +23,7 @@ import json
 import time
 from typing import AsyncIterator
 
-from . import agent
+from . import agent, notify
 
 MAX_ACTIVE = 4       # concurrent runs across ALL threads (shared Spark)
 GRACE = 300.0        # seconds a finished hub lingers for late reopen/replay
@@ -131,6 +131,9 @@ async def _produce(hub: Hub, events: AsyncIterator[dict]) -> None:
             )
         except Exception:  # noqa: BLE001
             pass
+    # needs-input / done / failed → open tabs' feed + phone push when nobody
+    # is watching this thread (a user STOP takes the cancel arm above: no event)
+    agent._spawn(notify.run_finished(hub.tid, list(hub.events)))
     await hub.finish()
     # run's generator is exhausted → every checkpoint put has committed, and
     # this thread just left the active set → cheap moment to bound the tables

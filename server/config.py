@@ -104,6 +104,16 @@ DEFAULTS = {
         "pocket_language": "english",
         "pocket_threads": 2,  # benchmarked: 2 = 4 = 8 on this i9 (~4.5x realtime)
     },
+    # Notifications (server/notify.py): phone push via ntfy for runs that
+    # need input / finished / failed while nobody watches that thread.
+    "notify": {
+        "ntfy_enabled": False,
+        "ntfy_server": "https://ntfy.sh",
+        "ntfy_topic": "",
+        "events": {"input": True, "done": True, "failed": True},
+        "preview": True,
+        "click_base": "",
+    },
 }
 
 
@@ -114,6 +124,7 @@ def _backfill(merged: dict) -> dict:
     merged["local_tools"] = {**DEFAULTS["local_tools"], **(merged.get("local_tools") or {})}
     # same for voice: new provider keys (pocket_*) must reach old files
     merged["voice"] = {**DEFAULTS["voice"], **(merged.get("voice") or {})}
+    merged["notify"] = {**DEFAULTS["notify"], **(merged.get("notify") or {})}
     return merged
 
 

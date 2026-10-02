@@ -197,6 +197,44 @@
           <label>gcloud TTS voice <input id="set-voice-gcloud_tts_voice" type="text" placeholder="en-US-Wavenet-J"></label>
         </div>
       </section>
+      <section class="cfg-card wide" id="cfg-notify">
+        <h3>NOTIFICATIONS</h3>
+        <div class="hint">When a run needs you, finishes or fails and you're not looking at that thread (another thread, a hidden tab, a scheduled run at night): every open tab shows a toast + <b>(n)</b> title badge, desktop popups if this browser allows them, and your phone gets a push. Pushes are skipped while a visible tab is showing that thread.</div>
+        <div class="tools-box col">
+          <label class="chk"><input type="checkbox" id="set-notify-ev-input"> agent needs your input — a question or a plan to approve (the run is paused)</label>
+          <label class="chk"><input type="checkbox" id="set-notify-ev-done"> run finished (chat, scheduled, or !cmd)</label>
+          <label class="chk"><input type="checkbox" id="set-notify-ev-failed"> run failed (errors, budget exhausted, non-zero !cmd)</label>
+        </div>
+        <div class="group-label">PHONE PUSH — NTFY</div>
+        <div class="tools-box col">
+          <label class="chk"><input type="checkbox" id="set-notify-ntfy_enabled"> send pushes via ntfy (free app: Android / iOS / desktop)</label>
+        </div>
+        <div class="row">
+          <label>ntfy server <input id="set-notify-ntfy_server" type="text" autocomplete="off" spellcheck="false" placeholder="https://ntfy.sh"></label>
+          <label>Topic — keep it secret, it's the only key
+            <span class="pv-row">
+              <input id="set-notify-ntfy_topic" type="text" autocomplete="off" spellcheck="false">
+              <button id="btn-ntfy-topic" class="btn ghost sm" type="button" title="new random topic">↻</button>
+            </span>
+          </label>
+        </div>
+        <div class="row">
+          <label>Tap opens <input id="set-notify-click_base" type="text" autocomplete="off" spellcheck="false" placeholder="http://192.168.6.185 — LangBang URL as your phone reaches it"></label>
+        </div>
+        <div class="tools-box col">
+          <label class="chk"><input type="checkbox" id="set-notify-preview"> include the first lines of the answer (they pass through the ntfy server — self-host ntfy to keep them on your network)</label>
+        </div>
+        <div class="hint" id="ntfy-howto"></div>
+        <div class="row">
+          <button id="btn-ntfy-test" class="btn ghost sm" type="button">▶ SEND TEST PUSH</button>
+          <span id="ntfy-status" class="pv-status"></span>
+        </div>
+        <div class="group-label">DESKTOP POPUPS — THIS BROWSER</div>
+        <div class="row">
+          <button id="btn-desk-notify" class="btn ghost sm" type="button">ENABLE</button>
+          <span id="desk-status" class="pv-status"></span>
+        </div>
+      </section>
       <section class="cfg-card wide">
         <h3>MCP SERVERS</h3>
         <div id="mcp-list"></div>
@@ -263,8 +301,19 @@
         <h3 id="sched-editor-title">NEW TASK</h3>
         <label>Title <input id="sched-title" type="text" placeholder="Morning news" autocomplete="off"></label>
         <label>Prompt — sent to the agent on every run <textarea id="sched-prompt" rows="3" placeholder="Pull world headlines, summarize into 5 bullets, save as a note."></textarea></label>
-        <label>Cron <input id="sched-cron" type="text" placeholder="0 9 * * *" autocomplete="off" spellcheck="false"></label>
-        <div id="sched-chips"></div>
+        <div class="sched-kind" role="group" aria-label="repeat or once">
+          <button id="sched-kind-repeat" class="chip on" type="button">↻ REPEATING</button>
+          <button id="sched-kind-once" class="chip" type="button">① ONCE</button>
+        </div>
+        <div id="sched-repeat-rows">
+          <label>Cron <input id="sched-cron" type="text" placeholder="0 9 * * *" autocomplete="off" spellcheck="false"></label>
+          <div id="sched-chips"></div>
+        </div>
+        <div id="sched-once-rows" class="hidden">
+          <label>Run once at <input id="sched-at" type="datetime-local"></label>
+          <div id="sched-once-chips"></div>
+          <div class="hint">After it runs it shows as ✓ DONE for a day, then leaves this list — its thread keeps the result.</div>
+        </div>
         <div id="sched-preview" class="sched-preview"></div>
       </section>
       <div class="row end">
@@ -333,6 +382,9 @@
       </div>
     </div>
   </div>
+
+  <!-- run notifications (outside #chat: search-jump keys off its children) -->
+  <div id="toasts" aria-live="polite"></div>
 
   <div id="game-overlay" class="hidden">
     <div id="game-frame">

@@ -50,12 +50,16 @@ but built on the LangChain/LangGraph ecosystem:
   command on the server (same shell + output cap as `run_bash`) **without
   spending a model call** — the exchange is appended to the thread, so the
   agent sees the output on its next turn (Claude Code's `!cmd`, same idea)
-- **Scheduled tasks** (⏰ SCHEDULES): cron-driven agent turns that run with no
-  client — each task owns a dedicated thread where every firing posts its
+- **Scheduled tasks** (⏰ SCHEDULES): repeating (5-field cron) or **one-off**
+  ("run once at…" — date-time picker + quick chips; the agent's
+  `create_scheduled_task(run_at="YYYY-MM-DD HH:MM")` handles "remind me at 3pm")
+  agent turns that run with no client; a fired one-off shows ✓ DONE for 24 h,
+  then leaves the list while its thread keeps the result (a one-off missed while
+  the server was down fires late on startup). Each task owns a dedicated thread where every firing posts its
   prompt as a real user turn, so run history accumulates and the agent's
   context carries over between runs. Editor: 5-field cron + preset chips +
   live preview (`GET /api/schedules/next`). Runs are serialized one at a time;
-  fires missed while the server was down are skipped, never replayed;
+  repeating fires missed while the server was down are skipped, never replayed;
   "▶ RUN" fires one off without shifting the cron rhythm. Each run's user
   bubble carries a `⏰ SCHEDULED RUN · … · YYYY-MM-DD HH:MM:SS` stamp (UI-only,
   stored as message kwargs) so you can tell which output came from which run.
@@ -63,6 +67,17 @@ but built on the LangChain/LangGraph ecosystem:
   tools (`create/list/update/set_scheduled_task_enabled/run_scheduled_task_now/
   delete_scheduled_task` in CONFIG → LOCAL TOOLS), so "check X every 4 hours"
   said in chat becomes a real LangBang schedule — not crontab improvisation.
+- **Notifications** (`server/notify.py`, CONFIG → NOTIFICATIONS): when a
+  run **needs your input** (ask_user / plan), **finishes**, or **fails** —
+  chat, scheduled or `!cmd` — and you're not looking at that thread: every
+  open tab shows a toast (click opens the thread) and a `(n)` title badge,
+  desktop popups fire where the browser allows them (https or
+  `http://localhost` only — enable per browser), and your phone gets a
+  **ntfy** push (free app; private random topic; tap opens the thread via
+  the "tap opens" URL). Pushes are skipped while a visible tab shows that
+  thread (tabs report presence on the 4 s runs poll). A STOP you pressed
+  isn't an event. Preview text passes through the ntfy server — self-host
+  ntfy or untick previews to keep it on your network.
 - **Detached runs** (`server/runs.py`): every run — chat turn, `!cmd`, or
   scheduled firing — belongs to a server-side hub, not to a browser tab. A
   dropped connection (phone screen timeout, app switch, refresh, proxy blip)

@@ -8,6 +8,13 @@ const el = (tag, cls, txt) => {
 };
 
 let threadId = null;
+const TAB_ID = (() => {
+  try {
+    let t = sessionStorage.getItem("lb-tab");
+    if (!t) { t = Math.random().toString(36).slice(2, 12); sessionStorage.setItem("lb-tab", t); }
+    return t;
+  } catch { return Math.random().toString(36).slice(2, 12); }
+})();
 let threads = [];
 let supportsVision = false;
 let pendingImages = []; // data URLs awaiting send
@@ -116,7 +123,12 @@ const api = {
   async cronNext(cron) {
     return J(await fetch("/api/schedules/next?cron=" + encodeURIComponent(cron)));
   },
-  async runs() { return J(await fetch("/api/runs")); },
+  // presence rides the runs poll: notify.watching() skips phone pushes for
+  // a thread a visible tab is showing (see server/notify.py)
+  async runs() {
+    return J(await fetch(`/api/runs?tab=${TAB_ID}&view=${encodeURIComponent(threadId || "")}` +
+                         `&vis=${document.hidden ? 0 : 1}`));
+  },
   async cancelThread(id) {
     return J(await fetch("/api/threads/" + id + "/cancel", { method: "POST" }));
   },
@@ -970,6 +982,7 @@ async function pollRuns() {
     attachRun(threadId, 0); // scheduler run / other tab / post-reload
   }
   refreshThreads(); // repaint the ◉ running dots
+  pollNotify();
 }
 
 let chargeT = null; // X-buster: STOP charges while a run is live
@@ -2108,6 +2121,7 @@ async function openSettings() {
   $("#set-skills_enabled").checked = !!s.skills_enabled;
   loadedVoice = { ...DEFAULT_VOICE, ...(s.voice || {}) };
   await pvLoad(loadedVoice.pocket_voice); // options must exist before .value is set
+  notifyLoadForm(s.notify || {});
   for (const k of Object.keys(DEFAULT_VOICE))
     $("#set-voice-" + k).value = loadedVoice[k];
   $("#cfg-confirm").classList.add("hidden");
@@ -2161,6 +2175,7 @@ async function saveSettings() {
       pocket_language: $("#set-voice-pocket_language").value || "english",
       pocket_threads: Math.max(1, Math.min(8, parseInt($("#set-voice-pocket_threads").value, 10) || 2)),
     },
+    notify: notifyForm(),
   });
   $("#settings-panel").classList.add("hidden");
   cfgBase = null;  // the save closed the draft; next openSettings re-snapshots
@@ -2638,6 +2653,23 @@ const SCHED_PRESETS = [
   ["0 9 * * 1-5", "weekdays 9:00"], ["0 9 * * 1", "mondays 9:00"],
 ];
 let schedEditing = null; // null = creating; id = editing that task
+let schedKind = "repeat"; // "repeat" (cron) | "once" (run_at)
+// <input type=datetime-local> speaks local "YYYY-MM-DDTHH:MM"
+const toLocalInput = (ts) => {
+  const d = new Date(ts * 1000), p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+const fromLocalInput = (v) => (v ? new Date(v).getTime() / 1000 : null);
+function schedSetKind(kind) {
+  schedKind = kind;
+  $("#sched-kind-repeat").classList.toggle("on", kind === "repeat");
+  $("#sched-kind-once").classList.toggle("on", kind === "once");
+  $("#sched-repeat-rows").classList.toggle("hidden", kind !== "repeat");
+  $("#sched-once-rows").classList.toggle("hidden", kind !== "once");
+  if (kind === "once" && !$("#sched-at").value)
+    $("#sched-at").value = toLocalInput(Math.ceil(Date.now() / 3600000) * 3600 + 3600); // next full hour +1h
+  schedPreviewNow();
+}
 let schedTimer = null; // panel-open poll: RUNNING badge / next_run stay live
 let schedPrevT = null;
 
@@ -2678,21 +2710,25 @@ async function refreshSchedules() {
       openThread(threads.find((x) => x.id === s.thread_id) || { id: s.thread_id, title: s.title });
     };
     head.appendChild(title);
-    const enLab = el("label", "sched-en");
-    const en = document.createElement("input");
-    en.type = "checkbox";
-    en.checked = !!s.enabled;
-    en.onchange = async () => { await api.putSchedule(s.id, { enabled: en.checked }); refreshSchedules(); };
-    enLab.append(en, document.createTextNode(" enabled"));
-    head.appendChild(enLab);
+    if (s.done_at) {
+      head.appendChild(el("span", "sched-done", "✓ DONE"));
+    } else {
+      const enLab = el("label", "sched-en");
+      const en = document.createElement("input");
+      en.type = "checkbox";
+      en.checked = !!s.enabled;
+      en.onchange = async () => { await api.putSchedule(s.id, { enabled: en.checked }); refreshSchedules(); };
+      enLab.append(en, document.createTextNode(" enabled"));
+      head.appendChild(enLab);
+    }
     card.appendChild(head);
 
-    card.appendChild(el("div", "sched-sub", "⏰ " + s.human + "  ·  " + s.cron));
+    card.appendChild(el("div", "sched-sub", (s.cron ? "⏰ " : "① ") + s.human + (s.cron ? "  ·  " + s.cron : "")));
     card.appendChild(
       el("div", "sched-sub dim",
          (s.running ? "◉ RUNNING · " : "") +
-         (s.enabled ? "next " + schedWhen(s.next_run) : "paused") +
-         " · last " + schedWhen(s.last_run)));
+         (s.done_at ? "ran " + schedWhen(s.last_run) + " · leaves this list " + schedWhen(s.expires_at)
+          : (s.enabled ? "next " + schedWhen(s.next_run) : "paused") + " · last " + schedWhen(s.last_run))));
 
     const act = el("div", "sched-actions");
     const run = el("button", "btn ghost sm", "▶ RUN");
@@ -2727,9 +2763,11 @@ function schedEdit(s) {
   $("#sched-editor-title").textContent = "EDIT TASK";
   $("#sched-title").value = s.title;
   $("#sched-prompt").value = s.prompt;
-  $("#sched-cron").value = s.cron;
+  $("#sched-cron").value = s.cron || "";
+  // a DONE one-off opens with a fresh time: saving re-arms it
+  $("#sched-at").value = s.run_at && !s.done_at ? toLocalInput(s.run_at) : "";
   schedShowEditor(true);
-  schedPreviewNow();
+  schedSetKind(s.cron ? "repeat" : "once");
   $("#sched-editor").scrollIntoView({ block: "nearest" });
 }
 
@@ -2740,7 +2778,9 @@ function schedNew() {
   $("#sched-title").value = "";
   $("#sched-prompt").value = "";
   $("#sched-cron").value = "";
+  $("#sched-at").value = "";
   $("#sched-preview").textContent = "";
+  schedSetKind("repeat");
   schedShowEditor(true);
   $("#sched-title").focus();
 }
@@ -2748,13 +2788,11 @@ function schedNew() {
 async function saveScheduleTask() {
   const err = $("#sched-error");
   err.classList.add("hidden");
-  const body = {
-    title: $("#sched-title").value.trim(),
-    prompt: $("#sched-prompt").value.trim(),
-    cron: $("#sched-cron").value.trim(),
-  };
-  if (!body.title || !body.prompt || !body.cron) {
-    err.textContent = "Title, prompt and cron are all required.";
+  const body = { title: $("#sched-title").value.trim(), prompt: $("#sched-prompt").value.trim() };
+  if (schedKind === "once") body.run_at = fromLocalInput($("#sched-at").value);
+  else body.cron = $("#sched-cron").value.trim();
+  if (!body.title || !body.prompt || !(body.cron || body.run_at)) {
+    err.textContent = "Title, prompt and " + (schedKind === "once" ? "a date/time" : "a cron cadence") + " are all required.";
     err.classList.remove("hidden");
     return;
   }
@@ -2774,6 +2812,16 @@ async function schedPreviewNow() {
   const cron = $("#sched-cron").value.trim();
   const pv = $("#sched-preview");
   clearTimeout(schedPrevT);
+  if (schedKind === "once") {
+    const at = fromLocalInput($("#sched-at").value);
+    if (!at) { pv.textContent = ""; pv.classList.remove("bad"); return; }
+    const mins = Math.round((at - Date.now() / 1000) / 60);
+    const bad = mins < -1;
+    const rel = mins < 60 ? `${mins} min` : mins < 2880 ? `${Math.floor(mins / 60)} h ${mins % 60} min` : `${Math.round(mins / 1440)} days`;
+    pv.textContent = bad ? "✕ that time is in the past" : `☑ once at ${schedWhen(at)} · in ${rel}`;
+    pv.classList.toggle("bad", bad);
+    return;
+  }
   if (!cron) { pv.textContent = ""; pv.classList.remove("bad"); return; }
   const r = await api.cronNext(cron);
   if (!r.ok) {
@@ -2795,6 +2843,21 @@ for (const [cron, label] of SCHED_PRESETS) {
   };
   $("#sched-chips").appendChild(b);
 }
+$("#sched-kind-repeat").onclick = () => { SFX.play("click"); schedSetKind("repeat"); };
+$("#sched-kind-once").onclick = () => { SFX.play("click"); schedSetKind("once"); };
+$("#sched-at").addEventListener("input", schedPreviewNow);
+for (const [mins, label] of [[30, "in 30 min"], [60, "in 1 h"], [180, "in 3 h"], ["tm9", "tomorrow 9:00"]]) {
+  const b = el("button", "chip", label);
+  b.onclick = () => {
+    SFX.play("click");
+    let ts;
+    if (mins === "tm9") { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0); ts = d.getTime() / 1000; }
+    else ts = Date.now() / 1000 + mins * 60;
+    $("#sched-at").value = toLocalInput(ts);
+    schedPreviewNow();
+  };
+  $("#sched-once-chips").appendChild(b);
+}
 $("#sched-cron").addEventListener("input", () => {
   clearTimeout(schedPrevT);
   schedPrevT = setTimeout(schedPreviewNow, 350);
@@ -2805,6 +2868,170 @@ $("#btn-sched-new").onclick = schedNew;
 $("#btn-sched-save").onclick = saveScheduleTask;
 
 // ---------- boot ----------
+// ---------- notifications: toasts, (n) title badge, desktop popups ----------
+// The server records needs-input / done / failed for EVERY run (chat,
+// scheduled, !cmd — server/notify.py) and pushes to ntfy when no visible tab
+// shows that thread. Each tab polls the same feed with the 4 s runs poll and
+// alerts for whatever you're not looking at.
+let notifyCursor = -1; // -1 = fresh tab: take the cursor, don't replay history
+let unseenNotes = 0;
+const BASE_TITLE = document.title;
+const NOTE_ICON = { input: "◆", done: "✓", failed: "✕" };
+const NOTE_WORD = { input: "NEEDS YOUR INPUT", done: "FINISHED", failed: "FAILED" };
+
+async function pollNotify() {
+  let r;
+  try { r = await J(await fetch(`/api/notify/events?since=${notifyCursor}`)); } catch { return; }
+  const fresh = notifyCursor >= 0 ? r.events || [] : [];
+  notifyCursor = r.last;
+  for (const ev of fresh) notifyShow(ev);
+}
+
+function notifyOpen(ev) {
+  if (!ev.tid) return;
+  openThread(threads.find((x) => x.id === ev.tid) || { id: ev.tid, title: ev.title });
+}
+
+function notifyShow(ev) {
+  if (ev.tid === threadId && !document.hidden) return; // you're looking at it
+  const t = el("div", "toast " + ev.kind);
+  t.append(el("div", "toast-head", `${NOTE_ICON[ev.kind] || "•"} ${NOTE_WORD[ev.kind] || ev.kind}`),
+           el("div", "toast-title", ev.title || "LangBang"));
+  if (ev.text) t.appendChild(el("div", "toast-text", ev.text));
+  const x = el("button", "toast-x", "✕");
+  x.onclick = (e) => { e.stopPropagation(); t.remove(); };
+  t.appendChild(x);
+  t.onclick = () => { t.remove(); notifyOpen(ev); };
+  $("#toasts").appendChild(t);
+  // needs-input waits for you; the rest fade on their own
+  if (ev.kind !== "input") setTimeout(() => t.remove(), ev.kind === "failed" ? 30000 : 15000);
+  while ($("#toasts").children.length > 4) $("#toasts").firstChild.remove();
+  SFX.play(ev.kind === "failed" ? "error" : "message_received");
+  if (document.hidden) { unseenNotes++; document.title = `(${unseenNotes}) ${BASE_TITLE}`; }
+  desktopNotify(ev);
+}
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && unseenNotes) { unseenNotes = 0; document.title = BASE_TITLE; }
+});
+
+// desktop popups: per browser, and only in a secure context (https or
+// http://localhost) — plain-http LAN/tailnet origins can't have them
+const deskSupported = () => "Notification" in window && window.isSecureContext;
+const deskOn = () => {
+  try { return deskSupported() && Notification.permission === "granted" && localStorage.getItem("lb-desk-notify") === "on"; }
+  catch { return false; }
+};
+function desktopNotify(ev) {
+  if (!deskOn() || (!document.hidden && document.hasFocus())) return; // toast covers a focused tab
+  try {
+    const n = new Notification(`${ev.title || "LangBang"} — ${(NOTE_WORD[ev.kind] || ev.kind).toLowerCase()}`, {
+      body: ev.text || "", tag: "lb-" + ev.id, requireInteraction: ev.kind === "input",
+    });
+    n.onclick = () => { window.focus(); notifyOpen(ev); n.close(); };
+  } catch {}
+}
+function deskSync() {
+  const b = $("#btn-desk-notify"), st = $("#desk-status");
+  if (!deskSupported()) {
+    b.disabled = true;
+    st.textContent = `unavailable here — browsers only allow popups on https or http://localhost (this is ${location.origin}); toasts + phone push still work`;
+    st.className = "pv-status warn";
+    return;
+  }
+  b.disabled = false;
+  if (Notification.permission === "denied") {
+    b.disabled = true;
+    st.textContent = "blocked in this browser's site settings for " + location.origin;
+    st.className = "pv-status warn";
+  } else if (deskOn()) {
+    b.textContent = "DISABLE";
+    st.textContent = "✓ on in this browser";
+    st.className = "pv-status ok";
+  } else {
+    b.textContent = "ENABLE";
+    st.textContent = "off in this browser";
+    st.className = "pv-status";
+  }
+}
+$("#btn-desk-notify").onclick = async () => {
+  SFX.play("click");
+  if (deskOn()) { localStorage.setItem("lb-desk-notify", "off"); deskSync(); return; }
+  const p = await Notification.requestPermission(); // needs this click (user gesture)
+  if (p === "granted") {
+    localStorage.setItem("lb-desk-notify", "on");
+    new Notification("LangBang", { body: "Desktop notifications are on for this browser." });
+  }
+  deskSync();
+};
+
+// CONFIG → NOTIFICATIONS form
+function notifyLoadForm(n) {
+  const ev = n.events || {};
+  $("#set-notify-ev-input").checked = ev.input !== false;
+  $("#set-notify-ev-done").checked = ev.done !== false;
+  $("#set-notify-ev-failed").checked = ev.failed !== false;
+  $("#set-notify-ntfy_enabled").checked = !!n.ntfy_enabled;
+  $("#set-notify-ntfy_server").value = n.ntfy_server || "https://ntfy.sh";
+  $("#set-notify-ntfy_topic").value = n.ntfy_topic || "";
+  $("#set-notify-click_base").value = n.click_base || "";
+  $("#set-notify-preview").checked = n.preview !== false;
+  $("#ntfy-status").textContent = "";
+  ntfyHowto();
+  deskSync();
+}
+function notifyForm() {
+  return {
+    ntfy_enabled: $("#set-notify-ntfy_enabled").checked,
+    ntfy_server: $("#set-notify-ntfy_server").value.trim() || "https://ntfy.sh",
+    ntfy_topic: $("#set-notify-ntfy_topic").value.trim(),
+    click_base: $("#set-notify-click_base").value.trim(),
+    preview: $("#set-notify-preview").checked,
+    events: {
+      input: $("#set-notify-ev-input").checked,
+      done: $("#set-notify-ev-done").checked,
+      failed: $("#set-notify-ev-failed").checked,
+    },
+  };
+}
+function ntfyHowto() {
+  const topic = $("#set-notify-ntfy_topic").value.trim();
+  const server = $("#set-notify-ntfy_server").value.trim() || "https://ntfy.sh";
+  $("#ntfy-howto").textContent = topic
+    ? `Phone: install ntfy → ＋ Subscribe → topic “${topic}”` +
+      (server.replace(/\/$/, "") === "https://ntfy.sh" ? "" : ` (use another server: ${server})`) + ". Then ▶ SEND TEST PUSH."
+    : "Tick “send pushes” to get a private random topic.";
+}
+async function ntfyNewTopic() {
+  try { $("#set-notify-ntfy_topic").value = (await J(await fetch("/api/notify/topic"))).topic; } catch {}
+  ntfyHowto();
+  cfgDirtyCompute();
+}
+$("#set-notify-ntfy_enabled").addEventListener("change", async () => {
+  if (!$("#set-notify-ntfy_enabled").checked) return;
+  if (!$("#set-notify-ntfy_topic").value.trim()) await ntfyNewTopic();
+  // a tap on the push should open THIS LangBang — default to how this tab reaches it
+  if (!$("#set-notify-click_base").value.trim()) $("#set-notify-click_base").value = location.origin;
+  cfgDirtyCompute();
+});
+$("#set-notify-ntfy_topic").addEventListener("input", ntfyHowto);
+$("#set-notify-ntfy_server").addEventListener("input", ntfyHowto);
+$("#btn-ntfy-topic").onclick = () => { SFX.play("click"); ntfyNewTopic(); };
+$("#btn-ntfy-test").onclick = async () => {
+  SFX.play("click");
+  const st = $("#ntfy-status");
+  st.textContent = "sending…"; st.className = "pv-status";
+  try {
+    const r = await fetch("/api/notify/test", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(notifyForm()),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(out.detail || "HTTP " + r.status);
+    st.textContent = "✓ sent — check your phone"; st.className = "pv-status ok";
+  } catch (e) {
+    st.textContent = "✕ " + e.message; st.className = "pv-status warn";
+  }
+};
+
 // ---------- stale-tab guard: offer a reload when the frontend changed ----------
 // The first health reply pins the version this tab booted with; a later
 // different one means web/ changed under an open tab (which otherwise keeps

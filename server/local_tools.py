@@ -145,22 +145,36 @@ def _fmt(ts) -> str:
 # registered a Windows schtask over ssh for exactly this request).
 # Async is fine: the graph runs async, same path as the async MCP tools.
 
+def _parse_when(run_at: str) -> float:
+    """'2026-10-02 15:30' / '2026-10-02T15:30' (local wall clock) → epoch."""
+    from datetime import datetime
+    return datetime.fromisoformat(run_at.strip().replace(" ", "T", 1)).timestamp()
+
+
 @tool
-async def create_scheduled_task(title: str, prompt: str, cron: str) -> str:
+async def create_scheduled_task(title: str, prompt: str, cron: str = "", run_at: str = "") -> str:
     """Create a LangBang scheduled task: `prompt` runs as a headless agent
-    turn on a 5-field cron cadence (minute hour dom month dow —
-    '0 */4 * * *' every 4 hours, '30 8 * * 1-5' weekdays 08:30). Each task
-    owns a dedicated chat thread where every run's output lands and runs
-    share that thread's context, so `prompt` must be self-contained (future
-    runs see no live conversation). ALWAYS use this tool — never crontab,
-    systemd timers or Windows schtasks — for scheduling the user asks for."""
+    turn either REPEATEDLY on a 5-field cron cadence (minute hour dom month
+    dow — '0 */4 * * *' every 4 hours, '30 8 * * 1-5' weekdays 08:30) or
+    ONCE at `run_at`, a local date-time 'YYYY-MM-DD HH:MM' (for 'remind me
+    at 3pm', 'check this tomorrow morning' — call now_utc / date first to
+    compute it). Give exactly one of cron / run_at. A one-off shows as done
+    after it fires and disappears from the list a day later; its thread
+    keeps the result. Each task owns a dedicated chat thread where its
+    output lands, so `prompt` must be self-contained (runs see no live
+    conversation). ALWAYS use this tool — never crontab, at, systemd timers
+    or Windows schtasks — for scheduling the user asks for."""
     try:
-        row = await schedule.create(title, prompt, cron)
+        when = _parse_when(run_at) if run_at.strip() else None
     except ValueError:
-        return (f"ERROR: invalid cron {cron!r} — need 5 fields "
-                "'minute hour dom month dow', e.g. '0 */4 * * *' (every 4h)")
-    return (f"created {row['id']}: {title!r} — {schedule.humanize(cron)}; "
-            f"next run {_fmt(row['next_run'])}")
+        return f"ERROR: run_at {run_at!r} isn't 'YYYY-MM-DD HH:MM' (local time)"
+    try:
+        row = await schedule.create(title, prompt, cron.strip(), when)
+    except ValueError as e:
+        return (f"ERROR: {e} — repeating: cron like '0 */4 * * *'; "
+                "once: run_at like '2026-10-02 15:30'")
+    nxt = f"; next run {_fmt(row['next_run'])}" if row["cron"] else ""
+    return f"created {row['id']}: {title!r} — {schedule.describe(row)}{nxt}"
 
 
 @tool
@@ -171,24 +185,31 @@ async def list_scheduled_tasks() -> str:
     if not rows:
         return "no scheduled tasks"
     return _trim("\n".join(
-        f"{r['id']} | {r['title']} | {r['cron']} ({schedule.humanize(r['cron'])}) | "
+        f"{r['id']} | {r['title']} | {r['cron'] or 'one-off'} ({schedule.describe(r)}) | "
         f"{'ON ' if r['enabled'] else 'OFF'} next {_fmt(r['next_run'])} last {_fmt(r['last_run'])}"
         for r in rows))
 
 
 @tool
 async def update_scheduled_task(id: str, title: str = "", prompt: str = "",
-                                cron: str = "") -> str:
-    """Update a LangBang scheduled task; pass "" for fields to keep. A cron
-    change re-syncs the timer to the new cadence."""
+                                cron: str = "", run_at: str = "") -> str:
+    """Update a LangBang scheduled task; pass "" for fields to keep. A new
+    cron re-syncs the timer (and turns a one-off into a repeating task); a
+    new run_at 'YYYY-MM-DD HH:MM' makes it a one-off at that time — also how
+    a finished one-off is re-armed."""
     patch = {k: v for k, v in (("title", title), ("prompt", prompt), ("cron", cron)) if v}
+    if run_at.strip():
+        try:
+            patch["run_at"] = _parse_when(run_at)
+        except ValueError:
+            return f"ERROR: run_at {run_at!r} isn't 'YYYY-MM-DD HH:MM' (local time)"
     try:
         row = await (schedule.update(id, patch) if patch else schedule.get(id))
-    except ValueError:
-        return f"ERROR: invalid cron {cron!r}"
+    except ValueError as e:
+        return f"ERROR: {e}"
     if not row:
         return f"ERROR: no scheduled task {id!r} (see list_scheduled_tasks)"
-    return (f"updated {id}: {row['title']!r} — {schedule.humanize(row['cron'])}; "
+    return (f"updated {id}: {row['title']!r} — {schedule.describe(row)}; "
             f"next {_fmt(row['next_run'])}")
 
 
@@ -225,7 +246,8 @@ TOOLS_NOTE = (
     "write_file, list_dir, crawl_url (fetch any web page as Markdown via "
     "Crawl4AI on spark-ee93). Prefer them over asking the user to run things. "
     "Scheduling: any recurring/scheduled work the user asks for goes to "
-    "create_scheduled_task (5-field cron) — LangBang's own scheduler; do NOT "
+    "create_scheduled_task (5-field cron to repeat, or run_at "
+    "'YYYY-MM-DD HH:MM' for a one-off) — LangBang's own scheduler; do NOT "
     "use run_bash with crontab, systemd timers, at, or Windows schtasks for "
     "it. list/update/set_enabled/run_now/delete siblings manage tasks. "
     "Parallelize: independent tool calls (several URLs, files, commands) go "

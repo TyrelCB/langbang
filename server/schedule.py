@@ -9,6 +9,12 @@ its own — this module only decides WHEN to run it and keeps bookkeeping
 
 Missed fires (server was down at fire time) are skipped, never replayed:
 startup recomputes next_run from now.
+
+One-off tasks (cron = '', run_at = epoch): fire once at run_at, then stay
+in the list as DONE (enabled=0, done_at set) and age out of the table after
+ONEOFF_KEEP_S — their thread (the result) stays in the sidebar. A one-off
+missed while the server was down fires LATE on startup instead of being
+skipped (skipping would mean it never runs at all).
 """
 from __future__ import annotations
 
@@ -25,6 +31,7 @@ from . import agent, config, runs
 logger = logging.getLogger("langbang.schedule")
 
 _db = None  # agent._db, bound in init() after agent.init()
+ONEOFF_KEEP_S = 24 * 3600  # a fired one-off stays visible (✓ DONE) this long
 _lock = asyncio.Lock()  # one scheduled run at a time (shared Spark serializes)
 
 
@@ -42,6 +49,12 @@ async def init() -> None:
           created_at REAL);
         """
     )
+    cur = await _db.execute("PRAGMA table_info(schedules)")
+    have = {r[1] for r in await cur.fetchall()}
+    for col in ("run_at", "done_at"):  # one-off tasks (added 2026-10-02)
+        if col not in have:
+            await _db.execute(f"ALTER TABLE schedules ADD COLUMN {col} REAL")
+    await _db.commit()
     # Stale bookkeeping from a dead process: a run that died mid-flight (or
     # whose finally-block UPDATE itself hit "database is locked") leaves
     # running=1 in the DB forever — the UI shows "RUNNING" hours after the
@@ -56,10 +69,10 @@ async def init() -> None:
     # fresh next_run for every enabled task: anything missed while the
     # server was down is skipped, not replayed
     now = time.time()
-    cur = await _db.execute("SELECT id, cron FROM schedules WHERE enabled=1")
-    for rid, cron in await cur.fetchall():
+    cur = await _db.execute("SELECT id, cron, run_at FROM schedules WHERE enabled=1")
+    for rid, cron, run_at in await cur.fetchall():
         await _db.execute("UPDATE schedules SET next_run=? WHERE id=?",
-                          (_next_run(cron, now), rid))
+                          (_due(cron, run_at, now), rid))
     await _db.commit()
 
 
@@ -72,13 +85,16 @@ async def _loop() -> None:
         try:
             now = time.time()
             cur = await _db.execute(
-                "SELECT id, title, prompt, cron, thread_id, next_run FROM schedules"
+                "SELECT id, title, prompt, cron, thread_id, next_run, run_at FROM schedules"
                 " WHERE enabled=1 AND running=0 AND next_run<=? ORDER BY next_run",
                 (now,),
             )
             for row in await cur.fetchall():
                 await _fire(dict(zip(
-                    ("id", "title", "prompt", "cron", "thread_id", "next_run"), row)))
+                    ("id", "title", "prompt", "cron", "thread_id", "next_run", "run_at"), row)))
+            # fired one-offs age out of the list (their thread stays)
+            await _set("DELETE FROM schedules WHERE done_at IS NOT NULL AND done_at<? AND running=0",
+                       (time.time() - ONEOFF_KEEP_S,))
             cur = await _db.execute(
                 "SELECT MIN(next_run) FROM schedules WHERE enabled=1")
             nxt = (await cur.fetchone())[0]
@@ -101,6 +117,12 @@ async def _loop() -> None:
 
 
 # ---- firing ----
+
+def _due(cron: str, run_at: float | None, frm: float | None = None) -> float | None:
+    """When a task should next fire: cron cadence, or its one-off time
+    (a past run_at stays past → fires on the next tick, i.e. late)."""
+    return run_at if not cron else _next_run(cron, frm)
+
 
 def _next_run(cron: str, frm: float | None = None) -> float:
     # croniter matches fields against the clock of whatever base it's given:
@@ -173,11 +195,15 @@ async def _fire(row: dict, manual: bool = False) -> None:
             logger.exception("schedule %r run crashed", row["title"])
         finally:
             # a manual run must not shift the cron rhythm
-            nxt = row["next_run"] if manual else _next_run(row["cron"])
-            _clear_flag(rid, time.time(), nxt)
+            if manual:
+                _clear_flag(rid, time.time(), row["next_run"])
+            elif not row["cron"]:
+                _clear_flag(rid, time.time(), None, done=True)  # one-off: fired → DONE
+            else:
+                _clear_flag(rid, time.time(), _next_run(row["cron"]))
 
 
-def _clear_flag(rid, ts, nxt) -> None:
+def _clear_flag(rid, ts, nxt, done: bool = False) -> None:
     """Fire-and-forget the running=0 clear: when a user STOPs a scheduled
     run, _fire itself is being cancelled, and awaiting anything in that arm
     just re-raises CancelledError — which used to strand running=1 (the
@@ -185,9 +211,14 @@ def _clear_flag(rid, ts, nxt) -> None:
 
     async def _go():
         try:
-            await _set(
-                "UPDATE schedules SET running=0, last_run=?, next_run=? WHERE id=?",
-                (ts, nxt, rid))
+            if done:
+                await _set(
+                    "UPDATE schedules SET running=0, last_run=?, next_run=NULL,"
+                    " enabled=0, done_at=? WHERE id=?", (ts, ts, rid))
+            else:
+                await _set(
+                    "UPDATE schedules SET running=0, last_run=?, next_run=? WHERE id=?",
+                    (ts, nxt, rid))
         except RuntimeError:
             logger.exception("schedule %r: running flag STUCK (restart to clear)", rid)
 
@@ -197,7 +228,7 @@ def _clear_flag(rid, ts, nxt) -> None:
 # ---- CRUD (used by main.py routes) ----
 
 _COLS = ("id", "title", "prompt", "cron", "thread_id", "enabled",
-         "last_run", "next_run", "running", "created_at")
+         "last_run", "next_run", "running", "created_at", "run_at", "done_at")
 
 
 def _rows(fetched) -> list[dict]:
@@ -217,40 +248,58 @@ async def get(sid: str) -> dict | None:
     return dict(zip(_COLS, r)) if r else None
 
 
-async def create(title: str, prompt: str, cron: str) -> dict:
-    if not croniter.is_valid(cron):
+def _check(cron: str, run_at: float | None) -> None:
+    if bool(cron) == (run_at is not None):
+        raise ValueError("give either a cron cadence or a one-off run_at time (not both)")
+    if cron and not croniter.is_valid(cron):
         raise ValueError(f"invalid cron expression: {cron!r}")
+    if run_at is not None and run_at < time.time() - 60:
+        raise ValueError("one-off time is in the past")
+
+
+async def create(title: str, prompt: str, cron: str = "", run_at: float | None = None) -> dict:
+    cron = (cron or "").strip()
+    _check(cron, run_at)
     sid = uuid.uuid4().hex[:12]
     now = time.time()
     thread = await agent.create_thread(title)  # the task's run-history notebook
-    # column order: id,title,prompt,cron,thread_id,enabled,last_run,next_run,running,created_at
     await _set(
-        "INSERT INTO schedules VALUES(?,?,?,?,?,1,NULL,?,0,?)",
-        (sid, title, prompt, cron, thread["id"], _next_run(cron, now), now))
+        "INSERT INTO schedules(id,title,prompt,cron,thread_id,enabled,last_run,next_run,"
+        "running,created_at,run_at,done_at) VALUES(?,?,?,?,?,1,NULL,?,0,?,?,NULL)",
+        (sid, title, prompt, cron, thread["id"], _due(cron, run_at, now), now, run_at))
     return await get(sid)
 
 
 async def update(sid: str, patch: dict) -> dict | None:
-    cur = await _db.execute("SELECT cron FROM schedules WHERE id=?", (sid,))
+    cur = await _db.execute("SELECT cron, run_at FROM schedules WHERE id=?", (sid,))
     r = await cur.fetchone()
     if not r:
         return None
+    cron, run_at = r[0] or "", r[1]
     cols, vals = [], []
-    for k in ("title", "prompt", "cron"):
+    for k in ("title", "prompt"):
         if patch.get(k) is not None:
-            if k == "cron" and not croniter.is_valid(patch[k]):
-                raise ValueError(f"invalid cron expression: {patch[k]!r}")
             cols.append(f"{k}=?")
             vals.append(patch[k])
-    if patch.get("cron") is not None:  # re-sync the timer to the new cadence
-        cols.append("next_run=?")
-        vals.append(_next_run(patch["cron"]))
-    if patch.get("enabled") is not None:
+    timing = patch.get("cron") is not None or "run_at" in patch and patch["run_at"] is not None
+    if timing:
+        # switching kinds is allowed: a cron clears run_at, a run_at clears cron
+        if patch.get("cron"):
+            cron, run_at = patch["cron"].strip(), None
+        else:
+            cron, run_at = "", patch["run_at"]
+        _check(cron, run_at)
+        # (re-)arming: a new time on a DONE one-off brings it back
+        cols += ["cron=?", "run_at=?", "next_run=?", "enabled=1", "done_at=NULL"]
+        vals += [cron, run_at, _due(cron, run_at)]
+    if patch.get("enabled") is not None and not timing:
+        if patch["enabled"] and not cron and (run_at or 0) < time.time():
+            raise ValueError("this one-off's time has passed — give it a new time to re-arm it")
         cols.append("enabled=?")
         vals.append(1 if patch["enabled"] else 0)
         if patch["enabled"]:
             cols.append("next_run=?")
-            vals.append(_next_run(r[0]))  # waking up restarts from now
+            vals.append(_due(cron, run_at))  # waking up restarts from now
     if cols:
         vals.append(sid)
         await _set(f"UPDATE schedules SET {', '.join(cols)} WHERE id=?", vals)
@@ -279,6 +328,19 @@ async def run_now(sid: str) -> bool:
 
 _DAYS = {str(i): d for i, d in enumerate(
     ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"])}
+
+
+def when_text(ts: float) -> str:
+    return datetime.fromtimestamp(ts).strftime("%a %b %-d %H:%M")
+
+
+def describe(row: dict) -> str:
+    """Panel/tool text for either kind of task."""
+    if not row.get("cron"):
+        if row.get("done_at"):
+            return f"once — done {when_text(row['done_at'])}"
+        return f"once at {when_text(row['run_at'])}" if row.get("run_at") else "once"
+    return humanize(row["cron"])
 
 
 def humanize(cron: str) -> str:
