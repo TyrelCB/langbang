@@ -122,6 +122,13 @@ but built on the LangChain/LangGraph ecosystem:
   native undo/selection/IME keep working — files over 400 KB stay plain),
   and Markdown files get EDIT / SPLIT / PREVIEW (chat's renderer; relative
   images resolve through `/api/media`, relative links open in the editor).
+  Images, audio, video and PDFs open in a viewer instead (SVG adds ✎ EDIT
+  SOURCE). Under a text file sits an **assist bar**: ask about the file or
+  tell the AI what to change — one tool-less model call (`POST /api/fs/assist`)
+  that sees the current buffer (unsaved edits included), your selection and
+  the last few exchanges about this file, and proposes search/replace edits
+  shown as a red/green diff; ✓ APPLY puts them in the buffer (Ctrl+Z undoes),
+  SAVE is still yours. It can't touch any other file.
   Line gutter, Tab indents,
   Ctrl+S saves). File-tool cards in the chat (`read_file`/`write_file`/
   `edit_file`) carry a ✎ open shortcut. Saves are atomic and content-hash-guarded

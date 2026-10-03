@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import agent, config, mcp, notify, runs, schedule, sfxgen, ttsjobs, voice
+from . import agent, config, fileassist, mcp, notify, runs, schedule, sfxgen, ttsjobs, voice
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -467,7 +467,32 @@ async def fs_list(path: str = "~"):
             "entries": entries[:FS_LIST_MAX], "truncated": len(entries) > FS_LIST_MAX}
 
 
-FIND_BUDGET = 2.5      # seconds of rg streaming per search — ~ is huge (ComfyUI, SDKs)
+class FsAssistIn(BaseModel):
+    path: str
+    content: str
+    instruction: str
+    lang: str | None = None
+    selection: dict | None = None   # {text, from_line, to_line}
+    history: list[dict] = []        # [{role: user|assistant, text}]
+
+
+@app.post("/api/fs/assist")
+async def fs_assist(body: FsAssistIn):
+    """FILES assistant: one streamed, tool-less model call about the open
+    file (server/fileassist.py). SSE of {token|done|error}; the editor
+    parses search/replace blocks and applies them only on the user's OK."""
+    if not body.instruction.strip():
+        raise HTTPException(400, "empty request")
+
+    async def gen():
+        async for ev in fileassist.stream(body.path, body.lang, body.content, body.instruction,
+                                          body.selection, body.history, config.load()):
+            yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+    return _sse(gen())
+
+
+FIND_BUDGET = 2.5     # seconds of rg streaming per search — ~ is huge (ComfyUI, SDKs)
 FIND_MAX = 60
 FIND_PRUNE = ("node_modules", ".git", ".venv", "venv", "__pycache__", ".cache",
               ".npm", ".cargo", "site-packages")

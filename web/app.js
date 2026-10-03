@@ -1376,9 +1376,23 @@ function renderTraj() {
 // would otherwise wipe an armed row mid-confirm.
 let armedTid = null;
 let armT = 0;
+// An open ✎ rename editor must survive the sidebar refresh: pollRuns calls
+// refreshThreads every 4 s and the rebuild below used to replace the input
+// mid-typing (the user saw the editor "time out" and lose its text). While
+// renaming, only the data and the ◉ running dots are refreshed in place.
+let renamingTid = null;
+
 async function refreshThreads() {
   threads = await api.threads();
   const box = $("#threads");
+  if (renamingTid && box.querySelector(".t-edit")) {
+    for (const row of box.querySelectorAll(".thread")) {
+      const id = row.dataset.tid;
+      row.classList.toggle("running", RUNS.has(id) || serverRuns.has(id));
+    }
+    return;
+  }
+  renamingTid = null; // the editor is gone (thread deleted / view rebuilt)
   box.innerHTML = "";
   for (const t of threads) {
     // busy = OUR client has a run in it, or the server says one is in flight
@@ -1386,6 +1400,7 @@ async function refreshThreads() {
     const busy = RUNS.has(t.id) || serverRuns.has(t.id);
     const d = el("div", "thread" + (t.id === threadId ? " active" : "")
                  + (busy ? " running" : ""));
+    d.dataset.tid = t.id;
     d.appendChild(el("span", "ctx", t.context_tokens != null ? fmtTok(t.context_tokens) : ""));
     const name = el("span", "t-name", t.title);
     name.title = t.title;
@@ -1466,12 +1481,14 @@ function startInlineRename(t, row, name) {
   inp.value = t.title === "New chat" ? "" : t.title;
   inp.placeholder = t.title || "title…";
   row.replaceChild(inp, name);
+  renamingTid = t.id;
   inp.focus();
   inp.select();
   let done = false;
   const finish = async (save) => {
     if (done) return;
     done = true;
+    renamingTid = null;
     const v = inp.value.trim();
     if (save && v && v !== t.title) {
       const r = await api.renameThread(t.id, v);
@@ -3361,7 +3378,7 @@ syncComposerHint();
 // would drop unsaved edits (close, open another file, ESC, backdrop) goes
 // through edGuard's SAVE / DISCARD / KEEP bar (the viewer has no confirm()).
 const ED = { path: null, ver: null, eol: "lf", orig: "", dir: null, lines: 0, indent: "    " };
-const edDirty = () => ED.path !== null && $("#ed-text").value !== ED.orig;
+const edDirty = () => ED.path !== null && !ED.viewer && $("#ed-text").value !== ED.orig;
 
 function edStatus(msg, cls) {
   const s = $("#ed-status");
@@ -3369,10 +3386,158 @@ function edStatus(msg, cls) {
   s.className = cls || "";
 }
 
+// ---- assist bar: ask about / edit THIS file (server/fileassist.py) ----
+// One tool-less model call per request: it sees the current buffer (unsaved
+// edits included) + selection + the last exchanges about this file, and
+// proposes search/replace blocks that are applied only on APPLY — via
+// execCommand so Ctrl+Z still works — and saved only by SAVE.
+ED.assist = { path: null, turns: [], abort: null };
+
+function edAssistReset(path) {
+  if (ED.assist.abort) ED.assist.abort.abort();
+  ED.assist = { path, turns: [], abort: null };
+  $("#ed-assist-log").replaceChildren();
+  $("#ed-ask").value = "";
+}
+
+function edParseBlocks(text) {
+  const re = /<{7} SEARCH\n([\s\S]*?)\n?={7}\n([\s\S]*?)\n?>{7} REPLACE/g;
+  const blocks = [];
+  let m;
+  while ((m = re.exec(text))) blocks.push({ search: m[1], replace: m[2] });
+  const first = text.search(/<{7} SEARCH/);
+  const summary = (first >= 0 ? text.slice(0, first) : text).trim();
+  return { blocks, summary };
+}
+
+// exact match first; then a line-wise match ignoring trailing whitespace
+function edFind(hay, needle) {
+  const i = hay.indexOf(needle);
+  if (i >= 0) return [i, i + needle.length];
+  const H = hay.split("\n"), N = needle.split("\n").map((l) => l.trimEnd());
+  for (let a = 0; a + N.length <= H.length; a++) {
+    if (N.every((l, k) => H[a + k].trimEnd() === l)) {
+      const start = H.slice(0, a).join("\n").length + (a ? 1 : 0);
+      const end = start + H.slice(a, a + N.length).join("\n").length;
+      return [start, end];
+    }
+  }
+  return null;
+}
+
+function edApplyBlocks(text, blocks) {
+  let out = text;
+  const failed = [];
+  blocks.forEach((b, i) => {
+    if (!b.search) {
+      if (!out.trim()) out = b.replace; else failed.push(i + 1);
+      return;
+    }
+    const at = edFind(out, b.search);
+    if (!at) { failed.push(i + 1); return; }
+    out = out.slice(0, at[0]) + b.replace + out.slice(at[1]);
+  });
+  return { out, failed };
+}
+
+function edDiffView(blocks) {
+  const box = el("div", "ed-diff");
+  blocks.forEach((b, i) => {
+    const pre = el("pre", "ed-diff-block");
+    pre.appendChild(el("div", "ed-diff-h", `edit ${i + 1}`));
+    for (const l of b.search ? b.search.split("\n") : []) pre.appendChild(el("div", "del", "− " + l));
+    for (const l of b.replace ? b.replace.split("\n") : []) pre.appendChild(el("div", "add", "+ " + l));
+    box.appendChild(pre);
+  });
+  return box;
+}
+
+function edSelection() {
+  const ta = $("#ed-text");
+  const [a, b] = [ta.selectionStart, ta.selectionEnd];
+  if (a === b) return null;
+  const before = ta.value.slice(0, a);
+  return { text: ta.value.slice(a, b), from_line: before.split("\n").length,
+           to_line: before.split("\n").length + ta.value.slice(a, b).split("\n").length - 1 };
+}
+
+async function edAsk() {
+  const ask = $("#ed-ask");
+  const q = ask.value.trim();
+  if (ED.assist.abort) { ED.assist.abort.abort(); return; } // ASK button doubles as STOP
+  if (!q || ED.path === null || ED.viewer) return;
+  ask.value = "";
+  const path = ED.path;
+  const log = $("#ed-assist-log");
+  log.appendChild(el("div", "ed-q", "› " + q));
+  const ans = el("div", "ed-a msg");
+  ans.textContent = "…";
+  log.appendChild(ans);
+  log.scrollTop = log.scrollHeight;
+  const ctl = new AbortController();
+  ED.assist.abort = ctl;
+  $("#btn-ed-ask").textContent = "■ STOP";
+  let raw = "";
+  try {
+    const res = await fetch("/api/fs/assist", {
+      method: "POST", headers: { "Content-Type": "application/json" }, signal: ctl.signal,
+      body: JSON.stringify({ path, lang: ED.lang, content: $("#ed-text").value, instruction: q,
+                             selection: edSelection(), history: ED.assist.turns }),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || "HTTP " + res.status);
+    await pipeSSE(res, (ev) => {
+      if (ev.type === "token") { raw += ev.text; ans.textContent = raw; log.scrollTop = log.scrollHeight; }
+      else if (ev.type === "error") throw new Error(ev.message);
+    });
+  } catch (e) {
+    if (e.name !== "AbortError") { ans.textContent = "✕ " + e.message; ans.classList.add("err"); }
+    else ans.textContent = raw + " …(stopped)";
+    ED.assist.abort = null;
+    $("#btn-ed-ask").textContent = "ASK ▶";
+    return;
+  }
+  ED.assist.abort = null;
+  $("#btn-ed-ask").textContent = "ASK ▶";
+  if (ED.path !== path) return; // switched files mid-answer
+  ED.assist.turns.push({ role: "user", text: q }, { role: "assistant", text: raw });
+  const { blocks, summary } = edParseBlocks(raw);
+  ans.replaceChildren();
+  if (!blocks.length) { setMarkdown(ans, raw); log.scrollTop = log.scrollHeight; return; }
+  if (summary) ans.appendChild(el("div", "ed-a-sum", summary));
+  ans.appendChild(edDiffView(blocks));
+  const act = el("div", "ed-a-act");
+  const apply = el("button", "btn accent sm", "✓ APPLY");
+  const drop = el("button", "btn ghost sm", "DISCARD");
+  apply.onclick = () => {
+    const ta = $("#ed-text");
+    const { out, failed } = edApplyBlocks(ta.value, blocks);
+    if (failed.length === blocks.length) {
+      act.replaceChildren(el("span", "pv-status warn", "✕ none of the edits match the current text — ask again"));
+      return;
+    }
+    ta.focus();
+    ta.select();
+    document.execCommand("insertText", false, out); // keeps Ctrl+Z
+    edGutter();
+    edRefreshChrome();
+    act.replaceChildren(el("span", "pv-status ok",
+      failed.length ? `✓ applied — edit ${failed.join(", ")} didn't match and was skipped · SAVE to keep`
+                    : "✓ applied to the buffer · Ctrl+Z undoes · SAVE to keep"));
+  };
+  drop.onclick = () => act.replaceChildren(el("span", "pv-status", "discarded"));
+  act.append(apply, drop);
+  ans.appendChild(act);
+  log.scrollTop = log.scrollHeight;
+}
+$("#btn-ed-ask").onclick = () => edAsk();
+$("#ed-ask").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); edAsk(); }
+});
+
 function edRefreshChrome() {
   const dirty = edDirty();
   $("#ed-file").classList.toggle("dirty", dirty);
-  $("#btn-ed-save").disabled = ED.path === null || (!dirty && ED.ver !== null);
+  $("#btn-ed-save").disabled = ED.path === null || ED.viewer || (!dirty && ED.ver !== null);
   $("#btn-ed-revert").disabled = !dirty;
 }
 
@@ -3584,6 +3749,9 @@ function edMarkTree() {
 }
 
 function edSetBuffer(path, content, ver, eol, note) {
+  edViewerOff();
+  if (ED.assist.path !== path) edAssistReset(path);
+  $("#ed-assist").classList.remove("hidden");
   ED.path = path;
   ED.ver = ver;
   ED.lang = edLangFor(path);
@@ -3608,7 +3776,80 @@ function edSetBuffer(path, content, ver, eol, note) {
   edStatus(note);
 }
 
-async function edLoad(path) {
+// ---- media viewer: images / audio / video / PDF open in place of the editor ----
+const ED_MEDIA = {
+  img: /\.(png|jpe?g|gif|webp|bmp|ico|avif|svg)$/i,
+  audio: /\.(mp3|wav|ogg|oga|opus|m4a|flac|aac)$/i,
+  video: /\.(mp4|webm|mov|m4v|mkv|ogv)$/i,
+  pdf: /\.pdf$/i,
+};
+const edMediaKind = (p) => Object.keys(ED_MEDIA).find((k) => ED_MEDIA[k].test(p)) || null;
+
+function edViewerOff() {
+  if (!ED.viewer) return;
+  ED.viewer = false;
+  for (const m of $("#ed-viewer").querySelectorAll("audio,video")) m.pause();
+  $("#ed-viewer").replaceChildren();
+  $("#ed-viewer").classList.add("hidden");
+  $(".ed-wrap").classList.remove("viewer");
+}
+
+async function edShowMedia(path, kind) {
+  edViewerOff();
+  const src = "/api/media?path=" + encodeURIComponent(path);
+  ED.path = path; ED.ver = null; ED.orig = ""; ED.viewer = true; ED.md = false; ED.lang = null;
+  const ta = $("#ed-text");
+  ta.value = ""; ta.disabled = true;
+  $(".ed-wrap").classList.add("viewer");
+  $("#ed-preview").classList.add("hidden");
+  $("#ed-modes").classList.add("hidden");
+  $("#ed-assist").classList.add("hidden");
+  $("#ed-confirm").classList.add("hidden");
+  $("#ed-file").textContent = path;
+  $("#ed-path").value = path;
+  $("#ed-lang").textContent = kind === "img" ? "IMAGE" : kind.toUpperCase();
+  const v = $("#ed-viewer");
+  v.classList.remove("hidden");
+  let node;
+  if (kind === "pdf") {
+    node = el("iframe", "ed-pdf");
+    node.src = src;
+    node.title = path;
+  } else {
+    node = document.createElement(kind);
+    node.src = src;
+    if (kind !== "img") { node.controls = true; node.preload = "metadata"; }
+  }
+  const size = (document.querySelector(`#ed-tree .ed-row[data-path="${CSS.escape(path)}"] .sz`) || {}).textContent || "";
+  const info = (extra) => edStatus([$("#ed-lang").textContent, extra, size].filter(Boolean).join(" · "));
+  node.addEventListener(kind === "img" ? "load" : "loadedmetadata", () => {
+    if (kind === "img") info(`${node.naturalWidth}×${node.naturalHeight}`);
+    else if (kind === "video") info(`${node.videoWidth}×${node.videoHeight} · ${fmtMS(node.duration)}`);
+    else info(fmtMS(node.duration));
+  });
+  node.addEventListener("error", () => edStatus("✕ the browser can't display this file", "err"));
+  v.appendChild(node);
+  const open = el("a", "btn ghost sm", "↗ OPEN RAW");
+  open.href = src; open.target = "_blank";
+  const bar = el("div", "ed-viewer-bar");
+  bar.appendChild(open);
+  if (/\.svg$/i.test(path)) { // SVG is text too: offer the editor
+    const src2 = el("button", "btn ghost sm", "✎ EDIT SOURCE");
+    src2.onclick = () => edLoad(path, true);
+    bar.appendChild(src2);
+  }
+  v.appendChild(bar);
+  info("");
+  edRefreshChrome();
+  edMarkTree();
+  const dir = path.slice(0, path.lastIndexOf("/")) || "/";
+  if (dir !== ED.dir) await edBrowse(dir);
+  return true;
+}
+
+async function edLoad(path, asText = false) {
+  const kind = asText ? null : edMediaKind(path);
+  if (kind) return edShowMedia(path, kind);
   let f;
   try {
     f = await edFetch("/api/fs/read?path=" + encodeURIComponent(path));
@@ -3626,7 +3867,7 @@ async function edLoad(path) {
 }
 
 async function edSave(force = false) {
-  if (ED.path === null) return false;
+  if (ED.path === null || ED.viewer) return false;
   try {
     const out = await edFetch("/api/fs/write", {
       method: "PUT",
