@@ -3515,14 +3515,30 @@ async function edAsk() {
       act.replaceChildren(el("span", "pv-status warn", "✕ none of the edits match the current text — ask again"));
       return;
     }
-    ta.focus();
-    ta.select();
-    document.execCommand("insertText", false, out); // keeps Ctrl+Z
+    // execCommand keeps Ctrl+Z, but only works on a focusable, VISIBLE
+    // textarea — in PREVIEW mode it's display:none, focus() is a no-op and
+    // the insert silently went nowhere while this said "applied" (a real
+    // edit was lost that way). Use it when it can work, then VERIFY, and
+    // fall back to setting the text directly.
+    let undoable = false;
+    if (ta.offsetParent !== null) {
+      ta.focus();
+      ta.select();
+      document.execCommand("insertText", false, out);
+      undoable = ta.value === out;
+    }
+    if (ta.value !== out) ta.value = out;
+    if (ta.value !== out) {
+      act.replaceChildren(el("span", "pv-status warn", "✕ couldn't update the buffer — nothing changed"));
+      return;
+    }
     edGutter();
+    edSchedulePreview(true); // PREVIEW / SPLIT show the change right away
     edRefreshChrome();
     act.replaceChildren(el("span", "pv-status ok",
-      failed.length ? `✓ applied — edit ${failed.join(", ")} didn't match and was skipped · SAVE to keep`
-                    : "✓ applied to the buffer · Ctrl+Z undoes · SAVE to keep"));
+      (failed.length ? `✓ applied — edit ${failed.join(", ")} didn't match and was skipped`
+                     : "✓ applied to the buffer") +
+      (undoable ? " · Ctrl+Z undoes" : " · REVERT undoes") + " · SAVE to keep"));
   };
   drop.onclick = () => act.replaceChildren(el("span", "pv-status", "discarded"));
   act.append(apply, drop);
