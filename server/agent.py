@@ -777,9 +777,45 @@ class _FileArgAlias(AgentMiddleware):
     TOOLS = {"write_file", "read_file", "edit_file", "delete_file", "delete"}
     ALIAS = ("path", "filename", "file")
 
+    # write_todos is the one tool whose only argument is a list of objects,
+    # and sglang's qwen3_coder parser (Qwen's <parameter=todos>…</parameter>
+    # XML) mangles it ~10 % of the time on long thinking-on runs (21 of ~200
+    # calls 2026-09-28..10-03): 19× the args arrive as {} (nothing to
+    # recover), 2× the whole list lands in the KEY with a trailing
+    # '</parameter' — that shape is repaired exactly below.
+    RESEND = ("Your write_todos call reached the server with NO arguments — the "
+              "todo list was lost in transit (a tool-call parsing glitch, not your "
+              "mistake). Re-send write_todos now with the full `todos` list "
+              "(short items, each with content + status), then continue.")
+
+    @staticmethod
+    def _repair_todos(args: dict) -> dict | None:
+        if not isinstance(args, dict) or "todos" in args:
+            return None
+        for k, v in args.items():
+            if isinstance(v, list) and v and all(isinstance(x, dict) for x in v):
+                return {"todos": v}  # right list, wrong key (todo / items / …)
+            raw = k.strip()
+            if raw.startswith("["):
+                raw = re.sub(r"\s*</?parameter[^\]]*$", "", raw)
+                try:
+                    todos = json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(todos, list):
+                    return {"todos": todos}
+        return None
+
     async def awrap_tool_call(self, request, handler):  # noqa: ANN001
         call = request.tool_call
         args = call.get("args")
+        if call.get("name") == "write_todos":
+            fixed = self._repair_todos(args)
+            if fixed is not None:
+                logger.warning("arg-repair: write_todos list recovered from mangled args (%d items)",
+                               len(fixed["todos"]))
+                request = request.override(tool_call={**call, "args": fixed})
+                return await handler(request)
         if (
             call.get("name") in self.TOOLS
             and isinstance(args, dict)
@@ -801,6 +837,12 @@ class _FileArgAlias(AgentMiddleware):
         # ToolNode converts invocation/validation failures into error
         # ToolMessages instead of raising; breadcrumb them (the astream
         # loop separately surfaces on_tool_error events to UI+trajectory).
+        if (isinstance(res, ToolMessage) and getattr(res, "status", None) == "error"
+                and call.get("name") == "write_todos" and not (args or {}).get("todos")):
+            # the pydantic dump ('Field required [type=missing, input_value=
+            # {'runtime': ToolRuntime(…)}…') told the model nothing useful
+            logger.warning("tool-error: write_todos arrived with empty args — asking for a resend")
+            return res.model_copy(update={"content": self.RESEND})
         if isinstance(res, ToolMessage) and getattr(res, "status", None) == "error":
             logger.warning(
                 "tool-error: %s kwargs=%.120s — %.200s",

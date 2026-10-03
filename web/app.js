@@ -759,7 +759,15 @@ function runPipeline(run) {
       SFX.play("error");
       const card = run.tools.get(ev.run_id);
       run.tools.delete(ev.run_id);
-      if (card) {
+      if (card && lostTodos(ev.name, ev.error)) {
+        // sglang's tool-call parser dropped the arguments; the server already
+        // told the model to resend (agent.py _FileArgAlias.RESEND) — a retry,
+        // not a failure worth a red alarm
+        card.querySelector("summary").textContent = "⟳ write_todos lost its arguments in transit — resend requested";
+        card.classList.add("retried");
+        card.open = false;
+        run.subs.delete(ev.run_id);
+      } else if (card) {
         card.querySelector("summary").textContent =
           `✕ ${ev.name} FAILED${typeof ev.dur === "number" ? " · " + fmtShort(ev.dur) : ""}`;
         const pre = card.querySelector(":scope > pre");
@@ -1247,6 +1255,9 @@ function showTab(which) {
 // A tool row whose meta carries `err` never ran (bad/lost args — e.g. a
 // write_todos whose args arrived as {}): it's logged by on_tool_error.
 const trajFailed = (e) => e.type === "tool" && !!(e.meta && e.meta.err);
+// write_todos whose args sglang's qwen3_coder parser dropped ({} → pydantic
+// "todos Field required"): the model is asked to resend — label it as such
+const lostTodos = (name, err) => name === "write_todos" && /todos\s+Field required/.test(String(err || ""));
 function gateSummary(v) {
   if (!v || typeof v !== "object") return String(v ?? "");
   if (v.kind === "plan") return "◆ plan proposed for approval";
@@ -1318,10 +1329,12 @@ function renderTraj() {
     const t0 = Math.min(...g.rows.map(st));
     const span = Math.max(Math.max(...g.rows.map((e) => e.ts)) - t0, 0.001);
     const card = el("div", "traj-card");
-    const fails = g.rows.filter(trajFailed).length;
+    const resent = g.rows.filter((e) => trajFailed(e) && lostTodos(e.name, e.meta.err)).length;
+    const fails = g.rows.filter(trajFailed).length - resent;
     const head = el("div", "traj-head",
       `RUN ${gi + 1} · ${new Date(t0 * 1000).toLocaleTimeString()} · ${fmtShort(span)}`);
     if (fails) head.appendChild(el("span", "traj-fails", ` · ✕ ${fails} FAILED`));
+    if (resent) head.appendChild(el("span", "traj-resent", ` · ⟳ ${resent} RESENT`));
     head.appendChild(trajCopyBtn(() => g.rows.map(trajRowText).join("\n\n"), "copy this whole run as text"));
     card.appendChild(head);
     const strip = el("div", "traj-strip");
@@ -1338,14 +1351,17 @@ function renderTraj() {
       const m = e.meta || {};
       const label = BADGE[e.type] || e.type;
       const failed = trajFailed(e);
+      const lost = failed && lostTodos(e.name, m.err);
       const preview =
-        failed ? "✕ " + String(m.err).split("\n")[0] + "  ← " + String(m.in || "")
+        failed && lostTodos(e.name, m.err) ? "⟳ arrived with no arguments (tool-call parser glitch) — resend requested"
+        : failed ? "✕ " + String(m.err).split("\n")[0] + "  ← " + String(m.in || "")
         : e.type === "tool" ? (m.desc ? "◈ " + m.desc : String(m.in || ""))
         : e.type === "error" ? String(m.message || "")
         : e.type === "gate" ? gateSummary(m.value)
         : String(m.text || "");
-      const row = el("div", "traj-row" + (m.sub ? " sub" : "") + (failed ? " err" : ""));
-      row.appendChild(el("span", "traj-badge " + (failed ? "error" : e.type), failed ? "TOOL ✕" : label));
+      const row = el("div", "traj-row" + (m.sub ? " sub" : "") + (failed && !lost ? " err" : ""));
+      row.appendChild(el("span", "traj-badge " + (lost ? "gate" : failed ? "error" : e.type),
+                         lost ? "TOOL ⟳" : failed ? "TOOL ✕" : label));
       row.appendChild(el("span", "traj-name", e.name || (e.dur != null ? fmtShort(e.dur) : "")));
       row.appendChild(el("span", "traj-pre", preview));
       row.appendChild(trajCopyBtn(() => trajRowText(e), "copy this step as text"));

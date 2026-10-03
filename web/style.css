@@ -819,3 +819,6 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
 /* FILES viewer: ✨ edit with AI (Qwen-Image 2.1 on ComfyUI) */
 .ed-imgedit { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; width: min(100%, 760px); }
 .panel-inner .ed-imgedit input { flex: 1 1 300px; min-width: 0; margin: 0; }
+/* write_todos whose args the tool-call parser dropped: a resend, not a failure */
+details.block.tool.retried > summary { color: var(--orange); }
+.traj-resent { color: var(--orange); }
