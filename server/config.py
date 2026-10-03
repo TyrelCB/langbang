@@ -76,6 +76,7 @@ DEFAULTS = {
         "write_file": True,
         "list_dir": True,
         "crawl_url": True,
+        "generate_image": True,  # Qwen-Image 2.1 on ComfyUI (server/comfy.py)
         # LangBang's own scheduler, agent-facing (server/schedule.py)
         "create_scheduled_task": True,
         "list_scheduled_tasks": True,
@@ -104,6 +105,12 @@ DEFAULTS = {
         "pocket_language": "english",
         "pocket_threads": 2,  # benchmarked: 2 = 4 = 8 on this i9 (~4.5x realtime)
     },
+    # Image generation / editing: Qwen-Image 2.1 GGUF on ComfyUI (server/comfy.py)
+    "image_gen": {
+        "comfy_url": "http://spark-ee93:8188",
+        "out_dir": "~/Pictures/langbang",
+        "steps": 25,
+    },
     # Notifications (server/notify.py): phone push via ntfy for runs that
     # need input / finished / failed while nobody watches that thread.
     "notify": {
@@ -125,6 +132,7 @@ def _backfill(merged: dict) -> dict:
     # same for voice: new provider keys (pocket_*) must reach old files
     merged["voice"] = {**DEFAULTS["voice"], **(merged.get("voice") or {})}
     merged["notify"] = {**DEFAULTS["notify"], **(merged.get("notify") or {})}
+    merged["image_gen"] = {**DEFAULTS["image_gen"], **(merged.get("image_gen") or {})}
     return merged
 
 

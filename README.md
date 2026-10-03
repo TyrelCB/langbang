@@ -67,6 +67,15 @@ but built on the LangChain/LangGraph ecosystem:
   tools (`create/list/update/set_scheduled_task_enabled/run_scheduled_task_now/
   delete_scheduled_task` in CONFIG → LOCAL TOOLS), so "check X every 4 hours"
   said in chat becomes a real LangBang schedule — not crontab improvisation.
+- **Image generation + editing** (`server/comfy.py`): Qwen-Image 2.1
+  (uncensored Q4_K_M GGUF) on the ComfyUI instance on spark-ee93, one merged
+  workflow — text-to-image with no inputs, edit/compose with 1–10 reference
+  images (the prompt calls them image_1…). The agent's `generate_image` tool
+  ("make an image of…", "edit this photo…") and FILES → ✨ EDIT WITH AI both
+  use it; results (+ a JSON sidecar with prompt/seed/inputs) land in
+  `~/Pictures/langbang/` and show inline when cited. Pasted/attached images
+  are now also saved to `data/uploads/` with their path in the message, so
+  the agent can edit them. ~40–60 s per image. CONFIG → IMAGE GENERATION.
 - **Notifications** (`server/notify.py`, CONFIG → NOTIFICATIONS): when a
   run **needs your input** (ask_user / plan), **finishes**, or **fails** —
   chat, scheduled or `!cmd` — and you're not looking at that thread: every

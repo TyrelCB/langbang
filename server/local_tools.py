@@ -12,7 +12,7 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
-from . import schedule  # cycle-safe: only used at call time
+from . import comfy, schedule  # cycle-safe: only used at call time
 
 HOME = Path.home()
 MAX_OUT = 12_000  # chars — keep tool output off Spark's prefill budget
@@ -237,7 +237,32 @@ async def delete_scheduled_task(id: str) -> str:
             else f"ERROR: no scheduled task {id!r}")
 
 
-LOCAL_TOOLS = [run_bash, read_file, write_file, list_dir, crawl_url,
+@tool
+async def generate_image(prompt: str, input_images: list[str] | None = None,
+                         width: int = 1024, height: int = 1024, seed: int = -1,
+                         steps: int = 0) -> str:
+    """Generate or edit images with Qwen-Image 2.1 (ComfyUI on spark-ee93,
+    ~40-60 s per image).
+    - Text-to-image: give only `prompt` (+ width/height, multiples of 32,
+      256-2048; e.g. 1024x1024, 832x1216 portrait, 1216x832 landscape).
+    - Edit / compose: pass 1-10 local image file paths in `input_images`;
+      the prompt refers to them as image_1, image_2, ... in that order
+      ("put the logo from image_2 on the shirt in image_1"). The output keeps
+      roughly the first image's size. Images the user attached to the chat
+      are on disk — their paths are in the message ([attached image N: ...]).
+    Write a detailed, concrete prompt (subject, style, lighting, composition).
+    Returns the saved local path(s): cite them in your answer so the user sees
+    the image inline. seed -1 = random; reuse a seed to vary only the prompt."""
+    try:
+        r = await comfy.generate(prompt, input_images or [], width=width, height=height,
+                                 seed=seed, steps=steps or None)
+    except (ValueError, RuntimeError) as e:
+        return f"ERROR: {e}"
+    return (f"saved {', '.join(r['paths'])} — {r['mode']}, seed {r['seed']}, "
+            f"{r['steps']} steps, {r['seconds']} s")
+
+
+LOCAL_TOOLS = [run_bash, read_file, write_file, list_dir, crawl_url, generate_image,
                create_scheduled_task, list_scheduled_tasks, update_scheduled_task,
                set_scheduled_task_enabled, run_scheduled_task_now, delete_scheduled_task]
 
@@ -253,6 +278,8 @@ TOOLS_NOTE = (
     "Parallelize: independent tool calls (several URLs, files, commands) go "
     "in ONE message as multiple calls — they run concurrently; never spend a "
     "separate turn on a call that didn't depend on the last one's result. "
+    "Images: generate_image makes new images from a prompt or edits / "
+    "combines local image files (Qwen-Image 2.1 on ComfyUI, ~1 min each). "
     "Showing media: the chat UI renders an inline image/audio/video player "
     "for every absolute file path (.png/.jpg/.gif/.webp/.mp4/.webm/.mov/"
     ".mp3/.wav/.ogg/.m4a) written in your reply text — to show the user a "

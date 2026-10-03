@@ -1,5 +1,6 @@
 """LangBang server: FastAPI app with a llama.cpp-style web UI."""
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -15,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import agent, config, fileassist, mcp, notify, runs, schedule, sfxgen, ttsjobs, voice
+from . import agent, comfy, config, fileassist, mcp, notify, runs, schedule, sfxgen, ttsjobs, voice
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -492,6 +493,27 @@ async def fs_assist(body: FsAssistIn):
     return _sse(gen())
 
 
+class ImageIn(BaseModel):
+    prompt: str
+    input_images: list[str] = []
+    width: int = 1024
+    height: int = 1024
+    seed: int = -1
+
+
+@app.post("/api/image")
+async def image_generate(body: ImageIn):
+    """FILES ✨ EDIT WITH AI (and any direct use): one Qwen-Image 2.1 run on
+    ComfyUI — t2i without input_images, edit/compose with them. ~40-60 s."""
+    try:
+        return await comfy.generate(body.prompt, body.input_images, width=body.width,
+                                    height=body.height, seed=body.seed)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
+
+
 FIND_BUDGET = 2.5     # seconds of rg streaming per search — ~ is huge (ComfyUI, SDKs)
 FIND_MAX = 60
 FIND_PRUNE = ("node_modules", ".git", ".venv", "venv", "__pycache__", ".cache",
@@ -694,6 +716,22 @@ async def chat(body: ChatIn):
                 raise HTTPException(400, "images must be base64 data URLs (png/jpeg/webp/gif)")
             if len(m.group(2)) > MAX_IMG_B64:
                 raise HTTPException(400, "image too large (max ~5 MB)")
+
+    # Pasted / attached images reach the model as pixels (vision) — and now
+    # ALSO land on disk with their path in the message, so the agent can hand
+    # them to generate_image ("edit this photo …") or any other tool.
+    if body.images:
+        updir = os.path.join(config.DATA_DIR, "uploads", uuid.uuid4().hex[:12])
+        os.makedirs(updir, exist_ok=True)
+        lines = []
+        for n, du in enumerate(body.images, 1):
+            m = DATA_IMG_RE.match(du)
+            ext = {"jpeg": "jpg"}.get(m.group(1), m.group(1))
+            path = os.path.join(updir, f"image_{n}.{ext}")
+            with open(path, "wb") as fh:
+                fh.write(base64.b64decode(re.sub(r"\s", "", m.group(2))))
+            lines.append(f"[attached image {n}: {path}]")
+        text = "\n".join([text, *lines]).strip() if text else "\n".join(lines)
 
     # A message typed while the agent waits at a gate IS the answer: resume
     # the interrupt with it (free text) rather than stacking a new turn on a

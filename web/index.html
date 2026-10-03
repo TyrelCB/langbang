@@ -197,6 +197,15 @@
           <label>gcloud TTS voice <input id="set-voice-gcloud_tts_voice" type="text" placeholder="en-US-Wavenet-J"></label>
         </div>
       </section>
+      <section class="cfg-card wide">
+        <h3>IMAGE GENERATION</h3>
+        <div class="hint">Qwen-Image 2.1 (uncensored Q4_K_M GGUF) on ComfyUI — the agent's <code>generate_image</code> tool (text-to-image, or edit / combine up to 10 images) and FILES → ✨ EDIT WITH AI. ~40–60 s per image on spark-ee93.</div>
+        <div class="row">
+          <label>ComfyUI URL <input id="set-img-comfy_url" type="text" autocomplete="off" spellcheck="false" placeholder="http://spark-ee93:8188"></label>
+          <label>Save images to <input id="set-img-out_dir" type="text" autocomplete="off" spellcheck="false" placeholder="~/Pictures/langbang"></label>
+          <label>Steps <input id="set-img-steps" type="number" min="4" max="60" step="1"></label>
+        </div>
+      </section>
       <section class="cfg-card wide" id="cfg-notify">
         <h3>NOTIFICATIONS</h3>
         <div class="hint">When a run needs you, finishes or fails and you're not looking at that thread (another thread, a hidden tab, a scheduled run at night): every open tab shows a toast + <b>(n)</b> title badge, desktop popups if this browser allows them, and your phone gets a push. Pushes are skipped while a visible tab is showing that thread.</div>

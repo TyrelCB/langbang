@@ -2139,6 +2139,10 @@ async function openSettings() {
   loadedVoice = { ...DEFAULT_VOICE, ...(s.voice || {}) };
   await pvLoad(loadedVoice.pocket_voice); // options must exist before .value is set
   notifyLoadForm(s.notify || {});
+  const ig = s.image_gen || {};
+  $("#set-img-comfy_url").value = ig.comfy_url || "http://spark-ee93:8188";
+  $("#set-img-out_dir").value = ig.out_dir || "~/Pictures/langbang";
+  $("#set-img-steps").value = ig.steps || 25;
   for (const k of Object.keys(DEFAULT_VOICE))
     $("#set-voice-" + k).value = loadedVoice[k];
   $("#cfg-confirm").classList.add("hidden");
@@ -2193,6 +2197,11 @@ async function saveSettings() {
       pocket_threads: Math.max(1, Math.min(8, parseInt($("#set-voice-pocket_threads").value, 10) || 2)),
     },
     notify: notifyForm(),
+    image_gen: {
+      comfy_url: $("#set-img-comfy_url").value.trim() || "http://spark-ee93:8188",
+      out_dir: $("#set-img-out_dir").value.trim() || "~/Pictures/langbang",
+      steps: Math.max(4, Math.min(60, parseInt($("#set-img-steps").value, 10) || 25)),
+    },
   });
   $("#settings-panel").classList.add("hidden");
   cfgBase = null;  // the save closed the draft; next openSettings re-snapshots
@@ -3853,8 +3862,45 @@ async function edShowMedia(path, kind) {
     const src2 = el("button", "btn ghost sm", "✎ EDIT SOURCE");
     src2.onclick = () => edLoad(path, true);
     bar.appendChild(src2);
+  } else if (kind === "img") { // raster: Qwen-Image 2.1 edit on ComfyUI
+    const ai = el("button", "btn ghost sm", "✨ EDIT WITH AI");
+    ai.onclick = () => { form.classList.toggle("hidden"); form.querySelector("input").focus(); };
+    bar.appendChild(ai);
   }
   v.appendChild(bar);
+  // ✨ edit form: the result is a NEW file (~/Pictures/langbang/), never an overwrite
+  const form = el("div", "ed-imgedit hidden");
+  const pr = el("input");
+  pr.type = "text";
+  pr.placeholder = "Describe the change — e.g. “make it night, add snow” (this image is image_1)";
+  const go = el("button", "btn accent sm", "GENERATE ▶");
+  const st = el("span", "pv-status");
+  form.append(pr, go, st);
+  v.appendChild(form);
+  const run = async () => {
+    const prompt = pr.value.trim();
+    if (!prompt || go.disabled) return;
+    go.disabled = true;
+    const t0 = Date.now();
+    const tick = setInterval(() => { st.textContent = `⏳ generating on ComfyUI… ${Math.round((Date.now() - t0) / 1000)} s (≈ 1 min)`; }, 500);
+    st.className = "pv-status";
+    try {
+      const r = await fetch("/api/image", { method: "POST", headers: { "Content-Type": "application/json" },
+                                            body: JSON.stringify({ prompt, input_images: [path] }) });
+      const out = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(out.detail || "HTTP " + r.status);
+      clearInterval(tick);
+      SFX.play("message_received");
+      if (ED.path === path) await edLoad(out.paths[0]); // show the result (its folder opens in the tree)
+    } catch (e) {
+      clearInterval(tick);
+      st.textContent = "✕ " + e.message;
+      st.className = "pv-status warn";
+      go.disabled = false;
+    }
+  };
+  go.onclick = run;
+  pr.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); run(); } });
   info("");
   edRefreshChrome();
   edMarkTree();
