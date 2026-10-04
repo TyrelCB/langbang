@@ -1,0 +1,114 @@
+--- tools/sglang-patches/qwen3_coder_detector.orig.py	2026-10-04 04:55:39.095579101 -0600
++++ tools/sglang-patches/qwen3_coder_detector.patched.py	2026-10-04 04:55:39.096457888 -0600
+@@ -89,6 +89,33 @@
+         logger.warning(f"Tool '{func_name}' is not defined in the tools list.")
+         return {}
+ 
++    # [LANGBANG PATCH] Qwen3.8 sometimes skips the parameter tag on tools that
++    # take exactly ONE parameter (seen 5/32 write_todos calls, 0/364 other
++    # calls): "<function=write_todos>\n[{...}]\n</parameter>" or
++    # "<parameter=[{...}]\n</parameter>". Stock parsing discards the bare
++    # value as stray text inside the tool call and emits "{}". When the
++    # function's schema has a single parameter and no parameter was parsed
++    # yet, a bare JSON array/object IS that parameter.
++    def _sole_param(self, func_name: Optional[str], tools: Optional[list[Tool]]) -> Optional[str]:
++        if not func_name:
++            return None
++        props = self._get_arguments_config(func_name, tools)
++        if isinstance(props, dict) and len(props) == 1:
++            return next(iter(props))
++        return None
++
++    def _bare_value_end(self, text: str):
++        """End of a bare (tag-less) value: before </parameter> (consumed) or
++        </function> (left for step 4). None = wait for more text."""
++        cands = []
++        p = text.find(self.parameter_end_token)
++        if p != -1:
++            cands.append((p, len(self.parameter_end_token)))
++        f = text.find(self.function_end_token)
++        if f != -1:
++            cands.append((f, 0))
++        return min(cands) if cands else None
++
+     def _get_param_type(self, param_schema: Any) -> str:
+         """Infer the parser conversion type from a JSON schema parameter."""
+         inferred_type = infer_type_from_json_schema(param_schema)
+@@ -173,6 +200,20 @@
+                 )
+             return param_value
+ 
++    def _emit_sole_param(self, calls, name: str, raw_value: str, tools) -> None:
++        """[LANGBANG PATCH] stream one recovered parameter, same JSON framing
++        as the regular <parameter=...> branch."""
++        raw_value = raw_value.strip("\n")
++        if not self.json_started:
++            calls.append(ToolCallItem(tool_index=self.current_tool_id, parameters="{"))
++            self.json_started = True
++        cfg = self._get_arguments_config(self.current_func_name, tools)
++        val = self._convert_param_value(raw_value, name, cfg, self.current_func_name)
++        frag = f"{json.dumps(name)}: {json.dumps(val, ensure_ascii=False)}"
++        calls.append(ToolCallItem(tool_index=self.current_tool_id, parameters=frag))
++        self.current_tool_param_count += 1
++        logger.warning(f"[langbang patch] recovered tag-less '{name}' for {self.current_func_name}")
++
+     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
+         """One-shot parsing for non-streaming scenarios."""
+         if self.tool_call_start_token not in text:
+@@ -204,6 +245,18 @@
+                     param_config = self._get_arguments_config(func_name, tools)
+                     parsed_params = {}
+ 
++                    sole = self._sole_param(func_name, tools)
++                    bare = params_str.strip()
++                    if bare.startswith(self.parameter_prefix):
++                        bare = bare[len(self.parameter_prefix):].lstrip()
++                    if sole and bare[:1] in ("[", "{"):  # [LANGBANG PATCH] tag-less value
++                        end = self._bare_value_end(bare)
++                        val = bare[: end[0]] if end else bare
++                        parsed_params[sole] = self._convert_param_value(
++                            val.strip("\n"), sole, param_config, func_name
++                        )
++                        params_str = ""
++
+                     for p_match in self.tool_call_parameter_regex.findall(params_str):
+                         if ">" not in p_match:
+                             continue
+@@ -303,6 +356,17 @@
+             # -------------------------------------------------------
+             # 3. Parameter: <parameter=name>value...
+             # -------------------------------------------------------
++            if current_slice.startswith(self.parameter_prefix) and self.current_tool_param_count == 0:
++                after = current_slice[len(self.parameter_prefix):]
++                sole = self._sole_param(self.current_func_name, tools)
++                if sole and after.lstrip()[:1] in ("[", "{"):  # [LANGBANG PATCH]
++                    end = self._bare_value_end(after)
++                    if end is None:
++                        break  # wait for the terminator
++                    self._emit_sole_param(calls, sole, after[: end[0]], tools)
++                    self.parsed_pos += len(self.parameter_prefix) + end[0] + end[1]
++                    continue
++
+             if current_slice.startswith(self.parameter_prefix):
+                 name_end = current_slice.find(">")
+                 if name_end != -1:
+@@ -409,6 +473,19 @@
+                 self.is_inside_tool_call = False  # [FIX] Exit tool call region
+                 continue
+ 
++            # [LANGBANG PATCH] bare value inside a single-parameter function
++            if (self.is_inside_tool_call and self.current_func_name
++                    and self.current_tool_param_count == 0
++                    and current_slice.lstrip()[:1] in ("[", "{")):
++                sole = self._sole_param(self.current_func_name, tools)
++                if sole:
++                    end = self._bare_value_end(current_slice)
++                    if end is None:
++                        break  # wait for the terminator
++                    self._emit_sole_param(calls, sole, current_slice[: end[0]], tools)
++                    self.parsed_pos += end[0] + end[1]
++                    continue
++
+             # -------------------------------------------------------
+             # 6. Handling content / whitespace / normal text
+             # -------------------------------------------------------
