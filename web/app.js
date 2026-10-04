@@ -430,16 +430,37 @@ function renderHistoryInner(msgs) {
   // compaction — archived heads keep their sched stamps in their JSON.
   let curSched = null;
   for (const m of msgs) {
-    if (m.role === "system") continue;
+    // one malformed step must never truncate the rest of the transcript —
+    // a string where an array was expected used to throw here and the whole
+    // chat after it silently disappeared (thread dc17b8aa6519)
+    try {
+      curSched = renderHistoryMsg(m, curSched);
+    } catch (e) {
+      console.error("renderHistory: skipped a message", e, m);
+      const b = addBlock("tool errored", "⚠ couldn't render this step");
+      b.querySelector("pre").textContent = String(e) + "\n" + JSON.stringify(m).slice(0, 4000);
+    }
+  }
+}
+
+// ask_user args as the model sent them — a list, or (parser fallback) a JSON string
+function gateQuestions(q) {
+  if (typeof q === "string") { try { q = JSON.parse(q); } catch { return [q]; } }
+  return Array.isArray(q) ? q : q ? [q] : [];
+}
+
+function renderHistoryMsg(m, curSched) {
+  {
+    if (m.role === "system") return curSched;
     if (m.compacted) {
       const b = addBlock("compact", `⟲ CONTEXT COMPACTED — ${m.compacted.count} EARLIER MSGS SUMMARIZED`);
       b.querySelector("pre").textContent = textOf(m.content);
-      continue; // notes sit between runs; never touch curSched
+      return curSched; // notes sit between runs; never touch curSched
     }
     if (m.shell) {
       const b = shellBlock(m.shell.cmd);
       shellSeal(b, m.shell);
-      continue;
+      return curSched;
     }
     if (m.role === "human") {
       const b = addMsg("user", textOf(m.content), imagesOf(m.content));
@@ -458,9 +479,9 @@ function renderHistoryInner(msgs) {
       for (const tc of m.tool_calls || []) {
         if (tc.name === "ask_user") {
           const b = addBlock("tool gate-hist", "◆ AGENT ASKED YOU");
-          b.querySelector("pre").textContent = (tc.args?.questions || [])
+          b.querySelector("pre").textContent = gateQuestions(tc.args?.questions)
             .map((q, i) => `Q${i + 1}. ${typeof q === "string" ? q : q.question}` +
-              (q.options?.length ? `\n    [${q.options.join(" | ")}]` : "")).join("\n");
+              (Array.isArray(q?.options) && q.options.length ? `\n    [${q.options.join(" | ")}]` : "")).join("\n");
           continue;
         }
         if (tc.name === "exit_plan_mode") {
@@ -473,9 +494,10 @@ function renderHistoryInner(msgs) {
         edLink(b, tc.args);
       }
     } else if (m.role === "tool") {
-      const gate = GATE_TOOLS.has(m.tool_name);
-      const b = addBlock(gate ? "tool gate-hist" : "tool",
-        gate ? "◆ YOUR ANSWER" : `⚙ ${m.tool_name} result`);
+      const failed = m.status === "error";
+      const gate = GATE_TOOLS.has(m.tool_name) && !failed;
+      const b = addBlock(gate ? "tool gate-hist" : failed ? "tool errored" : "tool",
+        gate ? "◆ YOUR ANSWER" : failed ? `✕ ${m.tool_name} failed` : `⚙ ${m.tool_name} result`);
       b.querySelector("pre").textContent = textOf(m.content).slice(0, 20000);
       if (gate) b.open = true;
       // what the agent LOOKED at (server strips the base64 — see _slim):
@@ -490,6 +512,7 @@ function renderHistoryInner(msgs) {
       }
     }
   }
+  return curSched;
 }
 
 // ---------- chat ----------

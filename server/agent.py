@@ -31,7 +31,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.config import get_config
-from langgraph.errors import GraphInterrupt, GraphRecursionError
+from langgraph.errors import GraphBubbleUp, GraphInterrupt, GraphRecursionError
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.prebuilt import create_react_agent
 from langgraph.types import Command, interrupt
@@ -806,9 +806,39 @@ class _FileArgAlias(AgentMiddleware):
                     return {"todos": todos}
         return None
 
+    @staticmethod
+    def _coerce_json_strings(tool, args: dict) -> dict | None:
+        """sglang's qwen3_coder parser falls back to a STRING when it can't
+        convert a parameter (ask_user arrived as questions='[{"question": …}]'
+        → pydantic 'Input should be a valid list'). If the tool's schema
+        says array/object and the string parses as JSON of that shape, hand
+        the tool the parsed value."""
+        props = getattr(tool, "args", None) or {}
+        if not isinstance(args, dict) or not isinstance(props, dict):
+            return None
+        fixed, hit = dict(args), False
+        for k, v in args.items():
+            want = (props.get(k) or {}).get("type")
+            if want not in ("array", "object") or not isinstance(v, str):
+                continue
+            try:
+                val = json.loads(v.strip())
+            except ValueError:
+                continue
+            if isinstance(val, list if want == "array" else dict):
+                fixed[k], hit = val, True
+        return fixed if hit else None
+
     async def awrap_tool_call(self, request, handler):  # noqa: ANN001
         call = request.tool_call
         args = call.get("args")
+        coerced = self._coerce_json_strings(getattr(request, "tool", None), args)
+        if coerced is not None:
+            logger.warning("arg-repair: %s JSON-string args parsed (%s)", call.get("name"),
+                           [k for k in coerced if coerced[k] is not args.get(k)])
+            call = {**call, "args": coerced}
+            args = coerced
+            request = request.override(tool_call=call)
         if call.get("name") == "write_todos":
             fixed = self._repair_todos(args)
             if fixed is not None:
@@ -833,7 +863,31 @@ class _FileArgAlias(AgentMiddleware):
                 [k for k in self.ALIAS if k in args],
             )
             request = request.override(tool_call={**call, "args": fixed})
-        res = await handler(request)
+        try:
+            res = await handler(request)
+        except GraphBubbleUp:
+            raise  # ask_user / plan gates pause the graph this way — not an error
+        except Exception as e:  # noqa: BLE001
+            # A tool that RAISES (vs. returning an error) used to kill the
+            # whole run: an MCP call to a server the agent had itself just
+            # stopped surfaced as 'ExceptionGroup: unhandled errors in a
+            # TaskGroup', cancelled the parallel run_bash and ended the turn
+            # (thread dc17b8aa6519). Hand the agent the ROOT cause instead
+            # so it can retry, reconnect or tell the user.
+            root = e
+            while isinstance(root, BaseExceptionGroup) and root.exceptions:
+                root = root.exceptions[0]
+            while root.__cause__ is not None and not str(root):
+                root = root.__cause__
+            msg = f"{type(root).__name__}: {str(root)[:400]}" or type(root).__name__
+            logger.warning("tool-raise: %s — %s", call.get("name"), msg)
+            return ToolMessage(
+                content=(f"ERROR: the {call.get('name')} tool crashed — {msg}. If it's an MCP "
+                         "tool, its server may be down or restarting (MCP connections are "
+                         "made at the start of a run: a server moved/restarted mid-run only "
+                         "comes back on the next turn). Don't retry blindly — check, or "
+                         "tell the user."),
+                name=call.get("name"), tool_call_id=call.get("id"), status="error")
         # ToolNode converts invocation/validation failures into error
         # ToolMessages instead of raising; breadcrumb them (the astream
         # loop separately surfaces on_tool_error events to UI+trajectory).
@@ -1263,6 +1317,8 @@ def _msg_dict(m) -> dict:
         ]
     if isinstance(m, ToolMessage):
         d["tool_name"] = m.name
+        if getattr(m, "status", None) == "error":
+            d["status"] = "error"  # chat labels it as a failure, not a result/answer
     reasoning = (m.additional_kwargs or {}).get("reasoning_content")
     if reasoning:
         d["thinking"] = reasoning
