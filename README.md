@@ -85,8 +85,11 @@ but built on the LangChain/LangGraph ecosystem:
   **ntfy** push (free app; private random topic; tap opens the thread via
   the "tap opens" URL). Pushes are skipped while a visible tab shows that
   thread (tabs report presence on the 4 s runs poll). A STOP you pressed
-  isn't an event. Preview text passes through the ntfy server — self-host
-  ntfy or untick previews to keep it on your network.
+  isn't an event. Preview text passes through the ntfy server — this box
+  self-hosts it: Docker container `ntfy` (restart unless-stopped, config +
+  cache in `~/.local/share/ntfy/`), bound to localhost + the tailnet IP only
+  (`http://<host>.<tailnet>.ts.net:2586`, not the LAN); LangBang publishes to
+  `http://127.0.0.1:2586`. Phones subscribe over Tailscale.
 - **Detached runs** (`server/runs.py`): every run — chat turn, `!cmd`, or
   scheduled firing — belongs to a server-side hub, not to a browser tab. A
   dropped connection (phone screen timeout, app switch, refresh, proxy blip)
