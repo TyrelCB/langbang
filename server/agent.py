@@ -448,6 +448,33 @@ def _transcript(msgs: list) -> str:
     return "\n\n".join(lines)
 
 
+def _ctx_tokens(msgs: list) -> int:
+    """Real-ish size of the next prompt.
+
+    count_tokens_approximately (chars/4) ran ~2.05x LOW on tool-heavy threads
+    (emails, HTML, JSON — thread 28360d6bf583: estimated 111k while sglang
+    reported 228k), so the 120k compaction trigger never fired and the run
+    died at the 262k context limit. sglang's real prompt count rides on every
+    AIMessage (usage_metadata). Model: real ≈ overhead (system prompt + tool
+    schemas, ~13k here) + ratio × approx(messages). Overhead comes from the
+    first trusted reply, ratio from the latest; the estimate is the latest
+    real count plus ratio × what was appended since. Kept-after-compaction
+    messages have their (stale) usage stripped by the hook, so only replies
+    made after the last compaction are ever trusted."""
+    approx = count_tokens_approximately(msgs)
+    trusted = [(i, m.usage_metadata) for i, m in enumerate(msgs)
+               if isinstance(m, AIMessage) and (getattr(m, "usage_metadata", None) or {}).get("input_tokens")]
+    if not trusted:
+        return approx
+    i0, u0 = trusted[0]
+    overhead = max(0, int(u0["input_tokens"]) - count_tokens_approximately(msgs[:i0]))
+    i, u = trusted[-1]
+    real = int(u["input_tokens"]) + int(u.get("output_tokens") or 0)
+    body = count_tokens_approximately(msgs[: i + 1])
+    ratio = min(3.0, max(1.0, (real - overhead) / max(1, body)))
+    return max(approx, int(real + ratio * count_tokens_approximately(msgs[i + 1:])))
+
+
 def _compaction_hook(s: dict):
     """pre_model_hook: fold old prefix into one summary when context gets long.
 
@@ -461,17 +488,26 @@ def _compaction_hook(s: dict):
     async def pre_model_hook(state: dict):
         msgs = state["messages"]
         trigger = int(s.get("compact_trigger_tokens", 40000))
-        if trigger <= 0 or count_tokens_approximately(msgs) < trigger:
+        if trigger <= 0 or _ctx_tokens(msgs) < trigger:
             return None
         keep = max(4, int(s.get("compact_keep_messages", 20)))
         split = max(0, len(msgs) - keep)
-        # Never cut inside a tool round: walk back to a HumanMessage boundary
-        # (orphan ToolMessages without their AIMessage tool_calls 400 the API).
-        while split > 0 and not isinstance(msgs[split], HumanMessage):
+        # Never orphan tool results: cut right BEFORE a model step (AIMessage)
+        # or a user turn — a ToolMessage always follows its AIMessage, so
+        # either boundary keeps every call/result pair on one side. (The old
+        # rule allowed only user-message boundaries, so one long agentic turn
+        # could never be folded: 'nothing safe to fold away yet', forever.)
+        while split > 0 and not isinstance(msgs[split], (HumanMessage, AIMessage)):
             split -= 1
         head, tail = msgs[:split], msgs[split:]
-        if not head:  # one giant turn — nothing safe to fold away yet
+        if not head:
             return None
+        # cutting INSIDE the current turn folds away the user's own request —
+        # carry it verbatim so the agent can't lose its task
+        current = next((m for m in reversed(msgs[: split + 1]) if isinstance(m, HumanMessage)
+                        and not (m.additional_kwargs or {}).get("lb_compacted")), None)
+        in_turn = current is not None and current in head and not any(
+            isinstance(m, HumanMessage) for m in tail)
         summary = await summarizer(s).ainvoke(
             [
                 SystemMessage(content=_SUMMARY_INSTRUCTION),
@@ -485,10 +521,18 @@ def _compaction_hook(s: dict):
                     "INSERT INTO archived_messages(thread_id,msg) VALUES(?,?)",
                     (tid, json.dumps(_msg_dict(m), ensure_ascii=False)),
                 )
+        text = str(summary.content).strip()
+        if in_turn:
+            text += ("\n\n[CURRENT REQUEST — still in progress, quoted verbatim]\n"
+                     + _text_only(current.content).strip()[:8000])
         note = HumanMessage(
-            content=str(summary.content).strip(),
+            content=text,
             additional_kwargs={"lb_compacted": {"count": len(head)}},
         )
+        # the kept tail's replies carry PRE-compaction prompt counts — strip
+        # them, or _ctx_tokens would keep seeing the old size and re-fire
+        tail = [m.model_copy(update={"usage_metadata": None}) if isinstance(m, AIMessage) else m
+                for m in tail]
         return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), note, *tail]}
 
     return pre_model_hook
@@ -1641,7 +1685,7 @@ async def list_threads() -> list:
             # What the *next* model call would replay: live graph state (post-
             # compaction), not the full archived transcript the UI shows.
             msgs = await _live_messages(r[0])
-            hit = (key, count_tokens_approximately(msgs), len(msgs),
+            hit = (key, _ctx_tokens(msgs), len(msgs),
                    sum(len(str(getattr(m, "content", "") or "")) for m in msgs))
             _thread_stats[r[0]] = hit
         out.append(
