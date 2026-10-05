@@ -32,7 +32,15 @@ logger = logging.getLogger("langbang.schedule")
 
 _db = None  # agent._db, bound in init() after agent.init()
 ONEOFF_KEEP_S = 24 * 3600  # a fired one-off stays visible (✓ DONE) this long
-_lock = asyncio.Lock()  # one scheduled run at a time (shared Spark serializes)
+# Scheduled runs in flight at once. Was a Lock held across the WHOLE run
+# (and awaited by the loop): one long run froze every other task — on
+# 2026-10-04 Home Lab Health (hourly) fired 28-33 min late each hour and
+# Image Gen (*/15) fired once in 6 h, all queued single file behind a
+# Check Email run. 2 leaves sglang headroom (~4 streams) for live chat;
+# runs.MAX_ACTIVE still caps the total.
+MAX_SCHED = 2
+_slots = asyncio.Semaphore(MAX_SCHED)
+RETRY_S = 30.0  # runs.TooMany: retry the slot shortly instead of losing it
 
 
 # ---- schema + loop lifecycle ----
@@ -90,13 +98,18 @@ async def _loop() -> None:
                 (now,),
             )
             for row in await cur.fetchall():
-                await _fire(dict(zip(
-                    ("id", "title", "prompt", "cron", "thread_id", "next_run", "run_at"), row)))
+                row = dict(zip(
+                    ("id", "title", "prompt", "cron", "thread_id", "next_run", "run_at"), row))
+                # claim here (running=1) so the next tick can't double-fire;
+                # the run itself is detached — the loop never waits on it
+                if await _set("UPDATE schedules SET running=1 WHERE id=? AND running=0",
+                              (row["id"],)):
+                    agent._spawn(_fire(row, claimed=True))
             # fired one-offs age out of the list (their thread stays)
             await _set("DELETE FROM schedules WHERE done_at IS NOT NULL AND done_at<? AND running=0",
                        (time.time() - ONEOFF_KEEP_S,))
             cur = await _db.execute(
-                "SELECT MIN(next_run) FROM schedules WHERE enabled=1")
+                "SELECT MIN(next_run) FROM schedules WHERE enabled=1 AND running=0")
             nxt = (await cur.fetchone())[0]
             # long sleeps would sleep past a just-created schedule; clamp to
             # 30s so the CRUD endpoints take effect promptly anyway
@@ -160,18 +173,20 @@ async def _set(sql: str, args: tuple = (), tries: int = 5) -> int:
     raise RuntimeError(f"schedule bookkeeping write failed: {last}") from last
 
 
-async def _fire(row: dict, manual: bool = False) -> None:
+async def _fire(row: dict, manual: bool = False, claimed: bool = False) -> None:
     """Drain run_chat as a headless consumer. run_chat logs its own errors
     into the thread trajectory; the try/except only protects the loop.
-    The lock spans the whole run: cron fires and run-now clicks serialize."""
+    At most MAX_SCHED of these run at once; extra due tasks wait for a slot
+    (showing RUNNING — they're claimed) instead of blocking the loop."""
     rid = row["id"]
-    async with _lock:
-        # conditional single write (no read-then-write window); rowcount 0
-        # means already in flight (loop vs run-now race)
-        if not await _set("UPDATE schedules SET running=1 WHERE id=? AND running=0",
-                          (rid,)):
-            return
+    # conditional single write (no read-then-write window); rowcount 0
+    # means already in flight (loop vs run-now race)
+    if not claimed and not await _set(
+            "UPDATE schedules SET running=1 WHERE id=? AND running=0", (rid,)):
+        return
+    async with _slots:
         logger.info("schedule %r firing in thread %s", row["title"], row["thread_id"])
+        deferred = False
         try:
             s = config.load()  # live config per run, same contract as /api/chat
             # stamp the run so its thread bubble shows WHEN (a schedule's
@@ -191,11 +206,16 @@ async def _fire(row: dict, manual: bool = False) -> None:
         except runs.Busy:
             logger.warning("schedule %r skipped — thread %s already running",
                            row["title"], row["thread_id"])
+        except runs.TooMany:
+            logger.warning("schedule %r deferred %ds — run cap reached", row["title"], RETRY_S)
+            deferred = True
         except Exception:  # noqa: BLE001
             logger.exception("schedule %r run crashed", row["title"])
         finally:
             # a manual run must not shift the cron rhythm
-            if manual:
+            if deferred:  # never started: same slot again shortly
+                _clear_flag(rid, None, time.time() + RETRY_S, keep_last=True)
+            elif manual:
                 _clear_flag(rid, time.time(), row["next_run"])
             elif not row["cron"]:
                 _clear_flag(rid, time.time(), None, done=True)  # one-off: fired → DONE
@@ -203,7 +223,7 @@ async def _fire(row: dict, manual: bool = False) -> None:
                 _clear_flag(rid, time.time(), _next_run(row["cron"]))
 
 
-def _clear_flag(rid, ts, nxt, done: bool = False) -> None:
+def _clear_flag(rid, ts, nxt, done: bool = False, keep_last: bool = False) -> None:
     """Fire-and-forget the running=0 clear: when a user STOPs a scheduled
     run, _fire itself is being cancelled, and awaiting anything in that arm
     just re-raises CancelledError — which used to strand running=1 (the
@@ -215,6 +235,8 @@ def _clear_flag(rid, ts, nxt, done: bool = False) -> None:
                 await _set(
                     "UPDATE schedules SET running=0, last_run=?, next_run=NULL,"
                     " enabled=0, done_at=? WHERE id=?", (ts, ts, rid))
+            elif keep_last:  # deferred, never ran: don't stamp last_run
+                await _set("UPDATE schedules SET running=0, next_run=? WHERE id=?", (nxt, rid))
             else:
                 await _set(
                     "UPDATE schedules SET running=0, last_run=?, next_run=? WHERE id=?",
