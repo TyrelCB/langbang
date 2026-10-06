@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import agent, comfy, config, fileassist, mcp, notify, runs, schedule, sfxgen, ttsjobs, voice
+from . import agent, comfy, config, fileassist, learning, mcp, notify, runs, schedule, sfxgen, ttsjobs, voice
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -204,6 +204,54 @@ async def rename_thread(tid: str, body: ThreadRenameIn):
     if title is None:
         raise HTTPException(404, "no such thread")
     return {"title": title}
+
+
+class ThreadPromptIn(BaseModel):
+    prompt: str = ""
+
+
+@app.get("/api/threads/{tid}/prompt")
+async def get_thread_prompt(tid: str):
+    return {"prompt": await learning.get_thread_prompt(agent._db, tid)}
+
+
+@app.put("/api/threads/{tid}/prompt")
+async def put_thread_prompt(tid: str, body: ThreadPromptIn):
+    if not await agent.set_thread_prompt(tid, body.prompt):
+        raise HTTPException(404, "no such thread")
+    return {"prompt": await learning.get_thread_prompt(agent._db, tid)}
+
+
+# ---- memory + learning (post-run skill/memory review) ----
+
+@app.get("/api/memory")
+async def list_memory():
+    s = config.load()
+    return {"dir": learning.memory_dir(s), "enabled": s.get("memory_enabled", True),
+            "memories": learning.list_memories(s)}
+
+
+@app.delete("/api/memory/{name}")
+async def delete_memory(name: str):
+    if not learning.delete_memory(name):
+        raise HTTPException(404, "no such memory")
+    return {"ok": True}
+
+
+@app.get("/api/learning")
+async def learning_log(n: int = 30):
+    return {"settings": learning.review_settings(), "entries": learning.log_entries(n)}
+
+
+@app.post("/api/threads/{tid}/review")
+async def review_thread(tid: str):
+    """Run the skill/memory review on this thread's last turn now."""
+    if runs.HUBS.get(tid) and not runs.HUBS[tid].done:
+        raise HTTPException(409, "thread is running — review after it finishes")
+    try:
+        return await learning.review(tid)
+    except Exception as e:  # noqa: BLE001 - surface the backend error to the UI
+        raise HTTPException(502, f"review failed: {type(e).__name__}: {e}")
 
 
 @app.post("/api/threads/{tid}/retitle")

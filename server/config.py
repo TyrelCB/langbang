@@ -50,6 +50,12 @@ DEFAULTS = {
     "skills_enabled": True,
     "skills_hermes_dir": os.environ.get("LANGBANG_HERMES_SKILLS", "~/.hermes/skills"),
     "skills_dir": "~/.langbang/skills",
+    # LangBang memory: one .md per fact; the index rides every system prompt
+    "memory_enabled": True,
+    "memory_dir": "~/.langbang/memory",
+    # after a clean run with >= min_tool_calls tool calls, a background
+    # no-tool review may create/patch LangBang skills and save memories
+    "skill_review": {"enabled": True, "min_tool_calls": 6, "scheduled": False},
     # Off by default: Qwen3-style hybrids answer silently unless asked, and
     # thinking adds a few hundred decode tokens per turn (~40-50 ms each on
     # a single Spark). Enable in CONFIG to stream reasoning into the
@@ -133,6 +139,7 @@ def _backfill(merged: dict) -> dict:
     merged["voice"] = {**DEFAULTS["voice"], **(merged.get("voice") or {})}
     merged["notify"] = {**DEFAULTS["notify"], **(merged.get("notify") or {})}
     merged["image_gen"] = {**DEFAULTS["image_gen"], **(merged.get("image_gen") or {})}
+    merged["skill_review"] = {**DEFAULTS["skill_review"], **(merged.get("skill_review") or {})}
     return merged
 
 

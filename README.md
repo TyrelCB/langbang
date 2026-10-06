@@ -37,7 +37,27 @@ but built on the LangChain/LangGraph ecosystem:
   when a procedure proves reusable, and a LangBang skill shadows a same-name
   Hermes one. Sources re-scan every turn (add/remove a SKILL.md and it's
   live next turn); the model sees name+description and `read_file`s the full
-  SKILL.md when a task matches. `task` sub-agents don't get skills yet
+  SKILL.md when a task matches. `task` sub-agents don't get skills yet.
+  Every agent write to a LangBang `SKILL.md` is validated on the spot (broken
+  frontmatter = a skill that silently never loads → the tool result tells
+  the agent to fix it)
+- **Learning loop** (`server/learning.py`, CONFIG → MEMORY & LEARNING):
+  - *Per-thread prompt* — ✎ PROMPT in the top bar: instructions for that
+    thread only, appended to the global system prompt on every run there
+    (scheduled runs too); lit while set. `GET/PUT /api/threads/{id}/prompt`.
+  - *Memory* — one markdown file per fact in `~/.langbang/memory/`
+    (frontmatter `name`/`description`/`type` = user|feedback|project|reference).
+    The one-line index, built from the files themselves, rides every run's
+    system prompt; the agent reads a body on demand and saves/updates with
+    the `remember` / `forget` tools. Edit or delete them in FILES or CONFIG.
+  - *Automatic review* — after a clean interactive run with ≥ N tool calls
+    (default 6; scheduled runs opt-in), one background no-tool model call
+    reads the turn and may create a LangBang skill, patch one the turn read
+    (SEARCH/REPLACE), and/or save memories — usually it decides nothing is
+    worth keeping. Results are validated before writing (Hermes skills are
+    never touched), the previous version goes to `~/.langbang/skill-history/`,
+    every review is logged to `data/learning.jsonl` (CONFIG lists them), and
+    changes pop a 📘 LEARNED toast. 📘 REVIEW THIS THREAD NOW runs it by hand.
 - **MCP servers** via `langchain-mcp-adapters` (stdio / SSE / streamable-HTTP),
   managed as structured rows in CONFIG (no raw JSON): per-server enable
   toggle, ↻ Test connection (live tool listing via a throwaway probe client —
