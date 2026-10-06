@@ -1117,9 +1117,8 @@ Investigate and design; do NOT change anything yet.
 # history is full of "I'm in plan mode" / exit_plan_mode. In a later NORMAL
 # run the model kept re-deciding it was in plan mode ("Plan mode is active
 # again — I've paused…") between real work steps, called exit_plan_mode,
-# and wrote plans into ~/.claude/plans (Claude Code's dir, found via ls).
-# Plan state is a per-run flag; say so explicitly whenever history could
-# confuse it.
+# and wrote plan files. Plan state is a per-run flag; say so explicitly
+# whenever history could confuse it.
 PLAN_OFF_NOTE = """## Plan mode: OFF for this run
 The user's plan-mode toggle is off. Earlier messages in this thread that
 talk about plan mode are from PAST turns — plan mode does not switch on by
@@ -1389,10 +1388,6 @@ async def build_agent(s: dict, checkpointer=None, thread_prompt: str = ""):
             hermes = os.path.expanduser(s.get("skills_hermes_dir") or "~/.hermes/skills")
             perms = [FilesystemPermission(
                 operations=["write"], paths=[hermes + "/**"], mode="deny")]
-        # ~/.claude is Claude Code's state (plans, memory, sessions) — the
-        # model has copied its conventions and written plans there
-        perms.append(FilesystemPermission(
-            operations=["write"], paths=[os.path.expanduser("~/.claude") + "/**"], mode="deny"))
         return create_deep_agent(
             model(s),
             tools,
