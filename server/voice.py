@@ -19,10 +19,15 @@ import re
 import threading
 import time
 import wave
+import logging
+
+from . import ttsnorm
 
 MAX_TTS_CHARS = 20_000
 _KEYLESS_HINT = "shared free-tier endpoint; try again shortly or switch provider in CONFIG → VOICE"
 
+
+logger = logging.getLogger("langbang.voice")
 
 def _voice_cfg(cfg: dict) -> dict:
     return cfg.get("voice") or {}
@@ -65,6 +70,27 @@ def speakable(text: str) -> str:
         cut = t.rfind(".", 0, MAX_TTS_CHARS)
         t = t[: cut + 1] if cut > MAX_TTS_CHARS // 2 else t[:MAX_TTS_CHARS]
     return t
+
+
+def prepare(text: str, cfg: dict) -> str:
+    """speakable() + English text normalization (numbers/dates/times →
+    words, see ttsnorm) per voice.tts_normalize: "pocket" (default — the
+    provider that needs it), "all", or "off". English only."""
+    clean = speakable(text)
+    v = _voice_cfg(cfg)
+    mode = v.get("tts_normalize") or "pocket"
+    provider = v.get("tts_provider") or "gtts"
+    if not clean or mode == "off" or (mode == "pocket" and provider != "pocket"):
+        return clean
+    lang = (v.get("pocket_language") if provider == "pocket" else
+            v.get("gcloud_tts_lang") if provider == "gcloud" else v.get("tts_lang")) or "en"
+    if not str(lang).lower().startswith("en"):
+        return clean
+    try:
+        return ttsnorm.normalize(clean)
+    except Exception:  # noqa: BLE001 - a normalizer bug must never cost the audio
+        logger.exception("tts normalize failed; speaking the raw text")
+        return clean
 
 
 def synthesize(text: str, cfg: dict) -> tuple[bytes, str]:

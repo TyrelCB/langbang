@@ -2006,6 +2006,7 @@ const DEFAULT_VOICE = {
   stt_provider: "sr", stt_lang: "en-US",
   gcloud_key_file: "", gcloud_tts_lang: "en-US", gcloud_tts_voice: "en-US-Wavenet-J",
   pocket_voice: "alba", pocket_language: "english", pocket_threads: 2,
+  tts_normalize: "pocket",
 };
 let loadedVoice = { ...DEFAULT_VOICE };
 
@@ -2254,6 +2255,7 @@ async function saveSettings() {
       pocket_voice: pvValue() || "alba",
       pocket_language: $("#set-voice-pocket_language").value || "english",
       pocket_threads: Math.max(1, Math.min(8, parseInt($("#set-voice-pocket_threads").value, 10) || 2)),
+      tts_normalize: $("#set-voice-tts_normalize").value || "pocket",
     },
     notify: notifyForm(),
     image_gen: {

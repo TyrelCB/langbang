@@ -112,7 +112,9 @@ DEFAULTS = {
         # accept terms on huggingface.co/kyutai/pocket-tts + `hf auth login`)
         "pocket_voice": "alba",
         "pocket_language": "english",
-        "pocket_threads": 2,  # benchmarked: 2 = 4 = 8 on this i9 (~4.5x realtime)
+        "pocket_threads": 2,
+        # numbers/dates/times → words before synthesis: pocket | all | off
+        "tts_normalize": "pocket",  # benchmarked: 2 = 4 = 8 on this i9 (~4.5x realtime)
     },
     # Image generation / editing: Qwen-Image 2.1 GGUF on ComfyUI (server/comfy.py)
     "image_gen": {
