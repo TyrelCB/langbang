@@ -999,12 +999,15 @@ def _tts_key(clean: str, s: dict) -> str:
 
 
 def _prune_tts_cache() -> None:
+    """Startup-only (line ~44): drop clips past TTL, and every *.part — a
+    streaming job's partial file whose server was restarted mid-clip (no
+    job survives a restart, so a .part at boot is always an orphan)."""
     try:
         cutoff = time.time() - TTS_CACHE_TTL
         for name in os.listdir(TTS_CACHE_DIR):
             p = os.path.join(TTS_CACHE_DIR, name)
             try:
-                if os.path.getmtime(p) < cutoff:
+                if name.endswith(".part") or os.path.getmtime(p) < cutoff:
                     os.remove(p)
             except OSError:
                 pass
