@@ -352,13 +352,20 @@ class SGlangChatOpenAI(ChatOpenAI):
         return gc
 
 
+REASONING_EFFORTS = ("xhigh", "medium", "low")
+
+
 def model(s: dict) -> ChatOpenAI:
     # Always state enable_thinking explicitly. Qwen3-style hybrids think by
     # *default* — omitting the kwarg would keep reasoning streaming even when
     # the user turned thinking off (the sglang/vllm template flips per flag).
-    extra_body = {
-        "chat_template_kwargs": {"enable_thinking": bool(s.get("enable_thinking"))}
-    }
+    kw = {"enable_thinking": bool(s.get("enable_thinking"))}
+    if kw["enable_thinking"] and s.get("reasoning_effort"):
+        # Qwen3.8 template: xhigh (its default when unset) | medium | low;
+        # anything else raises in the template → only pass known values
+        if s["reasoning_effort"] in REASONING_EFFORTS:
+            kw["reasoning_effort"] = s["reasoning_effort"]
+    extra_body = {"chat_template_kwargs": kw}
     vision = bool((s.get("capabilities") or {}).get("vision"))
     return SGlangChatOpenAI(
         model=s["model"],

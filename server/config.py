@@ -61,6 +61,9 @@ DEFAULTS = {
     # a single Spark). Enable in CONFIG to stream reasoning into the
     # ◈ THINKING cards (the topbar REASONING button only shows/hides cards).
     "enable_thinking": False,
+    # chat_template_kwargs.reasoning_effort while thinking: xhigh | medium |
+    # low. The Qwen3.8 template defaults to xhigh when it isn't sent.
+    "reasoning_effort": "xhigh",
     # Model input modalities. sglang/llama.cpp can't tell us, so the user
     # declares them; the UI only offers image paste/attach when vision=true.
     # RadixArk/Qwen3.8-Flash-Next-NVFP4 verified vision-capable on the Spark

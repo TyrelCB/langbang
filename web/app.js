@@ -2175,6 +2175,8 @@ async function openSettings() {
   sndStatusSweep();
   $("#set-vision").checked = !!(s.capabilities || {}).vision;
   $("#set-thinking").checked = !!s.enable_thinking;
+  $("#set-reasoning_effort").value = s.reasoning_effort || "xhigh";
+  $("#set-reasoning_effort").disabled = !s.enable_thinking;
   $("#set-compact").checked = !!s.compact_enabled;
   $("#set-deep_agent").checked = !!s.deep_agent;
   $("#set-skills_enabled").checked = !!s.skills_enabled;
@@ -2223,6 +2225,7 @@ async function saveSettings() {
     system_prompt: $("#set-system_prompt").value,
     capabilities: { vision: $("#set-vision").checked },
     enable_thinking: $("#set-thinking").checked,
+    reasoning_effort: $("#set-reasoning_effort").value || "xhigh",
     compact_enabled: $("#set-compact").checked,
     deep_agent: $("#set-deep_agent").checked,
     skills_enabled: $("#set-skills_enabled").checked,
@@ -3385,6 +3388,9 @@ $("#btn-review-now").onclick = async () => {
   b.disabled = !threadId;
   refreshMemoryUI();
 };
+
+// effort only means something while thinking is on
+$("#set-thinking").addEventListener("change", (e) => { $("#set-reasoning_effort").disabled = !e.target.checked; });
 
 $("#btn-recap").onclick = openRecap;
 $("#btn-recap-close").onclick = () => { SFX.play("click"); closeRecap(); };
