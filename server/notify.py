@@ -142,6 +142,16 @@ async def run_finished(tid: str, events: list[dict]) -> None:
         agent._spawn(send_ntfy(ev, s))
 
 
+def learned(tid: str, title: str, results: list[dict]) -> None:
+    """Feed-only event (toast, no push): the post-run review changed a skill
+    or memory. Shown even on the thread you're looking at — it's news."""
+    global _seq
+    _seq += 1
+    text = "; ".join(f"{r['op']} {r['kind']} {r['name']}" for r in results)
+    EVENTS.append({"id": _seq, "ts": time.time(), "kind": "learned", "tid": tid,
+                   "title": title, "text": text[:280]})
+
+
 async def send_ntfy(ev: dict, s: dict | None = None) -> dict:
     """POST one message to the ntfy topic. Returns {ok, status|error}."""
     s = s or settings()

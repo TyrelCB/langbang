@@ -39,7 +39,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 from deepagents.middleware._utils import append_to_system_message
 
-from . import config, local_tools, mcp
+from . import config, learning, local_tools, mcp
 
 # LangBang's tuning of the deepagents harness, registered for provider
 # "openai" (our sglang backend is OpenAI-compatible; the lookup falls back to
@@ -114,10 +114,12 @@ async def init() -> None:
     )
     # threads.orig = the seed title (schedule name / first-message prefix) that
     # ⟲ revert-title restores. Existing DBs predate the column.
-    try:
-        await _db.execute("ALTER TABLE threads ADD COLUMN orig TEXT")
-    except aiosqlite.OperationalError:  # duplicate column — already migrated
-        pass
+    # threads.prompt = per-thread instructions appended to the system prompt
+    for col in ("orig", "prompt"):
+        try:
+            await _db.execute(f"ALTER TABLE threads ADD COLUMN {col} TEXT")
+        except aiosqlite.OperationalError:  # duplicate column — already migrated
+            pass
     await _db.execute("UPDATE threads SET orig=title WHERE orig IS NULL")
     await _db.commit()
     await _edb.executescript(
@@ -948,6 +950,15 @@ class _FileArgAlias(AgentMiddleware):
                 str(request.tool_call.get("args") or {}),
                 res.content,
             )
+        if (call.get("name") in ("write_file", "edit_file") and isinstance(res, ToolMessage)
+                and getattr(res, "status", None) != "error"):
+            # an agent-written SKILL.md with broken frontmatter silently
+            # doesn't load (gmail-inbox-triage, 2026-10-04: unquoted ': ' in
+            # the description) — say so while the agent can still fix it
+            warn = learning.check_written_skill(str((request.tool_call.get("args") or {}).get("file_path") or ""))
+            if warn:
+                logger.warning("skill-check: %s", warn)
+                res = res.model_copy(update={"content": f"{_text_only(res.content)}\n\n{warn}"})
         return res
 
 class _MediaReadGuard(AgentMiddleware):
@@ -1302,7 +1313,7 @@ def _fs_backend():
     return backends.FilesystemBackend(root_dir=os.path.expanduser("~"), virtual_mode=False)
 
 
-async def build_agent(s: dict, checkpointer=None):
+async def build_agent(s: dict, checkpointer=None, thread_prompt: str = ""):
     enabled = s.get("local_tools") or {}
     deep = bool(s.get("deep_agent", True))
     skip = DEEP_REPLACED_TOOLS if deep else set()
@@ -1311,8 +1322,13 @@ async def build_agent(s: dict, checkpointer=None):
         for t in local_tools.LOCAL_TOOLS
         if enabled.get(t.name, True) and t.name not in skip
     ] + await mcp.get_tools(s.get("mcp_servers") or {})
+    if s.get("memory_enabled", True):
+        tools += learning.MEMORY_TOOLS
     cp = checkpointer or _checkpointer
-    prompt = s["system_prompt"] + local_tools.TOOLS_NOTE
+    # built per run: memory edits and thread-prompt changes apply next turn
+    # (also keeps the system prompt stable — and prefix-cached — mid-run)
+    prompt = (s["system_prompt"] + learning.thread_note(thread_prompt)
+              + local_tools.TOOLS_NOTE + learning.memory_note(s))
     if deep:
         mw = [TodoListMiddleware()]  # write_todos planning tool
         if s.get("compact_enabled", True):
@@ -1835,6 +1851,15 @@ async def rename_thread(tid: str, title: str) -> str | None:
     return title[:200] if hit else None
 
 
+async def set_thread_prompt(tid: str, text: str) -> bool:
+    """Per-thread instructions (applied from the thread's next run)."""
+    text = (text or "").strip()[: learning.THREAD_PROMPT_CAP]
+    async with _wt(_db):
+        cur = await _db.execute("UPDATE threads SET prompt=? WHERE id=?", (text or None, tid))
+        hit = cur.rowcount
+    return bool(hit)
+
+
 async def auto_title(tid: str) -> str | None:
     """⚡: one cheap LLM call names the thread from a transcript slice."""
     msgs = await history(tid)
@@ -1914,7 +1939,7 @@ async def run_chat(
             meta={"text": _cap(user_text or "[image]", 800),
                   **({"gate": True} if resume else {}), **({"plan": True} if plan else {})},
         )
-        agent = await build_agent(s)
+        agent = await build_agent(s, thread_prompt=await learning.get_thread_prompt(_db, thread_id))
         deep = bool(s.get("deep_agent", True))
         # Deep mode grants headroom for write_todos bookkeeping rounds (each
         # todo update is a full model+tool round that isn't "real" iteration).

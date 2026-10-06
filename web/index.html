@@ -34,6 +34,7 @@
         <button id="btn-files" class="btn ghost" title="browse + edit text files on the server (Ctrl+S saves)">✎ FILES</button>
         <button id="btn-recap" class="btn ghost" title="session recap — LLM summary of this thread for cold resume">✦ RECAP</button>
         <button id="btn-game" class="btn ghost" title="X-SIM platformer — G to open, ESC to bail back to chat">⚔ X-SIM</button>
+        <button id="btn-tprompt" class="btn ghost" title="instructions for THIS thread only — appended to the system prompt on every run here (scheduled runs too)" disabled>✎ PROMPT</button>
         <button id="btn-reasoning" class="btn ghost" title="Show/hide model reasoning">◈ REASONING: ON</button>
         <button id="btn-voice" class="btn ghost" title="Read finished replies aloud (per-message 🔊 works regardless)">🔊 VOICE: OFF</button>
         <div id="ctx-tag" title="Tokens the model re-reads on the next call (post-compaction)"></div>
@@ -130,6 +131,24 @@
         <div class="tools-box col">
           <label class="chk"><input type="checkbox" id="set-skills_enabled"> load skills — Hermes tree (~/.hermes/skills, read-only) + ~/.langbang/skills (agent can author here); deep agent mode only</label>
         </div>
+      </section>
+      <section class="cfg-card wide" id="cfg-learning">
+        <h3>MEMORY &amp; LEARNING</h3>
+        <div class="hint">Memories are one file per fact in <code id="mem-dir">~/.langbang/memory</code>; their one-line index rides every thread's system prompt and the agent saves/updates them with <code>remember</code> / <code>forget</code>. After a clean run with enough tool calls, a background review reads the turn and may create or patch a LangBang skill and save memories — each change is validated, the old version kept in <code>~/.langbang/skill-history/</code>, and announced with a 📘 toast.</div>
+        <div class="tools-box col">
+          <label class="chk"><input type="checkbox" id="set-memory_enabled"> memory — index in every system prompt + remember/forget tools</label>
+          <label class="chk"><input type="checkbox" id="set-review-enabled"> automatic skill &amp; memory review after substantial runs</label>
+          <label class="chk"><input type="checkbox" id="set-review-scheduled"> also review scheduled runs (off: repetitive cron runs would churn skills)</label>
+        </div>
+        <div class="row">
+          <label>Review runs with at least <input id="set-review-min" type="number" min="1" max="200" step="1"> tool calls</label>
+        </div>
+        <div class="learn-head">MEMORIES <span id="mem-count"></span></div>
+        <div id="mem-list" class="learn-list"></div>
+        <div class="learn-head">RECENT REVIEWS
+          <button id="btn-review-now" class="btn ghost" type="button" title="review the open thread's last turn now">📘 REVIEW THIS THREAD NOW</button></div>
+        <div id="review-msg" class="hint hidden"></div>
+        <div id="learn-list" class="learn-list"></div>
       </section>
       <section class="cfg-card">
         <h3>LOCAL TOOLS</h3>
@@ -299,6 +318,23 @@
         <button id="btn-save" class="btn accent">SAVE</button>
       </div>
       <div id="settings-error" class="error hidden"></div>
+    </div>
+  </div>
+
+  <div id="tprompt-panel" class="hidden">
+    <div class="panel-inner sched-inner">
+      <h2>THREAD PROMPT</h2>
+      <section class="cfg-card wide">
+        <h3 id="tprompt-thread"></h3>
+        <div class="hint">Extra instructions for this thread only, appended to the global system prompt (CONFIG → MODEL) on every run here — including scheduled runs. Applies from the next message.</div>
+        <textarea id="tprompt-text" rows="10" placeholder="e.g. Answer in terse bullet points. This thread is about the homelab — prefer checking live state over memory."></textarea>
+        <div id="tprompt-count" class="hint"></div>
+      </section>
+      <div class="row end">
+        <button id="btn-tprompt-clear" class="btn ghost">CLEAR</button>
+        <button id="btn-tprompt-cancel" class="btn ghost">CANCEL</button>
+        <button id="btn-tprompt-save" class="btn accent">SAVE</button>
+      </div>
     </div>
   </div>
 

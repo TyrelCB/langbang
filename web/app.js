@@ -1512,6 +1512,7 @@ async function refreshThreads() {
     box.appendChild(d);
   }
   $("#btn-recap").disabled = !threadId; // recap needs an open thread
+  $("#btn-tprompt").disabled = !threadId; // a draft has no row to hang it on
   updateCtxTag();
 }
 
@@ -1610,6 +1611,7 @@ async function openThread(t) {
   // during a heavy run) must not reject after an early `seq` return or after
   // the render already succeeded — worst case the row just won't re-sort.
   const bumped = api.touchThread(t.id).catch(() => {});
+  syncTPrompt(t.id);
   const msgs = await api.messages(t.id);
   if (seq !== openSeq) return; // superseded by a newer open/newThread — don't paint
   // returning to the thread that is mid-run: re-attach its parked nodes and
@@ -1641,6 +1643,7 @@ async function newThread() {
   closeRecap();
   parkAll(); // switch to a draft: mid-run threads' output stays behind (runs go on)
   threadId = null;
+  syncTPrompt(null);
   $("#chat").innerHTML = "";
   $("#chat-title").textContent = "NEW CHAT";
   $("#sb-live").classList.add("hidden");
@@ -2175,6 +2178,14 @@ async function openSettings() {
   $("#set-compact").checked = !!s.compact_enabled;
   $("#set-deep_agent").checked = !!s.deep_agent;
   $("#set-skills_enabled").checked = !!s.skills_enabled;
+  const rv = { enabled: true, min_tool_calls: 6, scheduled: false, ...(s.skill_review || {}) };
+  $("#set-memory_enabled").checked = s.memory_enabled !== false;
+  $("#set-review-enabled").checked = !!rv.enabled;
+  $("#set-review-scheduled").checked = !!rv.scheduled;
+  $("#set-review-min").value = rv.min_tool_calls;
+  $("#btn-review-now").disabled = !threadId;
+  $("#review-msg").classList.add("hidden");
+  refreshMemoryUI(true);
   loadedVoice = { ...DEFAULT_VOICE, ...(s.voice || {}) };
   await pvLoad(loadedVoice.pocket_voice); // options must exist before .value is set
   notifyLoadForm(s.notify || {});
@@ -2215,6 +2226,12 @@ async function saveSettings() {
     compact_enabled: $("#set-compact").checked,
     deep_agent: $("#set-deep_agent").checked,
     skills_enabled: $("#set-skills_enabled").checked,
+    memory_enabled: $("#set-memory_enabled").checked,
+    skill_review: { // complete dict (top-level merge)
+      enabled: $("#set-review-enabled").checked,
+      scheduled: $("#set-review-scheduled").checked,
+      min_tool_calls: Math.max(1, Math.min(200, parseInt($("#set-review-min").value, 10) || 6)),
+    },
     compact_trigger_tokens: parseInt($("#set-compact_trigger_tokens").value) || 0,
     compact_keep_messages: parseInt($("#set-compact_keep_messages").value) || 20,
     compact_summary_tokens: parseInt($("#set-compact_summary_tokens").value) || 800,
@@ -2941,8 +2958,8 @@ $("#btn-sched-save").onclick = saveScheduleTask;
 let notifyCursor = -1; // -1 = fresh tab: take the cursor, don't replay history
 let unseenNotes = 0;
 const BASE_TITLE = document.title;
-const NOTE_ICON = { input: "◆", done: "✓", failed: "✕" };
-const NOTE_WORD = { input: "NEEDS YOUR INPUT", done: "FINISHED", failed: "FAILED" };
+const NOTE_ICON = { input: "◆", done: "✓", failed: "✕", learned: "📘" };
+const NOTE_WORD = { input: "NEEDS YOUR INPUT", done: "FINISHED", failed: "FAILED", learned: "LEARNED" };
 
 async function pollNotify() {
   let r;
@@ -2958,7 +2975,8 @@ function notifyOpen(ev) {
 }
 
 function notifyShow(ev) {
-  if (ev.tid === threadId && !document.hidden) return; // you're looking at it
+  // you're looking at it — except "learned" (skill/memory changed): that's news
+  if (ev.tid === threadId && !document.hidden && ev.kind !== "learned") return;
   const t = el("div", "toast " + ev.kind);
   t.append(el("div", "toast-head", `${NOTE_ICON[ev.kind] || "•"} ${NOTE_WORD[ev.kind] || ev.kind}`),
            el("div", "toast-title", ev.title || "LangBang"));
@@ -2971,6 +2989,7 @@ function notifyShow(ev) {
   // needs-input waits for you; the rest fade on their own
   if (ev.kind !== "input") setTimeout(() => t.remove(), ev.kind === "failed" ? 30000 : 15000);
   while ($("#toasts").children.length > 4) $("#toasts").firstChild.remove();
+  if (ev.kind === "learned") { refreshMemoryUI(); return; } // quiet: no sound/badge/popup
   SFX.play(ev.kind === "failed" ? "error" : "message_received");
   if (document.hidden) { unseenNotes++; document.title = `(${unseenNotes}) ${BASE_TITLE}`; }
   desktopNotify(ev);
@@ -3238,6 +3257,135 @@ async function openRecap() {
   }
 }
 
+// ---------- per-thread prompt ----------
+// Stored server-side per thread (threads.prompt) and appended to the system
+// prompt on every run in that thread; ✎ PROMPT lights up while one is set.
+let tpromptSeq = 0;
+async function syncTPrompt(tid) {
+  const b = $("#btn-tprompt"), seq = ++tpromptSeq;
+  b.classList.remove("on"); b.dataset.prompt = "";
+  b.textContent = "✎ PROMPT";
+  b.disabled = !tid;
+  if (!tid) return;
+  let r;
+  try { r = await J(await fetch(`/api/threads/${tid}/prompt`)); } catch { return; }
+  if (seq !== tpromptSeq || tid !== threadId) return; // switched away meanwhile
+  b.dataset.prompt = r.prompt || "";
+  b.classList.toggle("on", !!r.prompt);
+  b.textContent = r.prompt ? "✎ PROMPT: ON" : "✎ PROMPT";
+}
+function tpromptCount() {
+  const n = $("#tprompt-text").value.length;
+  $("#tprompt-count").textContent = `${n} / 8000 chars`;
+}
+function openTPrompt() {
+  if (!threadId) return;
+  SFX.play("click");
+  $("#tprompt-thread").textContent = $("#chat-title").textContent;
+  $("#tprompt-text").value = $("#btn-tprompt").dataset.prompt || "";
+  tpromptCount();
+  $("#tprompt-panel").classList.remove("hidden");
+  $("#tprompt-text").focus();
+}
+const closeTPrompt = () => $("#tprompt-panel").classList.add("hidden");
+async function saveTPrompt(text) {
+  const tid = threadId;
+  try {
+    await J(await fetch(`/api/threads/${tid}/prompt`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: text }),
+    }));
+  } catch (e) { $("#tprompt-count").textContent = "save failed: " + e.message; return; }
+  closeTPrompt();
+  SFX.play("settings_saved");
+  syncTPrompt(tid);
+}
+$("#btn-tprompt").onclick = openTPrompt;
+$("#tprompt-text").oninput = tpromptCount;
+$("#btn-tprompt-save").onclick = () => saveTPrompt($("#tprompt-text").value);
+$("#btn-tprompt-clear").onclick = () => saveTPrompt("");
+$("#btn-tprompt-cancel").onclick = () => { SFX.play("click"); closeTPrompt(); };
+$("#tprompt-panel").onclick = (e) => { if (e.target.id === "tprompt-panel") closeTPrompt(); };
+$("#tprompt-text").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); $("#btn-tprompt-save").click(); }
+});
+
+// ---------- memory & learning (CONFIG) ----------
+const fmtWhen = (ts) => new Date(ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+function learnOpenFile(path) {
+  closeSettings(false);
+  if (!$("#settings-panel").classList.contains("hidden")) return; // unsaved CONFIG: its bar asks first
+  openEditor(path);
+}
+async function refreshMemoryUI(force = false) {
+  // feed events refresh only an OPEN CONFIG; openSettings forces (it unhides last)
+  if (!force && $("#settings-panel").classList.contains("hidden")) return;
+  let mem, log;
+  try { [mem, log] = await Promise.all([J(await fetch("/api/memory")), J(await fetch("/api/learning?n=20"))]); }
+  catch { return; }
+  $("#mem-dir").textContent = mem.dir;
+  $("#mem-count").textContent = `(${mem.memories.length})`;
+  const ml = $("#mem-list");
+  ml.innerHTML = "";
+  if (!mem.memories.length) ml.appendChild(el("div", "learn-empty", "none yet — the agent saves them with remember, or the review does"));
+  for (const m of mem.memories) {
+    const row = el("div", "learn-row");
+    const main = el("div", "lr-main");
+    const nm = el("span", "lr-name", m.name);
+    nm.title = "open in FILES";
+    nm.onclick = () => learnOpenFile(m.path);
+    main.append(nm, el("span", "lr-meta", ` · ${m.type || "note"} — `), document.createTextNode(m.description));
+    if (m.error) main.appendChild(el("div", "lr-bad", "⚠ " + m.error));
+    const x = el("button", "btn ghost", "✕");
+    x.type = "button"; x.title = "forget this memory";
+    x.onclick = async () => {
+      if (x.dataset.armed !== "1") { x.dataset.armed = "1"; x.textContent = "SURE?"; return; }
+      try { await J(await fetch("/api/memory/" + encodeURIComponent(m.name), { method: "DELETE" })); } catch {}
+      refreshMemoryUI();
+    };
+    row.append(main, x);
+    ml.appendChild(row);
+  }
+  const ll = $("#learn-list");
+  ll.innerHTML = "";
+  const entries = (log.entries || []).filter((e) => !e.skipped);
+  if (!entries.length) ll.appendChild(el("div", "learn-empty", "no reviews yet"));
+  for (const e of entries) {
+    const row = el("div", "learn-row");
+    const main = el("div", "lr-main");
+    main.appendChild(el("span", "lr-meta", `${fmtWhen(e.ts)} · ${e.title || e.tid} · ${e.tool_calls} calls${e.auto ? "" : " · manual"} — `));
+    const res = e.results || [];
+    if (!res.length) main.appendChild(document.createTextNode("nothing new"));
+    res.forEach((r, i) => {
+      if (i) main.appendChild(document.createTextNode(", "));
+      if (r.op === "rejected") { main.appendChild(el("span", "lr-bad", `rejected ${r.kind} ${r.name}: ${r.error}`)); return; }
+      main.appendChild(document.createTextNode(`${r.op} ${r.kind} `));
+      const nm = el("span", "lr-name", r.name);
+      nm.title = r.path + (r.backup ? `\nprevious version: ${r.backup}` : "");
+      nm.onclick = () => learnOpenFile(r.path);
+      main.appendChild(nm);
+    });
+    if (e.reason) { const why = el("div", "lr-meta", e.reason); main.appendChild(why); }
+    row.appendChild(main);
+    ll.appendChild(row);
+  }
+}
+$("#btn-review-now").onclick = async () => {
+  const b = $("#btn-review-now"), msg = $("#review-msg");
+  if (!threadId) return;
+  b.disabled = true;
+  msg.textContent = "reviewing the last turn… (one model call, ~10–60 s)";
+  msg.classList.remove("hidden");
+  try {
+    const r = await J(await fetch(`/api/threads/${threadId}/review`, { method: "POST" }));
+    const n = (r.results || []).filter((x) => x.op !== "rejected").length;
+    msg.textContent = r.skipped ? "skipped: " + r.skipped
+      : n ? `done — ${n} change(s), see below` : "done — nothing worth keeping from that turn";
+  } catch (e) { msg.textContent = "review failed: " + e.message; }
+  b.disabled = !threadId;
+  refreshMemoryUI();
+};
+
 $("#btn-recap").onclick = openRecap;
 $("#btn-recap-close").onclick = () => { SFX.play("click"); closeRecap(); };
 $("#recap-panel").onclick = (e) => { if (e.target.id === "recap-panel") closeRecap(); };
@@ -3245,6 +3393,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   // settings above recap: it can sit on top of it and is the top-most panel
   if (!$("#settings-panel").classList.contains("hidden")) closeSettings(false);
+  else if (!$("#tprompt-panel").classList.contains("hidden")) closeTPrompt();
   else if (!$("#editor-panel").classList.contains("hidden")) edClose();
   else if (!$("#recap-panel").classList.contains("hidden")) closeRecap();
 });

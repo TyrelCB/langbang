@@ -777,6 +777,8 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
 .toast-head { font-size: 10px; letter-spacing: 2px; color: var(--cyan); margin-bottom: 2px; }
 .toast.input .toast-head { color: var(--orange); }
 .toast.failed .toast-head { color: var(--danger); }
+.toast.learned { border-left-color: var(--cyan); }
+.toast.learned .toast-head { color: var(--cyan); }
 .toast-title { color: var(--text); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .toast-text { color: var(--muted); margin-top: 3px; display: -webkit-box; -webkit-line-clamp: 2;
   -webkit-box-orient: vertical; overflow: hidden; }
@@ -822,3 +824,23 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
 /* write_todos whose args the tool-call parser dropped: a resend, not a failure */
 details.block.tool.retried > summary { color: var(--orange); }
 .traj-resent { color: var(--orange); }
+
+/* per-thread prompt + memory & learning (CONFIG) */
+#btn-tprompt { font: inherit; font-size: 12px; letter-spacing: 1px; padding: 3px 10px; }
+#btn-tprompt.on { color: var(--cyan); border-color: var(--cyan-dim); }
+#tprompt-panel { position: fixed; inset: 0; background: rgba(2,6,12,.8); display: flex;
+  align-items: center; justify-content: center; z-index: 10; }
+#tprompt-text { width: 100%; box-sizing: border-box; font: inherit; resize: vertical; }
+.learn-head { margin: 14px 0 6px; color: var(--cyan); letter-spacing: 2px; font-size: 12px;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.learn-head .btn { font-size: 11px; padding: 2px 8px; }
+.learn-list { display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow-y: auto; }
+.learn-row { display: flex; gap: 8px; align-items: baseline; border: 1px solid var(--line);
+  padding: 5px 8px; font-size: 12px; }
+.learn-row .lr-main { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.learn-row .lr-name { color: var(--text); font-weight: bold; cursor: pointer; }
+.learn-row .lr-name:hover { color: var(--cyan); text-decoration: underline; }
+.learn-row .lr-meta { color: var(--muted); }
+.learn-row .lr-bad { color: var(--danger); }
+.learn-row button { font-size: 11px; padding: 1px 6px; }
+.learn-empty { color: var(--muted); font-size: 12px; padding: 4px 2px; }
