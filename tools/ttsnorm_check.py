@@ -9,6 +9,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from server.ttsnorm import normalize  # noqa: E402
+from server.voice import speakable  # noqa: E402
 
 CASES = [
     ("Refreshed for Thu, Oct 1, 2026 (13:11 UTC) — Week 4 kicks off tonight.",
@@ -36,12 +37,20 @@ CASES = [
     ("🏈 NFL — Week 4 final. Colts 30 Commanders 13 (London) · 49ers 24 Broncos 14 · Panthers 32 Lions 26.",
      "N F L, Week four final. Colts thirty, Commanders thirteen, London. forty-niners twenty-four, Broncos fourteen. Panthers thirty-two, Lions twenty-six."),
     ("✅ Done • 3 items ⚠️ check | next", "Done. three items, check. next"),
+    # 2026-10-06: TNA fund write-up — table rows, signs, finance shorthand
+    ("2021     +33%     +15%     −12pp", "twenty twenty-one, plus thirty-three percent, plus fifteen percent, minus twelve percentage points."),
+    ("52-week range     $37.03 – $77.24", "fifty-two-week range, thirty-seven dollars and three cents to seventy-seven dollars and twenty-four cents."),
+    ("Distribution ~$0.18 ttm (0.3%), up 4.5%/yr since inception (17.8y).",
+     "Distribution about eighteen cents trailing twelve months, zero point three percent, up four point five percent per year since inception, seventeen point eight years."),
+    ("captured 2010–12 and 2019–21; splits (2013, 2017); inception Nov 5 2008",
+     "captured twenty ten to twenty twelve and twenty nineteen to twenty twenty-one; splits, twenty thirteen, twenty seventeen, inception November fifth, two thousand eight"),
+    ("| Year | TNA | IWM |\n|---|---|---|\n| 2024 | +8% | +11% |", "Year, T N A, I W M. twenty twenty-four, plus eight percent, plus eleven percent."),
     ("It ran 24/7 w/ 99.9% uptime ±0.1%, ≥ 3 nodes.", "It ran twenty-four seven with ninety-nine point nine percent uptime plus or minus zero point one percent, at least three nodes."),
 ]
 
 bad = 0
 for src, want in CASES:
-    got = normalize(src)
+    got = normalize(speakable(src)) if "\n" in src or "  " in src else normalize(src)
     if got != want:
         bad += 1
         print(f"FAIL {src!r}\n  want {want!r}\n  got  {got!r}")
