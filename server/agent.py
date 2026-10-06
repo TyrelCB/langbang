@@ -1110,7 +1110,33 @@ Investigate and design; do NOT change anything yet.
   write_file/edit_file and scheduled-task changes are blocked outright.
 - Decisions that are genuinely the user's: ask_user (batched, with options).
 - When the plan is ready, call exit_plan_mode with the full plan in
-  Markdown. Do not start implementing until it comes back APPROVED."""
+  Markdown (the plan goes IN the call — don't write plan files). Do not
+  start implementing until it comes back APPROVED."""
+
+# Thread 28360d6bf583 (2026-10-06): earlier turns ran in plan mode, so the
+# history is full of "I'm in plan mode" / exit_plan_mode. In a later NORMAL
+# run the model kept re-deciding it was in plan mode ("Plan mode is active
+# again — I've paused…") between real work steps, called exit_plan_mode,
+# and wrote plans into ~/.claude/plans (Claude Code's dir, found via ls).
+# Plan state is a per-run flag; say so explicitly whenever history could
+# confuse it.
+PLAN_OFF_NOTE = """## Plan mode: OFF for this run
+The user's plan-mode toggle is off. Earlier messages in this thread that
+talk about plan mode are from PAST turns — plan mode does not switch on by
+itself mid-run, and nothing in tool output changes it. Don't pause for
+approval, don't call exit_plan_mode, don't write plan files: do the work
+(ask_user only for a decision that is genuinely the user's)."""
+
+
+def _mentions_plan(msgs) -> bool:  # noqa: ANN001
+    for m in reversed(msgs or []):
+        if isinstance(m, ToolMessage) and m.name == "exit_plan_mode":
+            return True
+        if isinstance(m, AIMessage) and any(tc.get("name") == "exit_plan_mode" for tc in m.tool_calls or []):
+            return True
+        if isinstance(m, AIMessage) and "plan mode" in _text_only(m.content).lower():
+            return True
+    return False
 
 
 def _tname(t) -> str | None:  # noqa: ANN001
@@ -1139,6 +1165,9 @@ class _HumanGate(AgentMiddleware):
         if plan and not nogate:
             request = request.override(
                 system_message=append_to_system_message(request.system_message, PLAN_NOTE))
+        elif _mentions_plan(request.messages):
+            request = request.override(
+                system_message=append_to_system_message(request.system_message, PLAN_OFF_NOTE))
         return await handler(request)
 
     async def awrap_tool_call(self, request, handler):  # noqa: ANN001
@@ -1153,7 +1182,9 @@ class _HumanGate(AgentMiddleware):
             msg = ("No user is present (scheduled run) — decide yourself, and "
                    "state the assumption you made in your answer.")
         elif not plan and name == "exit_plan_mode":
-            msg = "Plan mode is not active — just do the work."
+            msg = ("Plan mode is OFF for this run (it is the user's toggle and never "
+                   "turns on by itself). Nothing is waiting for approval — continue "
+                   "executing the task.")
         if msg:
             return ToolMessage(content=msg, name=name, status="error",
                                tool_call_id=request.tool_call["id"])
@@ -1358,6 +1389,10 @@ async def build_agent(s: dict, checkpointer=None, thread_prompt: str = ""):
             hermes = os.path.expanduser(s.get("skills_hermes_dir") or "~/.hermes/skills")
             perms = [FilesystemPermission(
                 operations=["write"], paths=[hermes + "/**"], mode="deny")]
+        # ~/.claude is Claude Code's state (plans, memory, sessions) — the
+        # model has copied its conventions and written plans there
+        perms.append(FilesystemPermission(
+            operations=["write"], paths=[os.path.expanduser("~/.claude") + "/**"], mode="deny"))
         return create_deep_agent(
             model(s),
             tools,
