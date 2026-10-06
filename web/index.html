@@ -200,6 +200,12 @@
               <option value="dutch">dutch</option>
             </select>
           </label>
+          <label title="Pocket garbles digits and abbreviations (Thu, Oct 1, 13:11 UTC); spelling them out first fixes most of it">Speak numbers &amp; dates as words
+            <select id="set-voice-tts_normalize">
+              <option value="pocket">Pocket only (recommended)</option>
+              <option value="all">all providers</option>
+              <option value="off">off — speak raw text</option>
+            </select></label>
           <label>Pocket CPU threads <input id="set-voice-pocket_threads" type="number" min="1" max="8" step="1" title="2 benchmarked as fast as 4 or 8 on this box (~4.5x realtime)"></label>
         </div>
         <div id="pv-clone" class="pv-clone hidden">

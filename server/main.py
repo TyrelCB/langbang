@@ -1016,14 +1016,16 @@ def _prune_tts_cache() -> None:
 async def tts(body: TTSIn):
     if len(body.text) > voice.MAX_TTS_CHARS:
         raise HTTPException(400, f"text too long to speak (max {voice.MAX_TTS_CHARS} chars)")
-    clean = voice.speakable(body.text)
-    if not clean:
-        raise HTTPException(400, "nothing speakable in text")
     s = config.load()
     if body.voice:
         s = {**s, "voice": {**(s.get("voice") or {}), "tts_provider": "pocket",
                             "pocket_voice": body.voice,
                             **({"pocket_language": body.language} if body.language else {})}}
+    # markdown → prose, then numbers/dates/times → words (keyed into the
+    # cache: normalized text is a different clip)
+    clean = voice.prepare(body.text, s)
+    if not clean:
+        raise HTTPException(400, "nothing speakable in text")
     key = _tts_key(clean, s)
     v = s.get("voice") or {}
     if (v.get("tts_provider") or "gtts") == "pocket" and shutil.which("ffmpeg"):
