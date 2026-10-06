@@ -206,8 +206,74 @@ def _zone_words(z: str | None) -> str:
     return " " + _spell_letters(z)
 
 
+# emoji, pictographs, dingbats, arrows, box drawing, variation selectors, ZWJ…
+_EMOJI = re.compile(
+    "[\U0001F000-\U0001FAFF\U0001FC00-\U0001FFFF\u2190-\u21FF\u2300-\u23FF\u2460-\u24FF"
+    "\u2500-\u27BF\u2900-\u297F\u2B00-\u2BFF\u3030\u303D\u3297\u3299\uFE00-\uFE0F"
+    "\u200B-\u200F\u2060\U000E0000-\U000E007F]+")
+_SYMBOLS = [("±", " plus or minus "), ("≥", " at least "), ("≤", " at most "),
+            ("≠", " not equal to "), ("\u201c", '"'), ("\u201d", '"'), ("\u2018", "'"),
+            ("\u2019", "'"), ("\u00a0", " ")]
+
+
+def _pre(t: str) -> str:
+    """Characters Pocket can't say or that wreck its sentence chunker."""
+    t = t.replace("→", " → ")  # keep arrows for the "to" rule below
+    t = re.sub(r" → ", "\x00", t)
+    t = _EMOJI.sub(", ", t)  # an emoji marks a beat (bullet / sign-off), not nothing
+    t = t.replace("\x00", " → ")
+    for a, b in _SYMBOLS:
+        t = t.replace(a, b)
+    # list separators read as sentence ends — Pocket only splits an oversized
+    # sentence at , ; : so "A 30 B 13 · C 29 D 26 · …" was one 300-token run
+    t = re.sub(r"\s*[·•‣◦|]\s*", ". ", t)
+    t = re.sub(r"(?<=\w)\s+[—–-]{1,2}\s+(?=\w)", ", ", t)  # spaced dashes → pause
+    t = re.sub(r"\s*—\s*", ", ", t)
+    t = re.sub(r"\(([^()]*[A-Za-z][^()]{0,59})\)", r", \1,", t)  # short (worded) parentheticals → commas
+    t = re.sub(r"\b24/7\b", "twenty-four seven", t)
+    t = re.sub(r"\bw/(?=\s)", "with", t)
+    # paths: speak the file name, not the directory chain (an unbroken
+    # 80-char token can't be split into Pocket-sized chunks)
+    t = re.sub(r"(?<![\w])(?:~|\.{1,2})?(?:/[\w.@+-]+){2,}/?",
+               lambda m: m[0].rstrip("/").rsplit("/", 1)[-1], t)
+    t = re.sub(r"(?<=[A-Za-z0-9])_+(?=[A-Za-z0-9])", " ", t)  # snake_case → words
+    t = t.replace("*", " ")
+    # closing quote AFTER the period ('stopped." Next') hides the sentence end
+    # from Pocket's splitter — put the period last
+    t = re.sub(r"([.!?])([\"')\]]+)(?=\s|$)", r"\2\1", t)
+    t = re.sub(r"\s+([,.!?;:])", r"\1", t)
+    t = re.sub(r"([,.;:])(?:\s*[,.;:])+", lambda m: "." if "." in m[0] else m[1], t)
+    return t
+
+
+def _post(t: str) -> str:
+    """Scores and long clauses: give Pocket somewhere to breathe."""
+    # "Colts thirty Commanders thirteen" → comma after a score before a Name
+    t = re.sub(r"\b((?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:-[a-z]+)?|"
+               r"zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+               r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen)"
+               r" (?=(?!(?:" + "|".join(MONTHS) + r")\b)[A-Z][a-z])", r"\1, ", t)
+    # any comma-free clause over ~18 words (≈ Pocket's 50-token chunk once
+    # spelled numbers are counted) gets a comma at a natural break
+    def breathe(clause: str) -> str:
+        w = clause.split(" ")
+        if len(w) <= 18:
+            return clause
+        out, run = [], 0
+        for i, word in enumerate(w):
+            if run >= 12 and i < len(w) - 3 and (
+                    word in ("and", "but", "or", "so", "while", "which", "then", "with")
+                    or run >= 16):
+                out[-1] += ","
+                run = 0
+            out.append(word)
+            run += 1
+        return " ".join(out)
+    return re.sub(r"[^,.;:!?]+", lambda m: breathe(m[0]), t)
+
+
 def normalize(text: str) -> str:
-    t = text or ""
+    t = _pre(text or "")
 
     # 1. ISO date-time: 2026-12-31T23:59:59Z / 2026-12-31 23:59 UTC
     def iso_dt(m):
@@ -330,6 +396,10 @@ def normalize(text: str) -> str:
     # 11. "#3" → number three
     t = re.sub(r"(?<!\w)#(\d+)\b", lambda m: "number " + cardinal(int(m[1])), t)
 
+    # 11b. bare digit lists "1,2,3" → one, two, three (not 1,234 groupings)
+    t = re.sub(r"(?<![\w.,])\d{1,2}(?:,\d{1,2})+(?![\w,]|\.\d)",
+               lambda m: ", ".join(cardinal(int(x)) for x in m[0].split(",")), t)
+
     # 12. remaining standalone numbers (not glued to letters: Qwen3.8, x86, H100)
     def num(m):
         s = m[0]
@@ -339,7 +409,7 @@ def normalize(text: str) -> str:
         if re.fullmatch(r"0\d+", bare) or (len(bare.split(".")[0].lstrip("-")) > 15):
             return digits(bare)  # zero-padded ids / huge digit runs: read the digits
         return decimal(bare)
-    t = re.sub(r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?(?!\w|\.\d)", num, t)
+    t = re.sub(r"(?<![\w.])-?\d+(?:,\d{3})*(?:\.\d+)?(?!\w|\.\d|,\d)", num, t)
 
     # 13. all-caps initialisms the model would try to say as a word: 2-3
     # letters (not a shouted common word), or 4 letters with no vowel
@@ -353,4 +423,9 @@ def normalize(text: str) -> str:
     t = re.sub(r"\b([A-Z]{2,4})\b", caps, t)
 
     t = re.sub(r"\b([Tt]he) the\b", r"\1", t)  # "on the 3rd of March" → on the the third…
+    t = re.sub(r"\b(\d+)(ers|ner)\b",  # 49ers → forty-niners, 76ers → seventy-sixers
+               lambda m: (lambda w: (w[:-1] if w.endswith("e") else w) + "ers")(cardinal(int(m[1]))), t)
+    t = _post(t)
+    t = re.sub(r"\s+([,.!?;:])", r"\1", t)
+    t = re.sub(r"^[\s,.;:]+", "", t)
     return re.sub(r"[ \t]{2,}", " ", t).strip()

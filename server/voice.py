@@ -349,14 +349,53 @@ def delete_voice(name: str) -> bool:
     return True
 
 
+POCKET_CLAUSE_TOKENS = 40  # Pocket chunks at <=50 tokens and only re-splits at , ; :
+POCKET_CHUNK_TOKENS = 44   # chunk budget handed to generate_audio_stream (its default: 50)
+
+
+def pocket_fit(text: str, model) -> str:
+    """Give every over-long comma-free clause a comma, measured with Pocket's
+    own tokenizer. Its chunker splits sentences at . ! ? and an oversized
+    sentence only at , ; : — a clause past 50 tokens is generated as one
+    chunk and Pocket "may skip words" (or babbles: "Thuoc 1-226, TNWUTC").
+    Identifiers tokenize densely, so word counts can't judge this."""
+    tok = model.flow_lm.conditioner.tokenizer
+
+    def n(s: str) -> int:
+        return len(tok(s.strip())[0].tolist()) if s.strip() else 0
+
+    def fit(clause: str) -> str:
+        if n(clause) <= POCKET_CLAUSE_TOKENS:
+            return clause
+        words = clause.split(" ")
+        out, cur = [], []
+        for w in words:
+            if cur and n(" ".join(cur + [w])) > POCKET_CLAUSE_TOKENS:
+                out.append(" ".join(cur) + ",")
+                cur = []
+            cur.append(w)
+        out.append(" ".join(cur))
+        return " ".join(out)
+    try:
+        # a decimal point ("V4.1") is NOT a boundary for Pocket either
+        return re.sub(r"(?:[^,.;:!?]|\.(?=\d))+", lambda m: fit(m[0]), text)
+    except Exception:  # noqa: BLE001 - never lose the audio over a tokenizer quirk
+        logger.exception("pocket_fit failed; speaking unfitted text")
+        return text
+
+
 def pocket_pcm(text: str, v: dict, stop: threading.Event | None = None):
     """Yield mono PCM16 little-endian @ POCKET_RATE as it's generated. Holds
     the generation lock for the whole utterance (callers queue behind it)."""
     import torch
 
     model, st = pocket_ready(v)
+    text = pocket_fit(text, model)
     with _pk_gen:
-        for ch in model.generate_audio_stream(st, text, stop=stop):  # copy_state=True: voice reusable
+        # max_tokens 44 (default 50): Pocket regroups sentences by summing
+        # per-piece token counts, and the re-joined text can tokenize a few
+        # tokens longer — 6 of headroom keeps real chunks under its 50 limit
+        for ch in model.generate_audio_stream(st, text, max_tokens=POCKET_CHUNK_TOKENS, stop=stop):  # copy_state=True: voice reusable
             yield (ch.clamp(-1, 1) * 32767).to(torch.int16).numpy().tobytes()
 
 
