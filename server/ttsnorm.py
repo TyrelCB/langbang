@@ -132,7 +132,9 @@ _UNITS = {  # after a number; longest first in the regex
     "mph": "miles per hour", "km/h": "kilometers per hour", "ft": "feet", "mi": "miles",
     "°C": "degrees Celsius", "°F": "degrees Fahrenheit", "°": "degrees",
     "W": "watts", "kW": "kilowatts", "V": "volts", "k": "thousand", "K": "thousand",
-    "M": "million", "B": "billion", "x": "times", "×": "times",
+    "M": "million", "B": "billion", "x": "times", "X": "times", "×": "times",
+    "pp": "percentage points", "bps": "basis points", "bp": "basis points",
+    "y": "years", "yr": "years", "yrs": "years", "mo": "months", "wk": "weeks",
     "tok/s": "tokens per second", "t/s": "tokens per second",
 }
 _UNIT_ALT = "|".join(re.escape(u) for u in sorted(_UNITS, key=len, reverse=True))
@@ -140,7 +142,9 @@ _SINGULAR = {"seconds": "second", "minutes": "minute", "hours": "hour", "meters"
              "degrees": "degree", "pounds": "pound", "ounces": "ounce", "miles": "mile",
              "watts": "watt", "volts": "volt", "gigabytes": "gigabyte", "megabytes": "megabyte",
              "kilobytes": "kilobyte", "terabytes": "terabyte", "milliseconds": "millisecond",
-             "kilometers": "kilometer", "kilograms": "kilogram", "grams": "gram"}
+             "kilometers": "kilometer", "kilograms": "kilogram", "grams": "gram",
+             "years": "year", "months": "month", "weeks": "week",
+             "percentage points": "percentage point", "basis points": "basis point"}
 
 _ABBREV = [(r"\be\.g\.", "for example"), (r"\bi\.e\.", "that is"), (r"\betc\.", "et cetera"),
            (r"\bvs\.?(?=\s)", "versus"), (r"\bapprox\.(?=\s)", "approximately"),
@@ -226,12 +230,33 @@ def _pre(t: str) -> str:
         t = t.replace(a, b)
     # list separators read as sentence ends — Pocket only splits an oversized
     # sentence at , ; : so "A 30 B 13 · C 29 D 26 · …" was one 300-token run
+    t = t.replace("\u2212", "-")  # Unicode minus (finance tables) → ASCII, signs handled below
+    # spaced dash BETWEEN numeric things is a range: "$37.03 – $77.24", "5 - 10%"
+    t = re.sub(r"(?<=[\d%])\s+[–—-]{1,2}\s+(?=[~$€£+-]?\d)", " to ", t)
     t = re.sub(r"\s*[·•‣◦|]\s*", ". ", t)
     t = re.sub(r"(?<=\w)\s+[—–-]{1,2}\s+(?=\w)", ", ", t)  # spaced dashes → pause
     t = re.sub(r"\s*—\s*", ", ", t)
-    t = re.sub(r"\(([^()]*[A-Za-z][^()]{0,59})\)", r", \1,", t)  # short (worded) parentheticals → commas
+    # short parentheticals → commas (not "(303) 555-…" phone area codes)
+    t = re.sub(r"\((?!\d{3}\)\s?\d)([^()]{1,240})\)", r", \1,", t)
     t = re.sub(r"\b24/7\b", "twenty-four seven", t)
     t = re.sub(r"\bw/(?=\s)", "with", t)
+    # "/yr" "/day" after a number or % → per year / per day
+    t = re.sub(r"(?<=[\d%])\s?/\s?(yr|year|y|mo|month|wk|week|day|d|hr|hour|h)\b",
+               lambda m: " per " + {"yr": "year", "y": "year", "mo": "month", "wk": "week",
+                                    "d": "day", "hr": "hour", "h": "hour"}.get(m[1], m[1]), t)
+    t = re.sub(r"(?<=[A-Za-z])/(?=[A-Za-z])", " ", t)  # ETF/futures, and/or → spaced
+    t = re.sub(r"\bttm\b", "trailing twelve months", t, flags=re.I)
+    t = re.sub(r"\bYTD\b", "year to date", t)
+    t = re.sub(r"\bQoQ\b", "quarter over quarter", t)
+    t = re.sub(r"\bYoY\b", "year over year", t)
+    t = re.sub(r"~(?=\s?[$€£+-]?\d)", "about ", t)
+    # year ranges: 2010–12 → twenty ten to twenty twelve; 2019-2021
+    t = re.sub(r"(?<![\d-])((?:19|20)\d\d)[–-]((?:19|20)?\d\d)\b(?!%|\.\d|[–-]\d|[T ]\d\d:)",
+               lambda m: f"{year(int(m[1]))} to {year(int(m[2]) if len(m[2]) == 4 else int(m[1][:2] + m[2]))}"
+               if int(m[2][-2:]) != int(m[1][-2:]) else m[0], t)
+    # sign before a number: "+33%" → plus thirty-three percent; "-5" → minus five
+    t = re.sub(r"(?:(?<=^)|(?<=[\s(,:;]))\+(?=\$?\d)", "plus ", t)
+    t = re.sub(r"(?:(?<=^)|(?<=[\s(,:;]))-(?=\$?\d)", "minus ", t)
     # paths: speak the file name, not the directory chain (an unbroken
     # 80-char token can't be split into Pocket-sized chunks)
     t = re.sub(r"(?<![\w])(?:~|\.{1,2})?(?:/[\w.@+-]+){2,}/?",
@@ -253,23 +278,8 @@ def _post(t: str) -> str:
                r"zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
                r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen)"
                r" (?=(?!(?:" + "|".join(MONTHS) + r")\b)[A-Z][a-z])", r"\1, ", t)
-    # any comma-free clause over ~18 words (≈ Pocket's 50-token chunk once
-    # spelled numbers are counted) gets a comma at a natural break
-    def breathe(clause: str) -> str:
-        w = clause.split(" ")
-        if len(w) <= 18:
-            return clause
-        out, run = [], 0
-        for i, word in enumerate(w):
-            if run >= 12 and i < len(w) - 3 and (
-                    word in ("and", "but", "or", "so", "while", "which", "then", "with")
-                    or run >= 16):
-                out[-1] += ","
-                run = 0
-            out.append(word)
-            run += 1
-        return " ".join(out)
-    return re.sub(r"[^,.;:!?]+", lambda m: breathe(m[0]), t)
+    # long clauses are fitted by voice.pocket_fit with Pocket's own tokenizer
+    return t
 
 
 def normalize(text: str) -> str:
@@ -308,7 +318,7 @@ def normalize(text: str) -> str:
             return m[0]
         out = f"{_mon_word(m['mon'])} {ordinal(d)}"
         if m["y"]:
-            out += f"{m['sep'] or ', '}{year(int(m['y']))}"
+            out += f", {year(int(m['y']))}"  # "Nov 5 2008" too: the comma is the spoken pause
         return out
     t = re.sub(rf"\b(?P<mon>{_MON_ALT})\.?\s+(?P<d>\d{{1,2}})(?:st|nd|rd|th)?\b"
                rf"(?:(?P<sep>,?\s+)(?P<y>\d{{4}})\b)?", md, t)
@@ -361,6 +371,10 @@ def normalize(text: str) -> str:
             return decimal(num) + sc + " " + unit + "s"
         whole, _, cents = num.partition(".")
         w = int(whole or 0)
+        if w == 0 and cents and int(cents.ljust(2, "0")[:2]) and unit != "euro":
+            c = int(cents.ljust(2, "0")[:2])  # $0.18 → eighteen cents
+            return cardinal(c) + (" cent" if c == 1 else " cents") if unit == "dollar" else \
+                cardinal(c) + " pence"
         out = cardinal(w) + " " + unit + ("" if w == 1 else "s")
         if cents and int(cents.ljust(2, "0")[:2]):
             c = int(cents.ljust(2, "0")[:2])
@@ -408,6 +422,10 @@ def normalize(text: str) -> str:
             return s  # "1,2,3" list — leave the commas to separate them
         if re.fullmatch(r"0\d+", bare) or (len(bare.split(".")[0].lstrip("-")) > 15):
             return digits(bare)  # zero-padded ids / huge digit runs: read the digits
+        if re.fullmatch(r"(?:19[5-9]\d|20\d\d)", bare):
+            after = t[m.end():m.end() + 20]
+            if not re.match(r"\s+[a-z]+s\b", after):  # "2048 tokens" stays a quantity
+                return year(int(bare))  # table rows / "(2013, 2017)" are years
         return decimal(bare)
     t = re.sub(r"(?<![\w.])-?\d+(?:,\d{3})*(?:\.\d+)?(?!\w|\.\d|,\d)", num, t)
 

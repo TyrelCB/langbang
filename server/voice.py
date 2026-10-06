@@ -60,7 +60,12 @@ def speakable(text: str) -> str:
     # into one run-on — TTS prosody flattens and pocket-tts's chunker
     # overflows ("Chunk has 51 tokens (max 50), may skip words")
     t = re.sub(r"([^\s.!?:;,…])[ \t]*(?=\n|$)", r"\1.", t)
-    t = re.sub(r"[ \t]*\|[ \t]*", " ", t)                    # table pipes
+    t = re.sub(r",\.(?=\s|$)", ".", t)  # a row's trailing cell comma
+    # table cells: markdown pipes and plain-text column gaps (tabs / 2+ spaces
+    # between words) are pauses — joined with spaces, a row was one run-on
+    t = re.sub(r"^[ \t]*\|[ \t]*|[ \t]*\|[ \t]*$", "", t, flags=re.M)
+    t = re.sub(r"[ \t]*\|[ \t]*", ", ", t)
+    t = re.sub(r"(?<=\S)(?:\t+| {2,})(?=\S)", ", ", t)
     t = t.replace("**", "").replace("__", "").replace("~~", "")
     t = re.sub(r"`+", "", t)                                 # inline code ticks
     t = re.sub(r"\s+", " ", t).strip()
@@ -349,6 +354,11 @@ def delete_voice(name: str) -> bool:
     return True
 
 
+_BREAK_BEFORE = {"and", "but", "or", "so", "while", "which", "then", "with", "versus", "to",
+                 "because", "since", "when", "where", "that", "for", "after", "before", "until"}
+_NUMWORD = re.compile(r"^(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+                      r"\w+teen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|\w+-\w+|"
+                      r"hundred|thousand|million|billion|trillion|point|oh|percent)[,.]?$", re.I)
 POCKET_CLAUSE_TOKENS = 40  # Pocket chunks at <=50 tokens and only re-splits at , ; :
 POCKET_CHUNK_TOKENS = 44   # chunk budget handed to generate_audio_stream (its default: 50)
 
@@ -364,15 +374,28 @@ def pocket_fit(text: str, model) -> str:
     def n(s: str) -> int:
         return len(tok(s.strip())[0].tolist()) if s.strip() else 0
 
+    def cut(cur: list[str]) -> int:
+        """Where to break `cur` (index of the first word of the next piece):
+        before a conjunction/preposition if one is near the end, never
+        inside a spelled number ("two point | seven percent")."""
+        best = None
+        for j in range(len(cur) - 1, max(0, len(cur) - 9), -1):
+            if _NUMWORD.match(cur[j - 1]) or _NUMWORD.match(cur[j]):
+                continue
+            if cur[j].lower() in _BREAK_BEFORE:
+                return j
+            best = best or j
+        return best or len(cur)
+
     def fit(clause: str) -> str:
         if n(clause) <= POCKET_CLAUSE_TOKENS:
             return clause
-        words = clause.split(" ")
         out, cur = [], []
-        for w in words:
+        for w in clause.split(" "):
             if cur and n(" ".join(cur + [w])) > POCKET_CLAUSE_TOKENS:
-                out.append(" ".join(cur) + ",")
-                cur = []
+                j = cut(cur)
+                out.append(" ".join(cur[:j]) + ",")
+                cur = cur[j:]
             cur.append(w)
         out.append(" ".join(cur))
         return " ".join(out)
