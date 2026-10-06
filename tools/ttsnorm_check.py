@@ -12,7 +12,7 @@ from server.ttsnorm import normalize  # noqa: E402
 
 CASES = [
     ("Refreshed for Thu, Oct 1, 2026 (13:11 UTC) — Week 4 kicks off tonight.",
-     "Refreshed for Thursday, October first, twenty twenty-six (thirteen eleven U T C) — Week four kicks off tonight."),
+     "Refreshed for Thursday, October first, twenty twenty-six, thirteen eleven U T C, Week four kicks off tonight."),
     ("The next check-in is Friday, November 13, 2026 at 9:05 a.m. Eastern.",
      "The next check-in is Friday, November thirteenth, twenty twenty-six at nine oh five A M Eastern."),
     ("Archive window: 2026-12-31 23:59 UTC. Reopen at 00:01 on January 1, 2027.",
@@ -27,11 +27,16 @@ CASES = [
     ("128 GB; 1 GB; 1 hr; -5°C.", "one hundred twenty-eight gigabytes; one gigabyte; one hour; minus five degrees Celsius."),
     ("pages 10-20, score 3-1.", "pages ten to twenty, score three-one."),
     ("call 555-1234 or (303) 555-0199.", "call five five five, one two three four or three zero three, five five five, zero one nine nine."),
-    ("ids 007 and 1,2,3; it returned 200.", "ids zero zero seven and 1,2,3; it returned two hundred."),
+    ("ids 007 and 1,2,3; it returned 200.", "ids zero zero seven and one, two, three; it returned two hundred."),
     # left alone: glued to letters, versions, shouted words, spelled-anyway initialisms
     ("Qwen3.8 on a GB10, v1.2.3, H100.", "Qwen3.8 on a GB10, v1.2.3, H100."),
     ("Use the STOP button, then NEW CHAT. The API runs on the GPU.", "Use the STOP button, then NEW CHAT. The API runs on the GPU."),
     ("The Sun was out; I sat on Mar Vista.", "The Sun was out; I sat on Mar Vista."),
+    # 2026-10-06: emoji + "·"-joined scores sent Pocket off the rails (one 300-token "sentence")
+    ("🏈 NFL — Week 4 final. Colts 30 Commanders 13 (London) · 49ers 24 Broncos 14 · Panthers 32 Lions 26.",
+     "N F L, Week four final. Colts thirty, Commanders thirteen, London. forty-niners twenty-four, Broncos fourteen. Panthers thirty-two, Lions twenty-six."),
+    ("✅ Done • 3 items ⚠️ check | next", "Done. three items, check. next"),
+    ("It ran 24/7 w/ 99.9% uptime ±0.1%, ≥ 3 nodes.", "It ran twenty-four seven with ninety-nine point nine percent uptime plus or minus zero point one percent, at least three nodes."),
 ]
 
 bad = 0
