@@ -38,7 +38,7 @@
         <button id="btn-reasoning" class="btn ghost" title="Show/hide model reasoning">◈ REASONING: ON</button>
         <button id="btn-voice" class="btn ghost" title="Read finished replies aloud (per-message 🔊 works regardless)">🔊 VOICE: OFF</button>
         <div id="ctx-tag" title="Tokens the model re-reads on the next call (post-compaction)"></div>
-        <div id="model-tag"></div>
+        <button id="model-tag" class="btn ghost" type="button" title="model for THIS thread — click to override the global default"></button>
       </div>
     </header>
     <!-- sibling of #chat, never inside it (search-jump keys off child indices) -->
@@ -87,9 +87,14 @@
       <section class="cfg-card wide">
         <h3>MODEL</h3>
         <div class="row">
-          <label>Backend URL <input id="set-base_url" type="text"></label>
-          <label>Model <input id="set-model" type="text"></label>
+          <label>Default provider <select id="set-provider"></select></label>
+          <label>Default model <input id="set-model" type="text" list="dl-default-models" autocomplete="off" spellcheck="false"></label>
         </div>
+        <datalist id="dl-default-models"></datalist>
+        <div class="hint">Every thread (and every scheduled task's thread) uses this unless it overrides it — click the model name in a thread's top bar to pick another provider/model for just that thread.</div>
+        <div class="learn-head">PROVIDERS <span class="hint">OpenAI-compatible endpoints: sglang, vLLM, llama-server, Ollama (/v1), OpenAI, OpenRouter…</span></div>
+        <div id="prov-list"></div>
+        <div class="row"><button id="btn-prov-add" class="btn ghost" type="button">+ ADD PROVIDER</button></div>
         <div class="row">
           <label>Temperature <input id="set-temperature" type="number" step="0.1" min="0" max="2"></label>
           <label>Max tokens <input id="set-max_tokens" type="number" step="256" min="256"></label>
@@ -332,6 +337,27 @@
         <button id="btn-save" class="btn accent">SAVE</button>
       </div>
       <div id="settings-error" class="error hidden"></div>
+    </div>
+  </div>
+
+  <div id="tmodel-panel" class="hidden">
+    <div class="panel-inner sched-inner">
+      <h2>THREAD MODEL</h2>
+      <section class="cfg-card wide">
+        <h3 id="tmodel-thread"></h3>
+        <div class="hint">Overrides the global default (CONFIG → MODEL) for this thread only — including its scheduled task, if it has one. Applies from the next message; other threads are unaffected.</div>
+        <div class="row">
+          <label>Provider <select id="tmodel-provider"></select></label>
+          <label>Model <input id="tmodel-model" type="text" list="dl-tmodel-models" autocomplete="off" spellcheck="false" placeholder="(provider default)"></label>
+        </div>
+        <datalist id="dl-tmodel-models"></datalist>
+        <div id="tmodel-msg" class="hint"></div>
+      </section>
+      <div class="row end">
+        <button id="btn-tmodel-default" class="btn ghost">USE DEFAULT</button>
+        <button id="btn-tmodel-cancel" class="btn ghost">CANCEL</button>
+        <button id="btn-tmodel-save" class="btn accent">SAVE</button>
+      </div>
     </div>
   </div>
 

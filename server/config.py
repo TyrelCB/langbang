@@ -135,6 +135,56 @@ DEFAULTS = {
 }
 
 
+def _provider_name(url: str) -> str:
+    """'http://spark-da36:30000/v1' → 'spark-da36' (first provider's name)."""
+    from urllib.parse import urlparse
+    return (urlparse(url or "").hostname or "default").split(".")[0] or "default"
+
+
+def _providers(merged: dict) -> dict:
+    """Named OpenAI-compatible backends (2026-10-06). Settings from before
+    providers existed carry one top-level base_url/api_key/capabilities —
+    that becomes the first provider, and stays the default."""
+    provs = {k: dict(v) for k, v in (merged.get("providers") or {}).items() if isinstance(v, dict)}
+    if not provs:
+        name = _provider_name(merged.get("base_url"))
+        provs = {name: {"base_url": merged.get("base_url") or DEFAULTS["base_url"],
+                        "api_key": merged.get("api_key") or "none",
+                        "vision": bool((merged.get("capabilities") or {}).get("vision")),
+                        "template_kwargs": True}}
+        merged["provider"] = name
+    for p in provs.values():
+        p.setdefault("api_key", "none")
+        p.setdefault("vision", False)
+        p.setdefault("template_kwargs", True)  # sglang/vLLM chat_template_kwargs (thinking flags)
+        p.setdefault("model", "")              # this provider's default model ("" = global model)
+    if merged.get("provider") not in provs:
+        merged["provider"] = next(iter(provs))
+    return provs
+
+
+def effective(s: dict, override: dict | None = None) -> dict:
+    """Settings with the connection fields resolved for one run: the global
+    default provider/model, or a thread's override {provider, model} (either
+    may be empty = inherit). Everything that builds a model client reads
+    base_url / api_key / model / capabilities.vision / template_kwargs."""
+    ov = override or {}
+    provs = s.get("providers") or {}
+    pname = ov.get("provider") if ov.get("provider") in provs else s.get("provider")
+    p = provs.get(pname)
+    if p is None:  # no providers at all (shouldn't happen after _backfill)
+        return s
+    if ov.get("model"):
+        model = ov["model"]
+    elif pname != s.get("provider"):
+        model = p.get("model") or s.get("model")  # other provider: its own default model
+    else:
+        model = s.get("model")
+    return {**s, "provider": pname, "base_url": p["base_url"], "api_key": p.get("api_key") or "none",
+            "model": model, "template_kwargs": bool(p.get("template_kwargs", True)),
+            "capabilities": {**(s.get("capabilities") or {}), "vision": bool(p.get("vision"))}}
+
+
 def _backfill(merged: dict) -> dict:
     # top-level merge can't introduce sub-keys added since a settings file
     # was written — CONFIG builds its LOCAL TOOLS checkboxes from this dict,
@@ -145,7 +195,10 @@ def _backfill(merged: dict) -> dict:
     merged["notify"] = {**DEFAULTS["notify"], **(merged.get("notify") or {})}
     merged["image_gen"] = {**DEFAULTS["image_gen"], **(merged.get("image_gen") or {})}
     merged["skill_review"] = {**DEFAULTS["skill_review"], **(merged.get("skill_review") or {})}
-    return merged
+    merged["providers"] = _providers(merged)
+    # top-level base_url/api_key/capabilities mirror the DEFAULT provider, so
+    # every older call site (health, titles, file assist…) keeps working
+    return effective(merged)
 
 
 def load() -> dict:

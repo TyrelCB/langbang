@@ -41,6 +41,19 @@ but built on the LangChain/LangGraph ecosystem:
   Every agent write to a LangBang `SKILL.md` is validated on the spot (broken
   frontmatter = a skill that silently never loads → the tool result tells
   the agent to fix it)
+- **Providers + per-thread model override** (CONFIG → MODEL): a list of named
+  OpenAI-compatible backends (sglang, vLLM, llama-server, Ollama `/v1`,
+  OpenAI, OpenRouter…) — base URL, API key, vision, and whether to send
+  sglang/vLLM `chat_template_kwargs` (the Qwen thinking switch; turn it off
+  for OpenAI, which rejects unknown args). One is the global default
+  provider + model. Click the model name in a thread's top bar to override
+  provider and/or model for that thread only (◇ marks an override; USE
+  DEFAULT clears it) — a scheduled task runs in its own thread, so it can
+  be pointed elsewhere the same way. Model dropdowns are filled live from
+  each backend's `/models` (`POST /api/models`); overrides live in
+  `threads.model` (`GET/PUT /api/threads/{id}/model`) and apply from the
+  thread's next run. Titles, recaps and the learning review keep using the
+  global default.
 - **Learning loop** (`server/learning.py`, CONFIG → MEMORY & LEARNING):
   - *Per-thread prompt* — ✎ PROMPT in the top bar: instructions for that
     thread only, appended to the global system prompt on every run there

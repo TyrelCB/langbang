@@ -1612,6 +1612,7 @@ async function openThread(t) {
   // the render already succeeded — worst case the row just won't re-sort.
   const bumped = api.touchThread(t.id).catch(() => {});
   syncTPrompt(t.id);
+  syncTModel(t.id);
   const msgs = await api.messages(t.id);
   if (seq !== openSeq) return; // superseded by a newer open/newThread — don't paint
   // returning to the thread that is mid-run: re-attach its parked nodes and
@@ -1644,6 +1645,7 @@ async function newThread() {
   parkAll(); // switch to a draft: mid-run threads' output stays behind (runs go on)
   threadId = null;
   syncTPrompt(null);
+  syncTModel(null);
   $("#chat").innerHTML = "";
   $("#chat-title").textContent = "NEW CHAT";
   $("#sb-live").classList.add("hidden");
@@ -2151,7 +2153,8 @@ $("#btn-pv-delete").onclick = pvDelete;
 
 async function openSettings() {
   const s = await api.settings();
-  for (const k of ["base_url", "model", "temperature", "max_tokens", "max_react_iterations", "system_prompt",
+  provLoad(s);
+  for (const k of ["model", "temperature", "max_tokens", "max_react_iterations", "system_prompt",
                    "compact_trigger_tokens", "compact_keep_messages", "compact_summary_tokens"])
     $("#set-" + k).value = s[k];
   const tb = $("#set-tools");
@@ -2213,13 +2216,21 @@ async function saveSettings() {
     err.classList.remove("hidden");
     return;
   }
+  const provs = provForm();
+  const badProv = Object.entries(provs).find(([, p]) => !/^https?:\/\//.test(p.base_url));
+  if (!Object.keys(provs).length || badProv) {
+    err.textContent = badProv ? `provider "${badProv[0]}" needs a base URL (http://…/v1)` : "at least one provider is required";
+    err.classList.remove("hidden");
+    return;
+  }
   const local_tools = {};
   document.querySelectorAll("#set-tools input").forEach((cb) => {
     local_tools[cb.dataset.tool] = cb.checked;
   });
   await api.saveSettings({
-    base_url: $("#set-base_url").value,
-    model: $("#set-model").value,
+    providers: provForm(),
+    provider: $("#set-provider").value,
+    model: $("#set-model").value.trim(),
     temperature: parseFloat($("#set-temperature").value),
     max_tokens: parseInt($("#set-max_tokens").value),
     max_react_iterations: parseInt($("#set-max_react_iterations").value),
@@ -2282,7 +2293,7 @@ let cfgBase = null;
 // every action — their inputs can't be identity-keyed snapshot members (the
 // MCP state rides the __mcp JSON instead; the soundboard saves per-cue)
 // #pv-clone is a one-shot form (clone saves itself) — not a setting
-const cfgMember = (el0) => !el0.closest("#mcp-list,#mcp-editor,#soundboard-list,#pv-clone");
+const cfgMember = (el0) => !el0.closest("#mcp-list,#mcp-editor,#soundboard-list,#pv-clone,#prov-list");
 function cfgDirtyCompute() {
   if (!cfgBase) return;
   let n = 0;
@@ -2297,6 +2308,7 @@ function cfgDirtyCompute() {
     if (diff) n++;
   }
   if (cfgBase.get("__mcp") !== JSON.stringify(mcpDraft)) n++;
+  if (cfgBase.get("__prov") !== JSON.stringify(provForm())) n++;
   const bar = $("#cfg-dirty");
   bar.classList.toggle("hidden", n === 0);
   if (n) bar.textContent = "● " + n + " UNSAVED";
@@ -2307,6 +2319,7 @@ function cfgSnapshot() {
       "#settings-panel input,#settings-panel textarea,#settings-panel select"))
     if (cfgMember(el0)) cfgBase.set(el0, el0.type === "checkbox" ? el0.checked : el0.value);
   cfgBase.set("__mcp", JSON.stringify(mcpDraft));
+  cfgBase.set("__prov", JSON.stringify(provForm()));
   cfgDirtyCompute();  // fresh baseline => clean; also clears a stale N-UNSAVED span
 }
 // ESC / CANCEL / backdrop all route here: clean closes are instant; dirty
@@ -3163,8 +3176,8 @@ async function checkHealth() {
   const el2 = $("#health");
   el2.textContent = "LINK: " + (h.backend_up ? "ONLINE" : "OFFLINE");
   el2.className = "health " + (h.backend_up ? "up" : "down");
-  $("#model-tag").textContent = h.model;
-  supportsVision = !!h.supports_vision;
+  defaultModel = { model: h.model, vision: !!h.supports_vision };
+  if (!threadId) syncTModel(null); // a thread's tag/vision come from its override
   checkUiVersion(h.ui_version);
   // attach stays offered without vision: non-image files (and images as
   // plain files) ride the upload path — the agent opens them from disk
@@ -3261,6 +3274,156 @@ async function openRecap() {
     clearTimeout(timer);
   }
 }
+
+// ---------- providers (CONFIG → MODEL) + per-thread model override ----------
+// A provider = one OpenAI-compatible endpoint. CONFIG holds the list + the
+// global default {provider, model}; any thread can override either (stored
+// server-side in threads.model) — scheduled tasks inherit their thread's.
+let defaultModel = { model: "", vision: false };
+const shortModel = (m) => (m || "").split("/").pop();
+function provRow(name = "", p = {}) {
+  const row = el("div", "prov-row");
+  const f = (label, cls, val, type = "text", ph = "") => {
+    const lab = el("label", "", label + " ");
+    const i = document.createElement("input");
+    i.type = type; i.className = cls; i.value = val || ""; i.placeholder = ph;
+    i.autocomplete = "off"; i.spellcheck = false;
+    lab.appendChild(i); row.appendChild(lab); return i;
+  };
+  f("Name", "p-name", name, "text", "openrouter");
+  f("Base URL", "p-url", p.base_url, "text", "http://host:8000/v1");
+  f("API key", "p-key", p.api_key && p.api_key !== "none" ? p.api_key : "", "password", "none");
+  f("Default model", "p-model", p.model, "text", "(global model)");
+  const flags = el("div", "prov-flags");
+  const chk = (label, cls, on, title) => {
+    const lab = el("label", "chk"); lab.title = title;
+    const c = document.createElement("input"); c.type = "checkbox"; c.className = cls; c.checked = !!on;
+    lab.append(c, document.createTextNode(" " + label)); flags.appendChild(lab);
+  };
+  chk("vision", "p-vision", p.vision, "model accepts images");
+  chk("sglang/vLLM template kwargs", "p-tk", p.template_kwargs !== false,
+      "send chat_template_kwargs (Qwen thinking on/off + reasoning effort). Turn OFF for OpenAI, llama-server, Ollama — OpenAI rejects unknown args");
+  const test = el("button", "btn ghost", "↻ TEST"); test.type = "button";
+  const out = el("span", "prov-test", "");
+  test.onclick = async () => {
+    out.className = "prov-test"; out.textContent = "…";
+    const r = await probeModels({ base_url: row.querySelector(".p-url").value.trim(),
+                                  api_key: row.querySelector(".p-key").value.trim() });
+    out.className = "prov-test" + (r.ok ? "" : " bad");
+    out.textContent = r.ok ? `${r.models.length} model(s): ${r.models.slice(0, 4).map(shortModel).join(", ")}${r.models.length > 4 ? "…" : ""}` : r.error;
+  };
+  const x = el("button", "btn ghost", "✕"); x.type = "button"; x.title = "remove provider";
+  x.onclick = () => { row.remove(); provSyncSelect(); cfgDirtyCompute(); };
+  flags.append(test, out, x);
+  row.appendChild(flags);
+  row.addEventListener("input", (e) => { if (e.target.classList.contains("p-name")) provSyncSelect(); });
+  return row;
+}
+function provForm() {
+  const out = {};
+  for (const r of document.querySelectorAll("#prov-list .prov-row")) {
+    const name = r.querySelector(".p-name").value.trim();
+    if (!name) continue;
+    out[name] = {
+      base_url: r.querySelector(".p-url").value.trim(),
+      api_key: r.querySelector(".p-key").value.trim() || "none",
+      model: r.querySelector(".p-model").value.trim(),
+      vision: r.querySelector(".p-vision").checked,
+      template_kwargs: r.querySelector(".p-tk").checked,
+    };
+  }
+  return out;
+}
+function provSyncSelect(want) {
+  const sel = $("#set-provider"), cur = want ?? sel.value;
+  sel.innerHTML = "";
+  for (const n of Object.keys(provForm())) sel.appendChild(new Option(n, n));
+  if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+}
+async function probeModels(body) {
+  try { return await J(await fetch("/api/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })); }
+  catch (e) { return { ok: false, error: e.message, models: [] }; }
+}
+async function fillModels(dl, body) {
+  const r = await probeModels(body);
+  dl.innerHTML = "";
+  for (const m of r.models || []) dl.appendChild(new Option(m, m));
+  return r;
+}
+function provLoad(s) {
+  const box = $("#prov-list");
+  box.innerHTML = "";
+  for (const [n, p] of Object.entries(s.providers || {})) box.appendChild(provRow(n, p));
+  provSyncSelect(s.provider);
+  fillModels($("#dl-default-models"), { provider: s.provider });
+}
+$("#btn-prov-add").onclick = () => {
+  $("#prov-list").appendChild(provRow("", { template_kwargs: false }));
+  $("#prov-list .prov-row:last-child .p-name").focus();
+  cfgDirtyCompute();
+};
+$("#set-provider").addEventListener("change", () => {
+  const p = provForm()[$("#set-provider").value] || {};
+  fillModels($("#dl-default-models"), { base_url: p.base_url, api_key: p.api_key });
+});
+
+let tmodelSeq = 0, tmodelView = null;
+async function syncTModel(tid) {
+  const b = $("#model-tag"), seq = ++tmodelSeq;
+  const paint = (model, over, title, vision) => {
+    b.textContent = (over ? "◇ " : "") + shortModel(model);
+    b.title = title; b.classList.toggle("override", over);
+    supportsVision = !!vision;
+    if (!supportsVision && pendingImages.length) { pendingImages = []; renderAttachStrip(); }
+  };
+  b.disabled = !tid;
+  if (!tid) { tmodelView = null; paint(defaultModel.model, false, "global default model (CONFIG → MODEL) — open a thread to override it", defaultModel.vision); return; }
+  let v;
+  try { v = await J(await fetch(`/api/threads/${tid}/model`)); } catch { return; }
+  if (seq !== tmodelSeq || tid !== threadId) return;
+  tmodelView = v;
+  const over = !!(v.override.provider || v.override.model);
+  paint(v.model, over, `${v.provider} · ${v.model}` + (over ? "  (this thread's override — click to change)" : "  (global default — click to override for this thread)"), v.vision);
+}
+async function openTModel() {
+  if (!threadId || !tmodelView) return;
+  SFX.play("click");
+  const s = await api.settings();
+  const sel = $("#tmodel-provider");
+  sel.innerHTML = "";
+  sel.appendChild(new Option(`(default) ${s.provider}`, ""));
+  for (const n of Object.keys(s.providers || {})) sel.appendChild(new Option(n, n));
+  sel.value = tmodelView.override.provider || "";
+  $("#tmodel-model").value = tmodelView.override.model || "";
+  $("#tmodel-thread").textContent = $("#chat-title").textContent;
+  const refresh = async () => {
+    const pn = sel.value || s.provider;
+    $("#tmodel-model").placeholder = `(${sel.value ? (s.providers[pn]?.model || s.model) : s.model})`;
+    $("#tmodel-msg").textContent = "loading models…";
+    const r = await fillModels($("#dl-tmodel-models"), { provider: pn });
+    $("#tmodel-msg").textContent = r.ok ? `${r.models.length} model(s) on ${pn}` : `${pn}: ${r.error}`;
+  };
+  sel.onchange = refresh;
+  refresh();
+  $("#tmodel-panel").classList.remove("hidden");
+}
+const closeTModel = () => $("#tmodel-panel").classList.add("hidden");
+async function saveTModel(ov) {
+  const tid = threadId;
+  try {
+    await J(await fetch(`/api/threads/${tid}/model`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(ov),
+    }));
+  } catch (e) { $("#tmodel-msg").textContent = "save failed: " + e.message; return; }
+  closeTModel();
+  SFX.play("settings_saved");
+  syncTModel(tid);
+}
+$("#model-tag").onclick = openTModel;
+$("#btn-tmodel-save").onclick = () => saveTModel({ provider: $("#tmodel-provider").value, model: $("#tmodel-model").value.trim() });
+$("#btn-tmodel-default").onclick = () => saveTModel({ provider: "", model: "" });
+$("#btn-tmodel-cancel").onclick = () => { SFX.play("click"); closeTModel(); };
+$("#tmodel-panel").onclick = (e) => { if (e.target.id === "tmodel-panel") closeTModel(); };
 
 // ---------- per-thread prompt ----------
 // Stored server-side per thread (threads.prompt) and appended to the system
@@ -3402,6 +3565,7 @@ document.addEventListener("keydown", (e) => {
   // settings above recap: it can sit on top of it and is the top-most panel
   if (!$("#settings-panel").classList.contains("hidden")) closeSettings(false);
   else if (!$("#tprompt-panel").classList.contains("hidden")) closeTPrompt();
+  else if (!$("#tmodel-panel").classList.contains("hidden")) closeTModel();
   else if (!$("#editor-panel").classList.contains("hidden")) edClose();
   else if (!$("#recap-panel").classList.contains("hidden")) closeRecap();
 });

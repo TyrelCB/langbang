@@ -206,6 +206,61 @@ async def rename_thread(tid: str, body: ThreadRenameIn):
     return {"title": title}
 
 
+class ThreadModelIn(BaseModel):
+    provider: str = ""
+    model: str = ""
+
+
+def _model_view(s: dict, ov: dict) -> dict:
+    eff = config.effective(s, ov)
+    return {"override": ov, "provider": eff["provider"], "model": eff["model"],
+            "default": {"provider": s["provider"], "model": s["model"]},
+            "vision": bool((eff.get("capabilities") or {}).get("vision"))}
+
+
+@app.get("/api/threads/{tid}/model")
+async def get_thread_model(tid: str):
+    return _model_view(config.load(), await agent.get_thread_model(tid))
+
+
+@app.put("/api/threads/{tid}/model")
+async def put_thread_model(tid: str, body: ThreadModelIn):
+    s = config.load()
+    if body.provider and body.provider not in s["providers"]:
+        raise HTTPException(400, f"unknown provider {body.provider!r}")
+    if not await agent.set_thread_model(tid, body.model_dump()):
+        raise HTTPException(404, "no such thread")
+    return _model_view(s, await agent.get_thread_model(tid))
+
+
+class ModelsProbeIn(BaseModel):
+    provider: str = ""    # a saved provider…
+    base_url: str = ""    # …or an unsaved one from the CONFIG editor
+    api_key: str = ""
+
+
+@app.post("/api/models")
+async def list_models(body: ModelsProbeIn):
+    """GET {base_url}/models on an OpenAI-compatible backend (llama-server's
+    picker does the same) — ids for the model dropdowns. Always 200: errors
+    are data the UI shows inline."""
+    s = config.load()
+    p = s["providers"].get(body.provider) if body.provider else None
+    url = (body.base_url or (p or {}).get("base_url") or "").rstrip("/")
+    key = body.api_key or (p or {}).get("api_key") or "none"
+    if not url:
+        return {"ok": False, "error": "no base URL", "models": []}
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(url + "/models", headers={"Authorization": f"Bearer {key}"})
+        if r.status_code != 200:
+            return {"ok": False, "error": f"HTTP {r.status_code}: {r.text[:200]}", "models": []}
+        ids = sorted({str(m.get("id")) for m in (r.json().get("data") or []) if m.get("id")})
+        return {"ok": True, "models": ids}
+    except Exception as e:  # noqa: BLE001 - shown in the UI
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"[:300], "models": []}
+
+
 class ThreadPromptIn(BaseModel):
     prompt: str = ""
 
@@ -752,7 +807,8 @@ async def chat(body: ChatIn):
     if not text and not body.images:
         raise HTTPException(400, "empty message")
     if body.images:
-        if not (s.get("capabilities") or {}).get("vision"):
+        eff = config.effective(s, await agent.get_thread_model(body.thread_id))
+        if not (eff.get("capabilities") or {}).get("vision"):
             raise HTTPException(
                 400, "model does not support vision (enable it in CONFIG)"
             )

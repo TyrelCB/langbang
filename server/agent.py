@@ -115,7 +115,8 @@ async def init() -> None:
     # threads.orig = the seed title (schedule name / first-message prefix) that
     # ⟲ revert-title restores. Existing DBs predate the column.
     # threads.prompt = per-thread instructions appended to the system prompt
-    for col in ("orig", "prompt"):
+    # threads.model = JSON {provider, model} override of the global default
+    for col in ("orig", "prompt", "model"):
         try:
             await _db.execute(f"ALTER TABLE threads ADD COLUMN {col} TEXT")
         except aiosqlite.OperationalError:  # duplicate column — already migrated
@@ -355,17 +356,25 @@ class SGlangChatOpenAI(ChatOpenAI):
 REASONING_EFFORTS = ("xhigh", "medium", "low")
 
 
+def extra_body(s: dict, thinking: bool | None = None) -> dict | None:
+    """chat_template_kwargs for providers that take them (sglang / vLLM:
+    the Qwen thinking switch + reasoning effort). Others — OpenAI itself,
+    llama-server, Ollama — get nothing extra: OpenAI 400s on unknown args."""
+    if not s.get("template_kwargs", True):
+        return None
+    on = bool(s.get("enable_thinking")) if thinking is None else thinking
+    kw = {"enable_thinking": on}
+    # Qwen3.8 template: xhigh (its default when unset) | medium | low;
+    # anything else raises in the template → only pass known values
+    if on and s.get("reasoning_effort") in REASONING_EFFORTS:
+        kw["reasoning_effort"] = s["reasoning_effort"]
+    return {"chat_template_kwargs": kw}
+
+
 def model(s: dict) -> ChatOpenAI:
     # Always state enable_thinking explicitly. Qwen3-style hybrids think by
     # *default* — omitting the kwarg would keep reasoning streaming even when
     # the user turned thinking off (the sglang/vllm template flips per flag).
-    kw = {"enable_thinking": bool(s.get("enable_thinking"))}
-    if kw["enable_thinking"] and s.get("reasoning_effort"):
-        # Qwen3.8 template: xhigh (its default when unset) | medium | low;
-        # anything else raises in the template → only pass known values
-        if s["reasoning_effort"] in REASONING_EFFORTS:
-            kw["reasoning_effort"] = s["reasoning_effort"]
-    extra_body = {"chat_template_kwargs": kw}
     vision = bool((s.get("capabilities") or {}).get("vision"))
     return SGlangChatOpenAI(
         model=s["model"],
@@ -381,7 +390,7 @@ def model(s: dict) -> ChatOpenAI:
         # that may be queued behind other GPU work — a long silent gap is
         # prefill, not a dead peer. Kills truly hung connections at 10 min.
         stream_chunk_timeout=600,
-        extra_body=extra_body,
+        extra_body=extra_body(s),
         # deepagents' read_file returns media as base64 content blocks and
         # only scrubs block types the profile marks False (missing = assumed
         # supported). Unset, a read_file on a .wav/.mp4 shipped ~350k tokens
@@ -407,7 +416,7 @@ def summarizer(s: dict) -> ChatOpenAI:
         temperature=0.3,
         max_tokens=int(s.get("compact_summary_tokens", 800)),
         streaming=False,
-        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        extra_body=extra_body(s, thinking=False),
     )
 
 
@@ -1845,7 +1854,7 @@ def _one_shot(s: dict, max_tokens: int, temperature: float) -> SGlangChatOpenAI:
     return SGlangChatOpenAI(
         model=s["model"], base_url=s["base_url"], api_key=s["api_key"],
         temperature=temperature, max_tokens=max_tokens, streaming=False,
-        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        extra_body=extra_body(s, thinking=False),
     )
 
 
@@ -1886,6 +1895,27 @@ async def rename_thread(tid: str, title: str) -> str | None:
         cur = await _db.execute("UPDATE threads SET title=? WHERE id=?", (title[:200], tid))
         hit = cur.rowcount
     return title[:200] if hit else None
+
+
+async def get_thread_model(tid: str) -> dict:
+    """This thread's {provider, model} override ({} = use the global default)."""
+    cur = await _db.execute("SELECT model FROM threads WHERE id=?", (tid,))
+    r = await cur.fetchone()
+    try:
+        ov = json.loads(r[0]) if r and r[0] else {}
+    except ValueError:
+        ov = {}
+    return {k: str(ov[k]) for k in ("provider", "model") if ov.get(k)}
+
+
+async def set_thread_model(tid: str, ov: dict | None) -> bool:
+    ov = {k: str((ov or {}).get(k) or "").strip() for k in ("provider", "model")}
+    ov = {k: v for k, v in ov.items() if v}
+    async with _wt(_db):
+        cur = await _db.execute("UPDATE threads SET model=? WHERE id=?",
+                                (json.dumps(ov) if ov else None, tid))
+        hit = cur.rowcount
+    return bool(hit)
 
 
 async def set_thread_prompt(tid: str, text: str) -> bool:
@@ -1976,6 +2006,9 @@ async def run_chat(
             meta={"text": _cap(user_text or "[image]", 800),
                   **({"gate": True} if resume else {}), **({"plan": True} if plan else {})},
         )
+        # this thread's provider/model override (scheduled tasks too: each
+        # task owns a thread) — resolved per run, so a change applies next turn
+        s = config.effective(s, await get_thread_model(thread_id))
         agent = await build_agent(s, thread_prompt=await learning.get_thread_prompt(_db, thread_id))
         deep = bool(s.get("deep_agent", True))
         # Deep mode grants headroom for write_todos bookkeeping rounds (each
