@@ -449,11 +449,18 @@ function gateQuestions(q) {
   return Array.isArray(q) ? q : q ? [q] : [];
 }
 
+function compactLabel(c) {
+  const k = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n));
+  return `⟲ CONTEXT COMPACTED — ${c.count} EARLIER MSGS SUMMARIZED` +
+    (c.before ? ` · ~${k(c.before)} → ~${k(c.after)} tokens` : "") +
+    (c.in_turn ? " · mid-task (request kept verbatim)" : "");
+}
+
 function renderHistoryMsg(m, curSched) {
   {
     if (m.role === "system") return curSched;
     if (m.compacted) {
-      const b = addBlock("compact", `⟲ CONTEXT COMPACTED — ${m.compacted.count} EARLIER MSGS SUMMARIZED`);
+      const b = addBlock("compact", compactLabel(m.compacted));
       b.querySelector("pre").textContent = textOf(m.content);
       return curSched; // notes sit between runs; never touch curSched
     }
@@ -813,8 +820,12 @@ function runPipeline(run) {
       // the to-do panel shows the OPEN thread's list — a parked run must not
       // paint over another thread's; replayTodos() redraws ours on switch-back
       if (run.viewing) renderTodos(ev.todos);
+    } else if (ev.type === "compacted") {
+      const b = put(addBlock("compact", compactLabel(ev), CH()));
+      b.querySelector("pre").textContent = ev.summary || "";
+      SFX.play("message_received");
     } else if (ev.type === "usage") {
-      // one line per model call (ReAct rounds and the compaction summarizer
+      // one line per model call (ReAct rounds; the compaction summarizer reports via "compacted")
       // each report their own); prefill_tps is ttft-inclusive, so it's a
       // lower bound on real prefill speed — label kept honest as "~".
       run.stats.steps++;
@@ -1310,6 +1321,7 @@ function trajRowText(e) {
   if (e.type === "user") return `[${when}] USER\n${m.text || ""}`;
   if (e.type === "error") return `[${when}] ERROR\n${m.message || ""}`;
   if (e.type === "gate") return `[${when}] GATE\n${fmtv(m.value)}`;
+  if (e.type === "compact") return `[${when}] COMPACT${dur} · ${m.count} msgs summarized, ${m.kept} kept · ctx ~${m.before} → ~${m.after} tokens\n${m.text || ""}`;
   return `[${when}] ${e.type}\n${fmtv(m)}`;
 }
 function trajCopyBtn(getText, tip) {
@@ -1342,7 +1354,7 @@ function renderTraj() {
     if (g && g.turn_id === e.turn_id) g.rows.push(e);
     else groups.push({ turn_id: e.turn_id, rows: [e] });
   }
-  const BADGE = { user: "USER", model: "ASSISTANT", tool: "TOOL", error: "ERROR", gate: "GATE" };
+  const BADGE = { user: "USER", model: "ASSISTANT", tool: "TOOL", error: "ERROR", gate: "GATE", compact: "COMPACT" };
   // Rows land in seq order, but tool rows are logged at span END — a task's
   // children would render above it. Sort by effective START (end - dur); the
   // sort is stable, so ties keep log order.
@@ -1363,7 +1375,7 @@ function renderTraj() {
     const strip = el("div", "traj-strip");
     strip.appendChild(el("i", "traj-tick input")); // input sits at 0 (CSS left:0)
     for (const e of g.rows) {
-      if (e.type !== "model" && e.type !== "tool") continue;
+      if (e.type !== "model" && e.type !== "tool" && e.type !== "compact") continue;
       const tk = el("i", "traj-tick " + e.type + (trajFailed(e) ? " err" : ""));
       tk.style.left = (100 * (st(e) - t0)) / span + "%";
       tk.title = `${e.name || e.type}${e.dur != null ? " · " + fmtShort(e.dur) : ""}`;
@@ -1381,6 +1393,7 @@ function renderTraj() {
         : e.type === "tool" ? (m.desc ? "◈ " + m.desc : String(m.in || ""))
         : e.type === "error" ? String(m.message || "")
         : e.type === "gate" ? gateSummary(m.value)
+        : e.type === "compact" ? `⟲ ${m.count} msgs summarized, ${m.kept} kept · context ~${fmtTok(m.before)} → ~${fmtTok(m.after)}${m.in_turn ? " · mid-task" : ""}`
         : String(m.text || "");
       const row = el("div", "traj-row" + (m.sub ? " sub" : "") + (failed && !lost ? " err" : ""));
       row.appendChild(el("span", "traj-badge " + (lost ? "gate" : failed ? "error" : e.type),
