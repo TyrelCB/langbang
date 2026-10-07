@@ -514,18 +514,24 @@ def _ctx_tokens(msgs: list) -> int:
     real count plus ratio × what was appended since. Kept-after-compaction
     messages have their (stale) usage stripped by the hook, so only replies
     made after the last compaction are ever trusted."""
+    return _ctx_model(msgs)[0]
+
+
+def _ctx_model(msgs: list) -> tuple[int, float]:
+    """(_ctx_tokens estimate, ratio real-tokens-per-approx-token for message
+    bodies — system prompt/tool-schema overhead excluded)."""
     approx = count_tokens_approximately(msgs)
     trusted = [(i, m.usage_metadata) for i, m in enumerate(msgs)
                if isinstance(m, AIMessage) and (getattr(m, "usage_metadata", None) or {}).get("input_tokens")]
     if not trusted:
-        return approx
+        return approx, 1.0
     i0, u0 = trusted[0]
     overhead = max(0, int(u0["input_tokens"]) - count_tokens_approximately(msgs[:i0]))
     i, u = trusted[-1]
     real = int(u["input_tokens"]) + int(u.get("output_tokens") or 0)
     body = count_tokens_approximately(msgs[: i + 1])
     ratio = min(3.0, max(1.0, (real - overhead) / max(1, body)))
-    return max(approx, int(real + ratio * count_tokens_approximately(msgs[i + 1:])))
+    return max(approx, int(real + ratio * count_tokens_approximately(msgs[i + 1:]))), ratio
 
 
 def _compaction_hook(s: dict):
@@ -561,7 +567,7 @@ def _compaction_hook(s: dict):
                         and not (m.additional_kwargs or {}).get("lb_compacted")), None)
         in_turn = current is not None and current in head and not any(
             isinstance(m, HumanMessage) for m in tail)
-        before = _ctx_tokens(msgs)
+        before, body_ratio = _ctx_model(msgs)
         t_sum = time.time()
         # tagged so run_chat doesn't log/stream it as an ordinary model step
         # (it used to show up as an unlabelled ASSISTANT row + usage line)
@@ -592,10 +598,12 @@ def _compaction_hook(s: dict):
         tail = [m.model_copy(update={"usage_metadata": None}) if isinstance(m, AIMessage) else m
                 for m in tail]
         um = getattr(summary, "usage_metadata", None) or {}
-        # "before" is anchored on sglang's real counts; scale the chars/4
-        # estimate of what's left by the same ratio so the two compare
-        ratio = before / max(1, count_tokens_approximately(msgs))
-        after = int(count_tokens_approximately([note, *tail]) * max(1.0, ratio))
+        # after = before − what the folded messages really cost (body ratio:
+        # tool output tokenizes ~2x denser than chars/4) + the summary (prose,
+        # ~1x). Scaling the whole remainder by before/approx inflated it with
+        # the system-prompt overhead: a 1-msg fold read "14.9k → 20.1k".
+        after = max(0, int(before - body_ratio * count_tokens_approximately(head)
+                           + count_tokens_approximately([note])))
         note.additional_kwargs["lb_compacted"].update(
             {"before": before, "after": after, "kept": len(tail), "in_turn": in_turn})
         try:  # → run_chat: trajectory COMPACT row + live ⟲ card in the chat
