@@ -335,7 +335,34 @@ class SGlangChatOpenAI(ChatOpenAI):
     langchain-openai >=1.x deliberately ignores non-spec delta fields, so
     sglang's/vLLM's separated thinking would be dropped on the floor; we
     re-attach it to additional_kwargs where _msg_dict/run_chat can see it.
+
+    keep_reasoning ("off" | "turn" | "all") sends it BACK on assistant
+    messages as `reasoning_content` — which langchain-openai never does, so
+    every earlier step reached the Qwen3.8 template as an empty
+    <think></think>: the model never saw why it made its previous calls.
     """
+
+    keep_reasoning: str = "off"
+
+    def _get_request_payload(self, input_, *, stop=None, **kwargs):  # noqa: ANN001
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        if self.keep_reasoning not in ("turn", "all") or "messages" not in payload:
+            return payload
+        msgs = self._convert_input(input_).to_messages()
+        if len(msgs) != len(payload["messages"]):
+            return payload  # not the 1:1 chat-completions shape — leave it alone
+        start = 0
+        if self.keep_reasoning == "turn":  # only steps after the latest user message
+            for i in range(len(msgs) - 1, -1, -1):
+                if isinstance(msgs[i], HumanMessage):
+                    start = i
+                    break
+        for i in range(start, len(msgs)):
+            rc = (msgs[i].additional_kwargs or {}).get("reasoning_content") \
+                if isinstance(msgs[i], AIMessage) else None
+            if rc and payload["messages"][i].get("role") == "assistant":
+                payload["messages"][i]["reasoning_content"] = rc
+        return payload
 
     def _convert_chunk_to_generation_chunk(
         self, chunk: dict, default_chunk_class: type, base_generation_info: dict | None
@@ -364,6 +391,11 @@ def extra_body(s: dict, thinking: bool | None = None) -> dict | None:
         return None
     on = bool(s.get("enable_thinking")) if thinking is None else thinking
     kw = {"enable_thinking": on}
+    if s.get("keep_reasoning") == "turn":
+        # Qwen3.8 template: preserve_thinking unset = render <think> on EVERY
+        # past assistant message (empty, since we don't send old reasoning);
+        # False = only on this turn's steps, which is what "turn" sends
+        kw["preserve_thinking"] = False
     # Qwen3.8 template: xhigh (its default when unset) | medium | low;
     # anything else raises in the template → only pass known values
     if on and s.get("reasoning_effort") in REASONING_EFFORTS:
@@ -391,6 +423,7 @@ def model(s: dict) -> ChatOpenAI:
         # prefill, not a dead peer. Kills truly hung connections at 10 min.
         stream_chunk_timeout=600,
         extra_body=extra_body(s),
+        keep_reasoning=(s.get("keep_reasoning") or "off") if s.get("template_kwargs", True) else "off",
         # deepagents' read_file returns media as base64 content blocks and
         # only scrubs block types the profile marks False (missing = assumed
         # supported). Unset, a read_file on a .wav/.mp4 shipped ~350k tokens
@@ -1905,11 +1938,13 @@ async def get_thread_model(tid: str) -> dict:
         ov = json.loads(r[0]) if r and r[0] else {}
     except ValueError:
         ov = {}
-    return {k: str(ov[k]) for k in ("provider", "model") if ov.get(k)}
+    return {k: str(ov[k]) for k in ("provider", "model", "keep_reasoning") if ov.get(k)}
 
 
 async def set_thread_model(tid: str, ov: dict | None) -> bool:
-    ov = {k: str((ov or {}).get(k) or "").strip() for k in ("provider", "model")}
+    ov = {k: str((ov or {}).get(k) or "").strip() for k in ("provider", "model", "keep_reasoning")}
+    if ov["keep_reasoning"] not in config.KEEP_REASONING:
+        ov["keep_reasoning"] = ""
     ov = {k: v for k, v in ov.items() if v}
     async with _wt(_db):
         cur = await _db.execute("UPDATE threads SET model=? WHERE id=?",

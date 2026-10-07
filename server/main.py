@@ -209,12 +209,15 @@ async def rename_thread(tid: str, body: ThreadRenameIn):
 class ThreadModelIn(BaseModel):
     provider: str = ""
     model: str = ""
+    keep_reasoning: str = ""  # "" = inherit CONFIG; off | turn | all
 
 
 def _model_view(s: dict, ov: dict) -> dict:
     eff = config.effective(s, ov)
     return {"override": ov, "provider": eff["provider"], "model": eff["model"],
-            "default": {"provider": s["provider"], "model": s["model"]},
+            "keep_reasoning": eff.get("keep_reasoning", "off"),
+            "default": {"provider": s["provider"], "model": s["model"],
+                        "keep_reasoning": s.get("keep_reasoning", "off")},
             "vision": bool((eff.get("capabilities") or {}).get("vision"))}
 
 

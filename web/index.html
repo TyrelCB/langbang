@@ -114,6 +114,12 @@
               <option value="medium">medium — balanced</option>
               <option value="low">low — brief thinking, straight to the answer</option>
             </select></label>
+          <label title="Send the model's earlier reasoning back to it. sglang/vLLM providers only (template kwargs on); others always get off">Keep reasoning in context
+            <select id="set-keep_reasoning">
+              <option value="off">off — never (each step only sees its visible text)</option>
+              <option value="turn">current turn — this turn's tool steps see their reasoning (Qwen's agentic setup)</option>
+              <option value="all">all turns — every past reply's reasoning (uses context fastest)</option>
+            </select></label>
         </div>
       </section>
       <section class="cfg-card">
@@ -349,6 +355,15 @@
         <div class="row">
           <label>Provider <select id="tmodel-provider"></select></label>
           <label>Model <input id="tmodel-model" type="text" list="dl-tmodel-models" autocomplete="off" spellcheck="false" placeholder="(provider default)"></label>
+        </div>
+        <div class="row">
+          <label>Keep reasoning in context
+            <select id="tmodel-keep">
+              <option value="" id="tmodel-keep-default">(default)</option>
+              <option value="off">off — never (each step only sees its visible text)</option>
+              <option value="turn">current turn — this turn's tool steps see their reasoning (Qwen's agentic setup)</option>
+              <option value="all">all turns — every past reply's reasoning (uses context fastest)</option>
+            </select></label>
         </div>
         <datalist id="dl-tmodel-models"></datalist>
         <div id="tmodel-msg" class="hint"></div>
