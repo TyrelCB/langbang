@@ -867,3 +867,7 @@ details.block.tool.retried > summary { color: var(--orange); }
 /* compaction in the trajectory */
 .traj-badge.compact { border-color: var(--orange); color: var(--orange); }
 .traj-tick.compact { background: var(--orange); width: 4px; }
+.prov-row .prov-flags label.chk { display: inline-flex; flex-direction: row; align-items: center; gap: 6px; }
+.prov-row .prov-flags label.chk input { width: auto; margin: 0; }
+.cfg-card .row label:has(#set-model) { flex: 2 1 28ch; }
+#set-model { width: 100%; box-sizing: border-box; }
