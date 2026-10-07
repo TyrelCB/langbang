@@ -863,3 +863,7 @@ details.block.tool.retried > summary { color: var(--orange); }
 .prov-row .prov-test.ok { color: var(--cyan); }
 .prov-row .prov-test.bad { color: var(--danger); }
 @media (max-width: 700px) { .prov-row { grid-template-columns: 1fr; } }
+
+/* compaction in the trajectory */
+.traj-badge.compact { border-color: var(--orange); color: var(--orange); }
+.traj-tick.compact { background: var(--orange); width: 4px; }

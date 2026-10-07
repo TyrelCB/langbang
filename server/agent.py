@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 import aiosqlite
+from langchain_core.callbacks.manager import adispatch_custom_event
 from deepagents import (
     FilesystemPermission,
     HarnessProfile,
@@ -381,6 +382,7 @@ class SGlangChatOpenAI(ChatOpenAI):
 
 
 REASONING_EFFORTS = ("xhigh", "medium", "low")
+COMPACTION_TAG = "lb_compaction"
 
 
 def extra_body(s: dict, thinking: bool | None = None) -> dict | None:
@@ -559,12 +561,17 @@ def _compaction_hook(s: dict):
                         and not (m.additional_kwargs or {}).get("lb_compacted")), None)
         in_turn = current is not None and current in head and not any(
             isinstance(m, HumanMessage) for m in tail)
-        summary = await summarizer(s).ainvoke(
+        before = _ctx_tokens(msgs)
+        t_sum = time.time()
+        # tagged so run_chat doesn't log/stream it as an ordinary model step
+        # (it used to show up as an unlabelled ASSISTANT row + usage line)
+        summary = await summarizer(s).with_config(tags=[COMPACTION_TAG]).ainvoke(
             [
                 SystemMessage(content=_SUMMARY_INSTRUCTION),
                 HumanMessage(content=_transcript(head)),
             ]
         )
+        t_sum = time.time() - t_sum
         tid = (get_config() or {}).get("configurable", {}).get("thread_id", "")
         async with _wt(_db):
             for m in head:
@@ -584,6 +591,22 @@ def _compaction_hook(s: dict):
         # them, or _ctx_tokens would keep seeing the old size and re-fire
         tail = [m.model_copy(update={"usage_metadata": None}) if isinstance(m, AIMessage) else m
                 for m in tail]
+        um = getattr(summary, "usage_metadata", None) or {}
+        # "before" is anchored on sglang's real counts; scale the chars/4
+        # estimate of what's left by the same ratio so the two compare
+        ratio = before / max(1, count_tokens_approximately(msgs))
+        after = int(count_tokens_approximately([note, *tail]) * max(1.0, ratio))
+        note.additional_kwargs["lb_compacted"].update(
+            {"before": before, "after": after, "kept": len(tail), "in_turn": in_turn})
+        try:  # → run_chat: trajectory COMPACT row + live ⟲ card in the chat
+            await adispatch_custom_event("lb_compacted", {
+                "count": len(head), "kept": len(tail), "before": before,
+                "after": after, "in_turn": in_turn,
+                "dur": round(t_sum, 3), "tok_in": um.get("input_tokens"),
+                "tok_out": um.get("output_tokens"), "summary": text[:4000],
+            })
+        except Exception:  # noqa: BLE001 - outside a traced run (offline tests)
+            pass
         return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), note, *tail]}
 
     return pre_model_hook
@@ -1703,7 +1726,7 @@ async def trajectory(thread_id: str) -> dict:
         await _edb.execute(
             "SELECT COUNT(DISTINCT turn_id),"
             " COALESCE(SUM(type IN ('model','tool')),0),"
-            " COALESCE(SUM(CASE WHEN type='model' THEN dur END),0),"
+            " COALESCE(SUM(CASE WHEN type IN ('model','compact') THEN dur END),0),"
             " COALESCE(SUM(CASE WHEN type='tool' AND name!='task' THEN dur END),0),"
             " COALESCE(SUM(tok_in),0), COALESCE(SUM(tok_out),0), COALESCE(SUM(cache_read),0),"
             " AVG(CASE WHEN type='model' THEN ttft END),"
@@ -2113,6 +2136,19 @@ async def run_chat(
                 ),
                 None,
             )
+            if kind.startswith("on_chat_model") and COMPACTION_TAG in (ev.get("tags") or ()):
+                continue  # the summarizer: reported once, via lb_compacted below
+            if kind == "on_custom_event" and ev.get("name") == "lb_compacted" and not in_sub:
+                d = ev.get("data") or {}
+                await _log(
+                    thread_id, turn_id, "compact", name=s.get("model"), dur=d.get("dur"),
+                    tok_in=d.get("tok_in"), tok_out=d.get("tok_out"),
+                    meta={k: d.get(k) for k in ("count", "kept", "before", "after", "in_turn")}
+                    | {"text": _cap(d.get("summary") or "", 500)},
+                )
+                yield {"type": "compacted", **{k: d.get(k) for k in
+                       ("count", "kept", "before", "after", "in_turn", "dur", "summary")}}
+                continue
             if kind == "on_chat_model_start":
                 if not in_sub:
                     t0, t_first = time.time(), None
