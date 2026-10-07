@@ -1612,6 +1612,7 @@ async function openThread(t) {
   // the render already succeeded — worst case the row just won't re-sort.
   const bumped = api.touchThread(t.id).catch(() => {});
   syncTPrompt(t.id);
+  draftModel = null; // a pick on an abandoned draft doesn't follow you
   syncTModel(t.id);
   const msgs = await api.messages(t.id);
   if (seq !== openSeq) return; // superseded by a newer open/newThread — don't paint
@@ -1661,6 +1662,15 @@ async function createThreadNow() {
   const draftPlan = planOn(null);
   threadId = t.id;
   if (draftPlan) { setPlan(true, t.id); setPlan(false, null); } // plan toggled on the draft carries over
+  if (draftModel) { // a model picked on the draft lands on the new thread BEFORE its first run
+    const ov = draftModel; draftModel = null;
+    try {
+      await J(await fetch(`/api/threads/${t.id}/model`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(ov),
+      }));
+    } catch {}
+    syncTModel(t.id);
+  }
   refreshThreads();
 }
 
@@ -3306,11 +3316,20 @@ function provRow(name = "", p = {}) {
   const test = el("button", "btn ghost", "↻ TEST"); test.type = "button";
   const out = el("span", "prov-test", "");
   test.onclick = async () => {
-    out.className = "prov-test"; out.textContent = "…";
+    out.className = "prov-test busy"; out.textContent = "testing…";
+    test.disabled = true;
     const r = await probeModels({ base_url: row.querySelector(".p-url").value.trim(),
                                   api_key: row.querySelector(".p-key").value.trim() });
-    out.className = "prov-test" + (r.ok ? "" : " bad");
-    out.textContent = r.ok ? `${r.models.length} model(s): ${r.models.slice(0, 4).map(shortModel).join(", ")}${r.models.length > 4 ? "…" : ""}` : r.error;
+    test.disabled = false;
+    out.className = "prov-test " + (r.ok ? "ok" : "bad");
+    out.textContent = r.ok ? "✓ " : "✕ ";
+    out.textContent += r.ok ? `reachable — ${r.models.length} model(s): ${r.models.slice(0, 4).map(shortModel).join(", ")}${r.models.length > 4 ? "…" : ""}` : r.error;
+    if (r.ok) { // offer them in this row's Default model field
+      let dl = row.querySelector("datalist");
+      if (!dl) { dl = document.createElement("datalist"); dl.id = "dl-prov-" + Math.random().toString(36).slice(2); row.appendChild(dl); }
+      dl.innerHTML = ""; for (const m of r.models) dl.appendChild(new Option(m, m));
+      row.querySelector(".p-model").setAttribute("list", dl.id);
+    }
   };
   const x = el("button", "btn ghost", "✕"); x.type = "button"; x.title = "remove provider";
   x.onclick = () => { row.remove(); provSyncSelect(); cfgDirtyCompute(); };
@@ -3368,16 +3387,25 @@ $("#set-provider").addEventListener("change", () => {
 });
 
 let tmodelSeq = 0, tmodelView = null;
+let draftModel = null; // {provider, model} chosen on a "New chat" before it has a row
 async function syncTModel(tid) {
   const b = $("#model-tag"), seq = ++tmodelSeq;
   const paint = (model, over, title, vision) => {
-    b.textContent = (over ? "◇ " : "") + shortModel(model);
+    b.textContent = (over ? "◇ " : "") + shortModel(model) + " ▾";
     b.title = title; b.classList.toggle("override", over);
     supportsVision = !!vision;
     if (!supportsVision && pendingImages.length) { pendingImages = []; renderAttachStrip(); }
   };
-  b.disabled = !tid;
-  if (!tid) { tmodelView = null; paint(defaultModel.model, false, "global default model (CONFIG → MODEL) — open a thread to override it", defaultModel.vision); return; }
+  if (!tid) {
+    if (draftModel) { // show the draft's pick; the server resolves it once the thread exists
+      tmodelView = { override: draftModel, draft: true };
+      paint(draftModel.model || draftModel.provider, true, `${draftModel.provider || "(default provider)"} · ${draftModel.model || "(provider default)"}  (applies to this new chat)`, defaultModel.vision);
+    } else {
+      tmodelView = { override: {}, draft: true };
+      paint(defaultModel.model, false, "global default model — click to pick another for this new chat", defaultModel.vision);
+    }
+    return;
+  }
   let v;
   try { v = await J(await fetch(`/api/threads/${tid}/model`)); } catch { return; }
   if (seq !== tmodelSeq || tid !== threadId) return;
@@ -3386,7 +3414,7 @@ async function syncTModel(tid) {
   paint(v.model, over, `${v.provider} · ${v.model}` + (over ? "  (this thread's override — click to change)" : "  (global default — click to override for this thread)"), v.vision);
 }
 async function openTModel() {
-  if (!threadId || !tmodelView) return;
+  if (!tmodelView) return;
   SFX.play("click");
   const s = await api.settings();
   const sel = $("#tmodel-provider");
@@ -3395,7 +3423,7 @@ async function openTModel() {
   for (const n of Object.keys(s.providers || {})) sel.appendChild(new Option(n, n));
   sel.value = tmodelView.override.provider || "";
   $("#tmodel-model").value = tmodelView.override.model || "";
-  $("#tmodel-thread").textContent = $("#chat-title").textContent;
+  $("#tmodel-thread").textContent = threadId ? $("#chat-title").textContent : "NEW CHAT — applies when you send the first message";
   const refresh = async () => {
     const pn = sel.value || s.provider;
     $("#tmodel-model").placeholder = `(${sel.value ? (s.providers[pn]?.model || s.model) : s.model})`;
@@ -3410,6 +3438,10 @@ async function openTModel() {
 const closeTModel = () => $("#tmodel-panel").classList.add("hidden");
 async function saveTModel(ov) {
   const tid = threadId;
+  if (!tid) { // draft: keep it client-side until createThreadNow
+    draftModel = ov.provider || ov.model ? ov : null;
+    closeTModel(); SFX.play("settings_saved"); syncTModel(null); return;
+  }
   try {
     await J(await fetch(`/api/threads/${tid}/model`, {
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(ov),

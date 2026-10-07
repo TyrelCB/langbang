@@ -859,5 +859,7 @@ details.block.tool.retried > summary { color: var(--orange); }
 .prov-row .prov-flags { grid-column: 1 / -1; display: flex; gap: 14px; flex-wrap: wrap; align-items: center; font-size: 12px; }
 .prov-row .prov-flags .btn { font-size: 11px; padding: 2px 8px; }
 .prov-row .prov-test { color: var(--muted); }
+.prov-row .prov-test.busy { color: var(--orange); }
+.prov-row .prov-test.ok { color: var(--cyan); }
 .prov-row .prov-test.bad { color: var(--danger); }
 @media (max-width: 700px) { .prov-row { grid-template-columns: 1fr; } }
