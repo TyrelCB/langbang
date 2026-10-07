@@ -64,6 +64,10 @@ DEFAULTS = {
     # chat_template_kwargs.reasoning_effort while thinking: xhigh | medium |
     # low. The Qwen3.8 template defaults to xhigh when it isn't sent.
     "reasoning_effort": "xhigh",
+    # send earlier reasoning back to the model (sglang/vLLM providers only):
+    # off = never (LangBang's original behaviour) | turn = this turn's tool
+    # steps (Qwen's agentic setup) | all = every past assistant message
+    "keep_reasoning": "off",
     # Model input modalities. sglang/llama.cpp can't tell us, so the user
     # declares them; the UI only offers image paste/attach when vision=true.
     # RadixArk/Qwen3.8-Flash-Next-NVFP4 verified vision-capable on the Spark
@@ -135,6 +139,9 @@ DEFAULTS = {
 }
 
 
+KEEP_REASONING = ("off", "turn", "all")
+
+
 def _provider_name(url: str) -> str:
     """'http://spark-da36:30000/v1' → 'spark-da36' (first provider's name)."""
     from urllib.parse import urlparse
@@ -169,6 +176,8 @@ def effective(s: dict, override: dict | None = None) -> dict:
     may be empty = inherit). Everything that builds a model client reads
     base_url / api_key / model / capabilities.vision / template_kwargs."""
     ov = override or {}
+    if ov.get("keep_reasoning") in KEEP_REASONING:
+        s = {**s, "keep_reasoning": ov["keep_reasoning"]}
     provs = s.get("providers") or {}
     pname = ov.get("provider") if ov.get("provider") in provs else s.get("provider")
     p = provs.get(pname)

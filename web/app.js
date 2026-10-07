@@ -2190,6 +2190,7 @@ async function openSettings() {
   $("#set-vision").checked = !!(s.capabilities || {}).vision;
   $("#set-thinking").checked = !!s.enable_thinking;
   $("#set-reasoning_effort").value = s.reasoning_effort || "xhigh";
+  $("#set-keep_reasoning").value = s.keep_reasoning || "off";
   $("#set-reasoning_effort").disabled = !s.enable_thinking;
   $("#set-compact").checked = !!s.compact_enabled;
   $("#set-deep_agent").checked = !!s.deep_agent;
@@ -2248,6 +2249,7 @@ async function saveSettings() {
     capabilities: { vision: $("#set-vision").checked },
     enable_thinking: $("#set-thinking").checked,
     reasoning_effort: $("#set-reasoning_effort").value || "xhigh",
+    keep_reasoning: $("#set-keep_reasoning").value || "off",
     compact_enabled: $("#set-compact").checked,
     deep_agent: $("#set-deep_agent").checked,
     skills_enabled: $("#set-skills_enabled").checked,
@@ -3399,7 +3401,7 @@ async function syncTModel(tid) {
   if (!tid) {
     if (draftModel) { // show the draft's pick; the server resolves it once the thread exists
       tmodelView = { override: draftModel, draft: true };
-      paint(draftModel.model || draftModel.provider, true, `${draftModel.provider || "(default provider)"} · ${draftModel.model || "(provider default)"}  (applies to this new chat)`, defaultModel.vision);
+      paint(draftModel.model || draftModel.provider || defaultModel.model, true, `${draftModel.provider || "(default provider)"} · ${draftModel.model || "(provider default)"}  (applies to this new chat)`, defaultModel.vision);
     } else {
       tmodelView = { override: {}, draft: true };
       paint(defaultModel.model, false, "global default model — click to pick another for this new chat", defaultModel.vision);
@@ -3410,8 +3412,8 @@ async function syncTModel(tid) {
   try { v = await J(await fetch(`/api/threads/${tid}/model`)); } catch { return; }
   if (seq !== tmodelSeq || tid !== threadId) return;
   tmodelView = v;
-  const over = !!(v.override.provider || v.override.model);
-  paint(v.model, over, `${v.provider} · ${v.model}` + (over ? "  (this thread's override — click to change)" : "  (global default — click to override for this thread)"), v.vision);
+  const over = !!(v.override.provider || v.override.model || v.override.keep_reasoning);
+  paint(v.model, over, `${v.provider} · ${v.model} · keep reasoning: ${v.keep_reasoning}` + (over ? "  (this thread has overrides — click to change)" : "  (global defaults — click to override for this thread)"), v.vision);
 }
 async function openTModel() {
   if (!tmodelView) return;
@@ -3423,6 +3425,9 @@ async function openTModel() {
   for (const n of Object.keys(s.providers || {})) sel.appendChild(new Option(n, n));
   sel.value = tmodelView.override.provider || "";
   $("#tmodel-model").value = tmodelView.override.model || "";
+  const KR = { off: "off", turn: "current turn", all: "all turns" };
+  $("#tmodel-keep-default").textContent = `(default: ${KR[s.keep_reasoning || "off"]})`;
+  $("#tmodel-keep").value = tmodelView.override.keep_reasoning || "";
   $("#tmodel-thread").textContent = threadId ? $("#chat-title").textContent : "NEW CHAT — applies when you send the first message";
   const refresh = async () => {
     const pn = sel.value || s.provider;
@@ -3439,7 +3444,7 @@ const closeTModel = () => $("#tmodel-panel").classList.add("hidden");
 async function saveTModel(ov) {
   const tid = threadId;
   if (!tid) { // draft: keep it client-side until createThreadNow
-    draftModel = ov.provider || ov.model ? ov : null;
+    draftModel = ov.provider || ov.model || ov.keep_reasoning ? ov : null;
     closeTModel(); SFX.play("settings_saved"); syncTModel(null); return;
   }
   try {
@@ -3452,8 +3457,8 @@ async function saveTModel(ov) {
   syncTModel(tid);
 }
 $("#model-tag").onclick = openTModel;
-$("#btn-tmodel-save").onclick = () => saveTModel({ provider: $("#tmodel-provider").value, model: $("#tmodel-model").value.trim() });
-$("#btn-tmodel-default").onclick = () => saveTModel({ provider: "", model: "" });
+$("#btn-tmodel-save").onclick = () => saveTModel({ provider: $("#tmodel-provider").value, model: $("#tmodel-model").value.trim(), keep_reasoning: $("#tmodel-keep").value });
+$("#btn-tmodel-default").onclick = () => saveTModel({ provider: "", model: "", keep_reasoning: "" });
 $("#btn-tmodel-cancel").onclick = () => { SFX.play("click"); closeTModel(); };
 $("#tmodel-panel").onclick = (e) => { if (e.target.id === "tmodel-panel") closeTModel(); };
 
@@ -3587,7 +3592,7 @@ $("#btn-review-now").onclick = async () => {
 };
 
 // effort only means something while thinking is on
-$("#set-thinking").addEventListener("change", (e) => { $("#set-reasoning_effort").disabled = !e.target.checked; });
+$("#set-thinking").addEventListener("change", (e) => { $("#set-reasoning_effort").disabled = !e.target.checked; });  // keep_reasoning stays editable: a thread can enable thinking later
 
 $("#btn-recap").onclick = openRecap;
 $("#btn-recap-close").onclick = () => { SFX.play("click"); closeRecap(); };
