@@ -1,0 +1,33 @@
+LangBang
+Copyright 2026 Tyrel
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+---------------------------------------------------------------------------
+Third-party attributions
+---------------------------------------------------------------------------
+
+Sound effects (web/sounds/*.ogg)
+  Generated with Stability AI's Stable Audio 3 small-sfx model
+  (stabilityai/stable-audio-3-small-sfx).
+  This Stability AI Model is licensed under the Stability AI Community
+  License, Copyright (c) Stability AI Ltd. All Rights Reserved.
+  Powered by Stability AI.
+  The model itself is not included in this repository.
+
+SGLang (tools/sglang-patches/)
+  qwen3_coder_detector.orig.py is an unmodified copy, and
+  qwen3_coder_detector.patched.py / qwen3_coder_tagless_param.patch are
+  modified versions, of python/sglang/srt/function_call/qwen3_coder_detector.py
+  from SGLang (https://github.com/sgl-project/sglang),
+  Copyright The SGLang Authors, licensed under the Apache License 2.0.
+  Modifications (marked "LANGBANG PATCH") are by the LangBang authors.
+
+Pocket TTS (runtime dependency, not included)
+  Kyutai's Pocket TTS (https://github.com/kyutai-labs/pocket-tts): code under
+  the MIT License; model weights (kyutai/pocket-tts) under CC-BY-4.0, gated on
+  Hugging Face — each user accepts Kyutai's terms and downloads them.
+
+Bundled JavaScript (web/vendor/) — see THIRD_PARTY_NOTICES.md
+  highlight.js 11.11.1 (BSD-3-Clause), marked 15.0.12 (MIT),
+  DOMPurify 3.2.7 (Apache-2.0 OR MPL-2.0).

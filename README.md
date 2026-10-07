@@ -1,5 +1,10 @@
 # LangBang
 
+> **⚠ Read [Security](#-security) before running this.** The agent gets an
+> **unsandboxed shell and full file access** on the host, with no approval
+> prompt and no authentication. It's built as a personal tool for a trusted
+> LAN/tailnet — never expose it to the internet.
+
 Agentic chat server in the spirit of llama.cpp's built-in web server —
 but built on the LangChain/LangGraph ecosystem:
 
@@ -380,6 +385,24 @@ route) can run commands as you. `GET /api/media?path=` serves any absolute
 path on this machine (for the inline players) — the same read surface
 `!cat /etc/shadow` already grants, so it adds no new capability, but the
 same LAN/tailnet-only rule covers it.
+
+## License & credits
+
+LangBang is licensed under the [Apache License 2.0](LICENSE); see
+[NOTICE](NOTICE) for attributions and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for bundled third-party code.
+
+Built on [LangChain](https://github.com/langchain-ai/langchain),
+[LangGraph](https://github.com/langchain-ai/langgraph) and
+[deepagents](https://github.com/langchain-ai/deepagents) (MIT), served by
+[FastAPI](https://github.com/fastapi/fastapi) — installed as dependencies,
+not redistributed. Text-to-speech uses
+[Pocket TTS](https://github.com/kyutai-labs/pocket-tts) by Kyutai (code MIT;
+model weights CC-BY-4.0, gated on Hugging Face and downloaded by each user —
+not included here). The UI sound effects in `web/sounds/` were generated with
+Stability AI's Stable Audio 3 small-sfx model — **Powered by Stability AI**.
+`tools/sglang-patches/` contains files derived from
+[SGLang](https://github.com/sgl-project/sglang) (Apache-2.0).
 
 ## Layout
 
