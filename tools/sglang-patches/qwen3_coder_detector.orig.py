@@ -1,3 +1,7 @@
+# Copyright The SGLang Authors. Licensed under the Apache License, Version 2.0
+# (https://www.apache.org/licenses/LICENSE-2.0). Unmodified copy of
+# python/sglang/srt/function_call/qwen3_coder_detector.py from SGLang
+# (lmsysorg/sglang@sha256:9d2a843c…), kept for diffing — see NOTICE.
 import json
 import logging
 import re

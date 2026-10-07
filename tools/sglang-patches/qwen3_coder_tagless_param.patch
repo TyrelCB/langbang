@@ -1,3 +1,6 @@
+Modified version of SGLang's qwen3_coder_detector.py (c) The SGLang Authors,
+Apache License 2.0 — changes by the LangBang authors, see NOTICE.
+
 --- tools/sglang-patches/qwen3_coder_detector.orig.py	2026-10-04 04:55:39.095579101 -0600
 +++ tools/sglang-patches/qwen3_coder_detector.patched.py	2026-10-04 04:55:39.096457888 -0600
 @@ -89,6 +89,33 @@

@@ -1,3 +1,8 @@
+# Copyright The SGLang Authors. Licensed under the Apache License, Version 2.0
+# (https://www.apache.org/licenses/LICENSE-2.0).
+# MODIFIED by the LangBang authors (2026-10-04): tag-less single-parameter
+# recovery, every change marked "LANGBANG PATCH". Original: SGLang's
+# python/sglang/srt/function_call/qwen3_coder_detector.py — see NOTICE.
 import json
 import logging
 import re
