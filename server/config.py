@@ -3,7 +3,10 @@ import json
 import os
 import threading
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+# LANGBANG_DATA_DIR relocates everything stateful (settings, threads,
+# trajectory, uploads, TTS cache, voices) — e.g. a second, isolated instance
+DATA_DIR = os.path.expanduser(os.environ.get("LANGBANG_DATA_DIR") or os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"))
 SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
 DB_PATH = os.path.join(DATA_DIR, "langbang.db")
 # Trajectory (run_events) lives apart from the checkpoint file: per-event

@@ -21,7 +21,7 @@ import time
 import wave
 import logging
 
-from . import ttsnorm
+from . import config, ttsnorm
 
 MAX_TTS_CHARS = 20_000
 _KEYLESS_HINT = "shared free-tier endpoint; try again shortly or switch provider in CONFIG → VOICE"
@@ -237,7 +237,7 @@ def pocket_ready(v: dict):
 
 
 # ---- saved (cloned) voices: data/voices/<name>.safetensors + <name>.json ----
-VOICES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "voices")
+VOICES_DIR = os.path.join(config.DATA_DIR, "voices")
 VOICE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
 _pk_clone = threading.Lock()
 
