@@ -489,6 +489,7 @@
               <button class="btn ghost sm" data-mode="split">SPLIT</button>
               <button class="btn ghost sm" data-mode="preview">PREVIEW</button>
             </span>
+            <button id="btn-ed-read" class="btn ghost sm hidden" type="button" title="Read aloud: your selection, or the whole file (unsaved edits included)">🔊 READ</button>
           </div>
           <div class="ed-wrap">
             <pre id="ed-gutter"></pre>
@@ -500,6 +501,17 @@
             </div>
             <div id="ed-preview" class="msg hidden"></div>
             <div id="ed-viewer" class="hidden"></div>
+          </div>
+          <!-- read-aloud player: the document goes out in ~1.2k-char parts so
+               speech starts at once and long files never hit the TTS cap -->
+          <div id="ed-reader" class="ed-reader hidden">
+            <button id="rd-pp" class="cb-btn" type="button" title="pause / resume">⏸</button>
+            <button id="rd-prev" class="cb-btn" type="button" title="previous part (or restart this one)">⏮</button>
+            <button id="rd-next" class="cb-btn" type="button" title="next part">⏭</button>
+            <button id="rd-stop" class="cb-btn" type="button" title="stop reading">■</button>
+            <span id="rd-part" class="rd-part"></span>
+            <div id="rd-bar" class="tts-bar" title="click to seek in this part"><div id="rd-fill" class="tts-fill"></div></div>
+            <span id="rd-snip" class="rd-snip"></span>
           </div>
           <div id="ed-assist" class="ed-assist hidden">
             <div id="ed-assist-log"></div>
