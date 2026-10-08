@@ -343,34 +343,29 @@ account; the clone step itself needs kyutai's gated weights once: accept
 the terms on the model page and run `.venv/bin/hf auth login` (no restart).
 Needs `ffmpeg` on PATH for streaming (falls back to whole-clip WAV).
 
-The mic/voice-chat half is **ready server-side but not wired client-side**:
-`POST /api/stt` takes 16 kHz mono PCM16 WAV (or bare PCM) and returns text.
-Browser recording needs a secure context, so on `http://<LAN-IP>` (or
-:8123 directly) `getUserMedia` is refused.
+**🎙 MIC (speech → text).** Tap 🎙 in the composer and talk: recording
+stops itself after ~1.4 s of quiet once speech was heard (or tap again; it
+gives up after 8 s of nothing, caps at 60 s), the browser downsamples to
+16 kHz mono PCM16 WAV, and `POST /api/stt` transcribes it (CONFIG → VOICE
+STT provider). The text lands in the composer; with **VOICE: SPEAK** on and
+an empty box it sends straight away, so you talk and hear the answer back.
+The button turns red with a live input-level fill while recording, and
+starting it stops any read-aloud so the mic never records the app itself.
 
-**Mic access options (deferred — revisit before building the recorder):**
+Browsers only allow the mic in a **secure context**: an `https://` address
+or `http://localhost`. On plain `http://<LAN-IP>` the button is disabled
+with a hint. Ways to get HTTPS without exposing anything:
 
-1. **Caddy + public zone + ACME DNS-01 (decided direction).** Caddy now
-   runs on the harness box itself (currently plain HTTP on :80);
-   `tls dns <provider>` validates via the DNS API, so
-   nothing opens inbound (no port-forwards — the ⚠ Security rule stands).
-   Real wildcard cert → trusted on every machine with zero per-machine CA
-   imports. The `langbang` A record points at the LAN IP of whichever box
-   hosts the harness today: the record travels with the harness, which is
-   what makes it portable. Add the hostname + `tls dns` block to the local
-   Caddyfile when the DNS provider is settled; until then the mic only
-   works over `http://localhost` (secure context) or the SSH tunnel below.
-   DNS API token lives in a chmod-600 EnvironmentFile for the Caddy unit,
-   never in the repo.
-2. **Self-signed + `uvicorn --ssl-*`** — zero new moving parts, but a
-   per-machine CA import and a regen dance whenever the hostname changes.
-   Fine as a stopgap.
-3. **SSH tunnel (`ssh -L 8123:localhost:8123 tyrel@<harness-host>`)** — no TLS
-   work at all; the mic works because `http://localhost` is *already* a
-   secure context. That nuance also means: on whichever machine literally
-   hosts the process, voice chat needs no TLS.
-4. Never: a tunnel/port-forward that makes the URL internet-reachable —
-   an unauthenticated `run_bash` behind a padlock is still an
+1. **Caddy + a real domain + ACME DNS-01 (what this box uses).** A
+   wildcard A record points at the harness box's LAN/tailnet IP, certbot
+   or Caddy validates via the DNS provider's API (no inbound ports), and
+   Caddy terminates TLS and reverse-proxies to `127.0.0.1:8123` with
+   `flush_interval -1` for SSE. Trusted on every device, no CA imports.
+2. **SSH tunnel** (`ssh -L 8123:localhost:8123 <harness-host>`): the mic
+   works because `http://localhost` is already a secure context.
+3. **Self-signed + `uvicorn --ssl-*`**: a per-device CA import; stopgap only.
+4. Never: a tunnel or port-forward that makes the URL internet-reachable.
+   An unauthenticated `run_bash` behind a padlock is still an
    unauthenticated shell.
 
 ## ⚠ Security

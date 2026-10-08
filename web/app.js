@@ -4730,6 +4730,135 @@ $("#btn-voice").onclick = () => {
   applyVoiceMode();
 };
 applyVoiceMode();
+// ---------- mic (speech → text) ----------
+// Browsers hand out the mic only in a secure context (the https:// address,
+// or http://localhost). One tap records one utterance; it ends itself after
+// ~1.4 s of quiet once speech was heard (or on a second tap), /api/stt
+// transcribes it, and the text lands in the composer — sent straight away
+// when VOICE: SPEAK is on and the box was empty (talk → hear the answer).
+// Its own short-lived AudioContext: sfx.js's page-lifetime one is for output.
+const MIC = { state: "idle", stream: null, ctx: null, node: null, chunks: [], rate: 48000 };
+const MIC_QUIET_MS = 1400, MIC_NOSPEECH_MS = 8000, MIC_MAX_MS = 60000;
+const micSupported = () => window.isSecureContext && !!navigator.mediaDevices?.getUserMedia;
+
+function micPaint() {
+  const b = $("#btn-mic");
+  b.classList.toggle("on", MIC.state === "rec");
+  b.classList.toggle("busy", MIC.state === "stt");
+  b.textContent = MIC.state === "rec" ? "● REC" : MIC.state === "stt" ? "… STT" : "🎙 MIC";
+  if (MIC.state !== "rec") b.style.removeProperty("--lvl");
+  if (!micSupported()) {
+    b.disabled = true;
+    b.title = "The mic needs HTTPS (or localhost): open LangBang at its https:// address";
+  }
+}
+
+async function micStart() {
+  stopSpeaking(); // never record our own read-aloud
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+  } catch (e) {
+    SFX.play("error");
+    return voiceFail("MIC: " + (e.name === "NotAllowedError"
+      ? "permission denied: allow the microphone for this site" : e.message || e.name));
+  }
+  const ctx = new AudioContext();
+  await ctx.resume();
+  const src = ctx.createMediaStreamSource(stream);
+  // ScriptProcessor (deprecated but everywhere): no worklet module to serve,
+  // and it only pulls audio while connected to the destination (outputs silence)
+  const node = ctx.createScriptProcessor(4096, 1, 1);
+  Object.assign(MIC, { state: "rec", stream, ctx, node, chunks: [], rate: ctx.sampleRate });
+  let floor = 0, nFloor = 0, heard = false, quietMs = 0, totalMs = 0;
+  node.onaudioprocess = (e) => {
+    if (MIC.state !== "rec") return;
+    const x = e.inputBuffer.getChannelData(0);
+    MIC.chunks.push(new Float32Array(x));
+    let sum = 0;
+    for (let i = 0; i < x.length; i++) sum += x[i] * x[i];
+    const rms = Math.sqrt(sum / x.length), ms = (x.length / MIC.rate) * 1000;
+    totalMs += ms;
+    if (totalMs < 300) { floor += rms; nFloor++; return; } // room noise floor
+    const thr = Math.max(0.012, (floor / Math.max(1, nFloor)) * 3);
+    if (rms > thr) { heard = true; quietMs = 0; } else quietMs += ms;
+    $("#btn-mic").style.setProperty("--lvl", Math.min(1, rms / (thr * 4)).toFixed(2));
+    if ((heard && quietMs > MIC_QUIET_MS) || totalMs > MIC_MAX_MS) micStop(true);
+    else if (!heard && totalMs > MIC_NOSPEECH_MS) micStop(false);
+  };
+  src.connect(node);
+  node.connect(ctx.destination);
+  micPaint();
+}
+
+async function micStop(keep) {
+  if (MIC.state !== "rec") return;
+  MIC.state = keep ? "stt" : "idle";
+  MIC.node.onaudioprocess = null;
+  MIC.node.disconnect();
+  MIC.stream.getTracks().forEach((t) => t.stop()); // browser's mic indicator goes off
+  MIC.ctx.close();
+  const chunks = MIC.chunks, rate = MIC.rate;
+  MIC.chunks = [];
+  micPaint();
+  if (!keep) return;
+  try {
+    const res = await fetch("/api/stt", { method: "POST", headers: { "Content-Type": "audio/wav" },
+                                          body: wav16k(chunks, rate) });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(out.detail || "HTTP " + res.status);
+    const text = (out.text || "").trim();
+    if (!text) { voiceFail("MIC: didn't catch that, try again"); return; }
+    const box = $("#input");
+    const wasEmpty = !box.value.trim();
+    box.value = wasEmpty ? text : box.value.trimEnd() + " " + text;
+    box.dispatchEvent(new Event("input")); // autosize / path-suggest listeners
+    if (wasEmpty && voiceMode === "speak" && !(threadId && RUNS.has(threadId))) send();
+    else box.focus();
+  } catch (e) {
+    voiceFail("MIC: transcription failed: " + e.message);
+  } finally {
+    MIC.state = "idle";
+    micPaint();
+  }
+}
+
+// Float32 chunks at the context rate → 16 kHz mono PCM16 WAV (what /api/stt
+// takes). Box-filter decimation: averaging each output sample's input window
+// is the low-pass, so 48 kHz speech doesn't alias into the 0–8 kHz band.
+function wav16k(chunks, rate) {
+  let n = 0;
+  for (const c of chunks) n += c.length;
+  const all = new Float32Array(n);
+  let o = 0;
+  for (const c of chunks) { all.set(c, o); o += c.length; }
+  const ratio = rate / 16000, len = Math.floor(n / ratio);
+  const pcm = new Int16Array(len);
+  for (let i = 0; i < len; i++) {
+    const a = Math.floor(i * ratio), b = Math.min(n, Math.max(a + 1, Math.floor((i + 1) * ratio)));
+    let s = 0;
+    for (let j = a; j < b; j++) s += all[j];
+    pcm[i] = Math.max(-1, Math.min(1, s / (b - a))) * 0x7fff;
+  }
+  const buf = new ArrayBuffer(44 + pcm.length * 2), d = new DataView(buf);
+  const tag = (p, s) => { for (let i = 0; i < 4; i++) d.setUint8(p + i, s.charCodeAt(i)); };
+  tag(0, "RIFF"); d.setUint32(4, 36 + pcm.length * 2, true); tag(8, "WAVE");
+  tag(12, "fmt "); d.setUint32(16, 16, true); d.setUint16(20, 1, true); d.setUint16(22, 1, true);
+  d.setUint32(24, 16000, true); d.setUint32(28, 32000, true); d.setUint16(32, 2, true);
+  d.setUint16(34, 16, true); tag(36, "data"); d.setUint32(40, pcm.length * 2, true);
+  new Int16Array(buf, 44).set(pcm);
+  return new Blob([buf], { type: "audio/wav" });
+}
+
+$("#btn-mic").onclick = () => {
+  SFX.play("click");
+  if (MIC.state === "idle") micStart();
+  else if (MIC.state === "rec") micStop(true);
+};
+micPaint();
+
 // runs need voice.speak_reasoning before CONFIG is ever opened
 api.settings().then((s) => {
   loadedVoice = { ...DEFAULT_VOICE, ...(s.voice || {}) };
