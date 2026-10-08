@@ -352,6 +352,14 @@ an empty box it sends straight away, so you talk and hear the answer back.
 The button turns red with a live input-level fill while recording, and
 starting it stops any read-aloud so the mic never records the app itself.
 
+**TALK (hands-free).** The topbar VOICE button cycles OFF → SPEAK → TALK.
+TALK opens the mic, sends when you pause, reads the answer aloud, then
+listens again. The mic re-opens only once the thread's run is done and
+nothing is playing, synthesizing or queued, so it never records the
+read-aloud (no barge-in: tap 🎙 to cut an answer short and talk). Silence
+or noise just re-arms it; VOICE → OFF ends the loop. TALK is never
+restored on reload, because opening the mic needs a click.
+
 Browsers only allow the mic in a **secure context**: an `https://` address
 or `http://localhost`. On plain `http://<LAN-IP>` the button is disabled
 with a hint. Ways to get HTTPS without exposing anything:

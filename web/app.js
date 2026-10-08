@@ -39,6 +39,8 @@ let trajVisible = false;
 
 // read-aloud state (which provider speaks is the server's CONFIG; we just
 // queue mp3 clips from /api/tts and play one at a time)
+// off | speak (read answers aloud) | talk (speak + hands-free mic loop).
+// TALK is never restored on load: opening the mic needs a user gesture.
 let voiceMode = localStorage.getItem("lb-voice") === "speak" ? "speak" : "off";
 
 // ---------- API ----------
@@ -706,7 +708,7 @@ function runPipeline(run) {
     const b = thinkingBlock;
     thinkingBlock = null;
     attachBlockSpeak(b, b.querySelector("pre").textContent);
-    if (speak && !run.attached && voiceMode === "speak" && loadedVoice.speak_reasoning === "on")
+    if (speak && !run.attached && voiceMode !== "off" && loadedVoice.speak_reasoning === "on")
       speakRaw(b._raw || "", b);
   };
   // MUST run before any finalize-then-append (attachSpeak): a pending render
@@ -747,7 +749,10 @@ function runPipeline(run) {
       if (asstMsg) { asstRaw += ev.text; scheduleRender(); }
     }
     else if (ev.type === "thinking") {
-      if (!thinkingBlock) { thinkingBlock = addBlock("thinking", "◈ THINKING", CH()); }
+      // whitespace never opens a card (same rule as answer bubbles): a stray
+      // trailing "\n" of reasoning would be an empty card under the answer
+      if (!thinkingBlock && !ev.text.trim()) return;
+      if (!thinkingBlock) { thinkingBlock = put(addBlock("thinking", "◈ THINKING", CH())); }
       thinkingBlock.querySelector("pre").textContent += ev.text;
     } else if (ev.type === "tool_start") {
       SFX.play("tool_start");
@@ -877,7 +882,7 @@ function runPipeline(run) {
       // The todo gate can deliver the answer that streamed BEFORE its
       // write_todos card (server holds it, no re-generation) — then the
       // final segment is empty and the answer is the last sealed bubble.
-      if (voiceMode === "speak") {
+      if (voiceMode !== "off") {
         if (asstMsg && asstRaw.trim()) speakRaw(asstRaw, asstMsg);
         else if (!asstMsg && run.lastBubble) speakRaw(run.lastBubble.raw, run.lastBubble.msg);
       }
@@ -4719,15 +4724,20 @@ applyReasoningVis();
 
 // read-aloud toggle (per browser; provider is server CONFIG)
 function applyVoiceMode() {
-  $("#btn-voice").textContent = "🔊 VOICE: " + (voiceMode === "speak" ? "SPEAK" : "OFF");
-  $("#btn-voice").classList.toggle("on", voiceMode === "speak");
+  $("#btn-voice").textContent = "🔊 VOICE: " + voiceMode.toUpperCase();
+  $("#btn-voice").classList.toggle("on", voiceMode !== "off");
+  $("#btn-voice").classList.toggle("talk", voiceMode === "talk");
 }
+// OFF → SPEAK → TALK (hands-free; only offered where the mic works) → OFF
 $("#btn-voice").onclick = () => {
   SFX.play("click");
-  voiceMode = voiceMode === "speak" ? "off" : "speak";
-  localStorage.setItem("lb-voice", voiceMode);
+  voiceMode = voiceMode === "off" ? "speak"
+    : voiceMode === "speak" && micSupported() ? "talk" : "off";
+  localStorage.setItem("lb-voice", voiceMode === "off" ? "off" : "speak");
   if (voiceMode === "off") stopSpeaking();
+  if (voiceMode !== "talk" && MIC.state === "rec") micStop(false);
   applyVoiceMode();
+  if (voiceMode === "talk") talkTick(); // this click is the gesture the mic needs
 };
 applyVoiceMode();
 // ---------- mic (speech → text) ----------
@@ -4739,6 +4749,7 @@ applyVoiceMode();
 // Its own short-lived AudioContext: sfx.js's page-lifetime one is for output.
 const MIC = { state: "idle", stream: null, ctx: null, node: null, chunks: [], rate: 48000 };
 const MIC_QUIET_MS = 1400, MIC_NOSPEECH_MS = 8000, MIC_MAX_MS = 60000;
+const TALK_NOSPEECH_MS = 30000; // hands-free: re-arm quietly after this
 const micSupported = () => window.isSecureContext && !!navigator.mediaDevices?.getUserMedia;
 
 function micPaint() {
@@ -4754,6 +4765,8 @@ function micPaint() {
 }
 
 async function micStart() {
+  if (MIC.state !== "idle") return;
+  MIC.state = "arming"; // getUserMedia is async: talkTick must not open a second one
   stopSpeaking(); // never record our own read-aloud
   let stream;
   try {
@@ -4761,12 +4774,23 @@ async function micStart() {
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
   } catch (e) {
+    MIC.state = "idle";
     SFX.play("error");
+    if (voiceMode === "talk") { voiceMode = "speak"; applyVoiceMode(); } // don't retry-loop a refusal
     return voiceFail("MIC: " + (e.name === "NotAllowedError"
       ? "permission denied: allow the microphone for this site" : e.message || e.name));
   }
   const ctx = new AudioContext();
-  await ctx.resume();
+  // TALK re-opens outside a click; browsers allow that once the page had a
+  // gesture and the mic is live — but never hang on a context kept suspended
+  await Promise.race([ctx.resume(), new Promise((r) => setTimeout(r, 1500))]);
+  if (ctx.state !== "running") {
+    stream.getTracks().forEach((t) => t.stop());
+    ctx.close();
+    MIC.state = "idle";
+    if (voiceMode === "talk") { voiceMode = "speak"; applyVoiceMode(); }
+    return voiceFail("MIC: the browser kept audio paused; tap 🎙 (or VOICE → TALK) to continue");
+  }
   const src = ctx.createMediaStreamSource(stream);
   // ScriptProcessor (deprecated but everywhere): no worklet module to serve,
   // and it only pulls audio while connected to the destination (outputs silence)
@@ -4786,7 +4810,7 @@ async function micStart() {
     if (rms > thr) { heard = true; quietMs = 0; } else quietMs += ms;
     $("#btn-mic").style.setProperty("--lvl", Math.min(1, rms / (thr * 4)).toFixed(2));
     if ((heard && quietMs > MIC_QUIET_MS) || totalMs > MIC_MAX_MS) micStop(true);
-    else if (!heard && totalMs > MIC_NOSPEECH_MS) micStop(false);
+    else if (!heard && totalMs > (voiceMode === "talk" ? TALK_NOSPEECH_MS : MIC_NOSPEECH_MS)) micStop(false);
   };
   src.connect(node);
   node.connect(ctx.destination);
@@ -4810,13 +4834,21 @@ async function micStop(keep) {
     const out = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(out.detail || "HTTP " + res.status);
     const text = (out.text || "").trim();
-    if (!text) { voiceFail("MIC: didn't catch that, try again"); return; }
+    if (!text) { // noise, a cough: hands-free just listens again
+      if (voiceMode !== "talk") voiceFail("MIC: didn't catch that, try again");
+      return;
+    }
     const box = $("#input");
     const wasEmpty = !box.value.trim();
     box.value = wasEmpty ? text : box.value.trimEnd() + " " + text;
     box.dispatchEvent(new Event("input")); // autosize / path-suggest listeners
-    if (wasEmpty && voiceMode === "speak" && !(threadId && RUNS.has(threadId))) send();
-    else box.focus();
+    const auto = voiceMode === "talk" || (wasEmpty && voiceMode === "speak");
+    if (auto && !(threadId && RUNS.has(threadId))) {
+      MIC.state = "idle";
+      micPaint();
+      talkSending = true; // send() resolves when the run ends; the answer is queued by then
+      try { await send(); } finally { talkSending = false; }
+    } else box.focus();
   } catch (e) {
     voiceFail("MIC: transcription failed: " + e.message);
   } finally {
@@ -4854,10 +4886,23 @@ function wav16k(chunks, rate) {
 
 $("#btn-mic").onclick = () => {
   SFX.play("click");
-  if (MIC.state === "idle") micStart();
+  if (MIC.state === "idle") micStart(); // also barges in on read-aloud
   else if (MIC.state === "rec") micStop(true);
 };
 micPaint();
+
+// ---- TALK (hands-free): listen → send on a pause → hear the answer → listen.
+// The mic re-opens only once everything is quiet: no run in this thread, no
+// clip playing / synthesizing / queued — so it never records the read-aloud
+// (no barge-in; tap 🎙 to cut an answer short and talk). VOICE → OFF ends it.
+let talkSending = false;
+function talkTick() {
+  if (voiceMode !== "talk" || MIC.state !== "idle" || talkSending) return;
+  if (voiceCur || synthing || speakQ.length) return;
+  if ((threadId && RUNS.has(threadId)) || uploading) return;
+  micStart();
+}
+setInterval(talkTick, 400);
 
 // runs need voice.speak_reasoning before CONFIG is ever opened
 api.settings().then((s) => {
