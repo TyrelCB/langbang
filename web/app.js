@@ -1930,6 +1930,7 @@ function releaseStreams(except) {
 }
 
 async function playBubble(msg) {
+  if (rdActive()) rdStop(); // the FILES reader yields to a chat clip
   releaseStreams(msg);
   const gen = ++playSeq;
   markSpeaking(msg); // immediate ■ STOP feedback — first synthesis may take seconds
@@ -4289,6 +4290,7 @@ function edSetBuffer(path, content, ver, eol, note) {
   edRefreshChrome();
   edMarkTree();
   edStatus(note);
+  rdSyncBtn();
 }
 
 // ---- media viewer: images / audio / video / PDF open in place of the editor ----
@@ -4343,6 +4345,7 @@ async function edShowMedia(path, kind) {
     else info(fmtMS(node.duration));
   });
   node.addEventListener("error", () => edStatus("✕ the browser can't display this file", "err"));
+  rdSyncBtn(); // PDFs can be read aloud (text layer via /api/fs/text)
   v.appendChild(node);
   const open = el("a", "btn ghost sm", "↗ OPEN RAW");
   open.href = src; open.target = "_blank";
@@ -4497,6 +4500,7 @@ function edClose() {
     $("#ed-confirm").classList.add("hidden");
     edRefreshChrome();
     $("#editor-panel").classList.add("hidden");
+    rdStop(); // the player lives in this panel: no invisible audio
   });
 }
 
@@ -4910,6 +4914,198 @@ $("#btn-mic").onclick = () => {
 };
 micPaint();
 
+// ---- FILES read-aloud ------------------------------------------------------
+// Markdown / plain text read the editor buffer (your selection if you made
+// one, else the whole file, unsaved edits included); PDFs go through
+// /api/fs/text (pdftotext, reflowed). The text is cut into ~1.2k-char parts
+// at paragraph boundaries (code fences kept whole), each a normal /api/tts
+// clip, so speech starts in a second and a book never hits the 20k cap.
+// Prefetch: Pocket synthesizes one clip at a time and preempts an unheard
+// one, so part N+1 is requested only once part N has fully DOWNLOADED (it
+// synthesizes ~4.5x realtime, leaving most of N's playback as lead time).
+const RD = { chunks: [], i: -1, aud: null, next: null, gen: 0, src: "", iv: null };
+const RD_PROSE = new Set(["markdown", "plaintext"]);
+const rdActive = () => RD.i >= 0;
+
+function rdReadable() {
+  if (ED.path === null) return false;
+  if (ED.viewer) return /\.pdf$/i.test(ED.path);
+  return ED.md || !ED.lang || RD_PROSE.has(ED.lang);
+}
+function rdSyncBtn() {
+  $("#btn-ed-read").classList.toggle("hidden", !rdReadable());
+  $("#btn-ed-read").classList.toggle("on", rdActive() && RD.src === ED.path);
+}
+
+function rdChunks(text, max = 1200) {
+  const blocks = [];
+  let cur = [], fence = false;
+  for (const line of text.replace(/\r/g, "").split("\n")) {
+    if (/^\s*(```|~~~)/.test(line)) fence = !fence;
+    if (!fence && !line.trim()) { if (cur.length) blocks.push(cur.join("\n")); cur = []; continue; }
+    cur.push(line);
+  }
+  if (cur.length) blocks.push(cur.join("\n"));
+  const parts = []; // an oversized block (a PDF paragraph, a giant list) splits at sentence ends
+  for (const b of blocks) {
+    let rest = b;
+    while (rest.length > max * 1.5 && !/^\s*(```|~~~)/.test(rest)) {
+      let cut = Math.max(rest.lastIndexOf(". ", max), rest.lastIndexOf("\n", max));
+      if (cut < max / 3) cut = rest.lastIndexOf(" ", max);
+      if (cut <= 0) cut = max;
+      parts.push(rest.slice(0, cut + 1));
+      rest = rest.slice(cut + 1);
+    }
+    if (rest.trim()) parts.push(rest);
+  }
+  const out = []; // pack; a heading opens a fresh part once this one has substance
+  let acc = "";
+  for (const p of parts) {
+    const heading = /^\s{0,3}#{1,6}\s/.test(p);
+    if (acc && (acc.length + p.length > max || (heading && acc.length > 300))) { out.push(acc); acc = ""; }
+    acc = acc ? acc + "\n\n" + p : p;
+  }
+  if (acc.trim()) out.push(acc);
+  return out;
+}
+
+async function rdText() {
+  if (ED.viewer) {
+    const out = await edFetch("/api/fs/text?path=" + encodeURIComponent(ED.path));
+    if (!out.text.trim()) throw new Error("no text layer in this PDF (a scan?)");
+    return out.text;
+  }
+  const ta = $("#ed-text");
+  const sel = ta.value.slice(ta.selectionStart, ta.selectionEnd);
+  return sel.trim().length >= 20 ? sel : ta.value;
+}
+
+async function rdStart() {
+  let text;
+  try { text = await rdText(); } catch (e) { return edStatus("✕ read aloud: " + e.message, "err"); }
+  const chunks = rdChunks(text);
+  if (!chunks.length) return edStatus("✕ nothing to read", "err");
+  rdStop();
+  stopSpeaking();                        // one voice at a time
+  if (MIC.state === "rec") micStop(false);
+  Object.assign(RD, { chunks, src: ED.path });
+  $("#ed-reader").classList.remove("hidden");
+  RD.iv = setInterval(rdTick, 500);
+  rdPlay(0);
+}
+
+// one /api/tts clip as an <audio>: Pocket hands back a stream URL, the others a blob
+async function rdClip(i) {
+  const res = await fetch("/api/tts", { method: "POST", headers: { "Content-Type": "application/json" },
+                                        body: JSON.stringify({ text: RD.chunks[i] }) });
+  if (res.status === 400) return null; // nothing speakable (a code-only part): skip it
+  if (!res.ok) {
+    let m = "HTTP " + res.status;
+    try { m = (await res.json()).detail || m; } catch {}
+    throw new Error(m);
+  }
+  const a = (res.headers.get("content-type") || "").includes("application/json")
+    ? new Audio((await res.json()).stream)
+    : new Audio(URL.createObjectURL(await res.blob()));
+  a.preload = "auto"; // keep following the stream: a follower-less job is cancelled
+  return a;
+}
+
+function rdRelease(a) {
+  if (!a) return;
+  a.onended = a.ontimeupdate = a.onerror = null;
+  a.pause();
+  a.removeAttribute("src");
+  a.load(); // closes the stream → the server frees the synthesis slot
+}
+
+async function rdPlay(i) {
+  const gen = ++RD.gen;
+  rdRelease(RD.aud);
+  RD.aud = null;
+  if (i >= RD.chunks.length) return rdStop(true);
+  RD.i = Math.max(0, i);
+  rdPaint();
+  let a = null;
+  try {
+    if (RD.next && RD.next.i === RD.i) { a = await RD.next.aud; RD.next = null; }
+    else { if (RD.next) rdRelease(await RD.next.aud.catch(() => null)); RD.next = null; a = await rdClip(RD.i); }
+  } catch (e) {
+    if (gen === RD.gen) { edStatus("✕ read aloud: " + e.message, "err"); rdStop(); }
+    return;
+  }
+  if (gen !== RD.gen) return rdRelease(a); // skipped / stopped while it was being requested
+  if (!a) return rdPlay(RD.i + 1);
+  RD.aud = a;
+  a.onended = () => { if (gen === RD.gen) rdPlay(RD.i + 1); };
+  a.onerror = () => { if (gen === RD.gen) rdPlay(RD.i + 1); };
+  a.ontimeupdate = rdPaint;
+  a.onplay = a.onpause = rdPaint;
+  a.play().catch((e) => { if (e.name !== "AbortError" && gen === RD.gen) edStatus("✕ playback: " + e.message, "err"); });
+}
+
+// prefetch the next part once this one has finished SYNTHESIZING (see
+// header). The browser can't tell: on a live Pocket stream Chrome reads only
+// ~2 s ahead of playback and reports duration=Infinity to the end. So ask
+// the server (/done), every ~2 s; a blob clip (gTTS/gcloud) is done already.
+async function rdTick() {
+  const a = RD.aud;
+  if (!a || RD.next || RD.i + 1 >= RD.chunks.length || RD.asking) return;
+  const m = /\/api\/tts\/clip\/([0-9a-f]{64}\.mp3)/.exec(a.src || "");
+  if (m && !(a.networkState !== 2 && isFinite(a.duration))) {
+    if (Date.now() - (RD.askedAt || 0) < 2000) return;
+    RD.asking = true;
+    RD.askedAt = Date.now();
+    let done = false;
+    try { done = (await (await fetch(`/api/tts/clip/${m[1]}/done`)).json()).done; } catch {}
+    RD.asking = false;
+    if (!done || a !== RD.aud || RD.next) return;
+  }
+  const i = RD.i + 1;
+  RD.next = { i, aud: rdClip(i).catch(() => null) };
+}
+
+function rdStop(finished) {
+  RD.gen++;
+  rdRelease(RD.aud);
+  if (RD.next) RD.next.aud.then(rdRelease);
+  clearInterval(RD.iv);
+  Object.assign(RD, { aud: null, next: null, i: -1, iv: null });
+  $("#ed-reader").classList.add("hidden");
+  rdSyncBtn();
+  if (finished) edStatus("✓ finished reading");
+}
+
+function rdPaint() {
+  const a = RD.aud;
+  $("#rd-part").textContent = `PART ${RD.i + 1}/${RD.chunks.length}`;
+  $("#rd-pp").textContent = a && !a.paused ? "⏸" : "▶";
+  $("#rd-fill").style.width = a && isFinite(a.duration) && a.duration > 0
+    ? (100 * a.currentTime) / a.duration + "%" : "0%";
+  const name = RD.src.split("/").pop();
+  $("#rd-snip").textContent = `${name} · ` + (RD.chunks[RD.i] || "").replace(/[#*_`>|]/g, "").replace(/\s+/g, " ").trim().slice(0, 90);
+  rdSyncBtn();
+}
+
+$("#btn-ed-read").onclick = () => { SFX.play("click"); rdStart(); };
+$("#rd-pp").onclick = () => {
+  const a = RD.aud;
+  if (!a) return;
+  if (a.paused) { stopSpeaking(); a.play().catch(() => {}); } else a.pause();
+};
+$("#rd-prev").onclick = () => {
+  if (RD.aud && RD.aud.currentTime > 3) { RD.aud.currentTime = 0; return; }
+  rdPlay(Math.max(0, RD.i - 1));
+};
+$("#rd-next").onclick = () => rdPlay(RD.i + 1);
+$("#rd-stop").onclick = () => rdStop();
+$("#rd-bar").onpointerdown = (e) => {
+  const a = RD.aud;
+  if (!a || !isFinite(a.duration) || !a.duration) return;
+  const r = $("#rd-bar").getBoundingClientRect();
+  a.currentTime = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * (a.duration - 0.05);
+};
+
 // ---- ● RECORD a clone sample (same secure-context rule as 🎙 MIC) ----------
 // Native sample rate, and NO noise suppression / echo cancellation: those
 // filters reshape the voice, and the clone would learn the processing.
@@ -5021,6 +5217,7 @@ function talkTick() {
   if (voiceCur || synthing || speakQ.length) return;
   if ((threadId && RUNS.has(threadId)) || uploading) return;
   if (PVREC.state !== "idle") return; // the clone recorder owns the mic
+  if (RD.aud && !RD.aud.paused) return; // never record the FILES reader
   micStart();
 }
 setInterval(talkTick, 400);

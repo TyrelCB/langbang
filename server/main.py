@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import time
 import uuid
 
@@ -753,6 +754,58 @@ async def fs_read(path: str):
             "writable": os.access(p, os.W_OK)}
 
 
+READ_TEXT_MAX = 1_000_000  # chars handed to the read-aloud player
+
+
+def _reflow(text: str) -> str:
+    """pdftotext keeps the page's line wraps; read-aloud would turn every
+    line into its own sentence. Rejoin lines inside a paragraph, mend words
+    hyphenated across a wrap, and keep blank lines / page breaks as
+    paragraph breaks."""
+    text = text.replace("\f", "\n\n")
+    paras = []
+    for block in re.split(r"\n\s*\n", text):
+        lines = [ln.strip() for ln in block.split("\n") if ln.strip()]
+        if not lines:
+            continue
+        out = lines[0]
+        for ln in lines[1:]:
+            if re.search(r"[a-z]-$", out) and ln[:1].islower():
+                out = out[:-1] + ln          # exam-\nple → example
+            else:
+                out += " " + ln
+        paras.append(out)
+    return "\n\n".join(paras)
+
+
+@app.get("/api/fs/text")
+async def fs_text(path: str):
+    """Plain text of a document for the FILES read-aloud player. PDFs via
+    poppler's pdftotext (text layer only: a scanned PDF comes back empty)."""
+    p = _abs(path)
+    if not os.path.isfile(p):
+        raise HTTPException(404, "not a file")
+    if not p.lower().endswith(".pdf"):
+        raise HTTPException(415, "only PDFs are extracted here; text files read from the editor")
+    if not shutil.which("pdftotext"):
+        raise HTTPException(500, "pdftotext (poppler-utils) is required to read PDFs aloud")
+
+    def run() -> str:
+        r = subprocess.run(["pdftotext", "-enc", "UTF-8", "-nopgbrk", p, "-"],
+                           capture_output=True, timeout=60)
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.decode(errors="replace").strip() or f"pdftotext exited {r.returncode}")
+        return r.stdout.decode("utf-8", errors="replace")
+    try:
+        raw = await run_in_threadpool(run)
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, "pdftotext timed out")
+    except RuntimeError as e:
+        raise HTTPException(422, f"couldn't read this PDF: {e}")
+    text = _reflow(raw)[:READ_TEXT_MAX]
+    return {"path": p, "text": text, "chars": len(text)}
+
+
 class FsWriteIn(BaseModel):
     path: str
     content: str
@@ -1210,6 +1263,20 @@ async def voices_delete(name: str):
 
 
 _CLIP_RE = re.compile(r"^[0-9a-f]{64}\.mp3$")
+
+
+@app.get("/api/tts/clip/{name}/done")
+async def tts_clip_done(name: str):
+    """Has this clip finished synthesizing? Browsers read a live stream only
+    ~2 s ahead of playback, so the client can't see the end itself; the
+    FILES reader polls this to request the next part only once the single
+    synthesis slot is free."""
+    if not _CLIP_RE.match(name):
+        raise HTTPException(404, "no such clip")
+    if os.path.isfile(os.path.join(TTS_CACHE_DIR, name)):
+        return {"done": True}
+    job = ttsjobs.get(name[:-4])
+    return {"done": job is None or job.done}
 
 
 @app.get("/api/tts/clip/{name}")

@@ -907,3 +907,20 @@ html[data-theme="light"] body.draft.has-splash #chat:empty::before { mix-blend-m
 #pv-rec-audio { height: 28px; max-width: 260px; }
 .pv-rec-script { font-size: 12px; line-height: 1.5; color: var(--text); background: var(--bg2);
   border-left: 2px solid var(--danger); padding: 8px 10px; margin: 6px 0 4px; }
+
+/* FILES read-aloud player */
+#btn-ed-read.on { color: var(--cyan); border-color: var(--cyan); }
+.ed-reader { display: flex; align-items: center; gap: 6px; padding: 6px 8px; margin-top: 6px;
+  border: 1px solid var(--cyan-dim); background: var(--bg2); min-width: 0; }
+.ed-reader .cb-btn { padding: 1px 7px; }
+.rd-part { font-size: 11px; color: var(--cyan); letter-spacing: 1px; white-space: nowrap;
+  font-variant-numeric: tabular-nums; }
+.ed-reader .tts-bar { flex: 0 1 160px; min-width: 60px; }
+.rd-snip { flex: 1; min-width: 0; font-size: 11px; color: var(--muted); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+#btn-ed-read { white-space: nowrap; }
+@media (max-width: 700px) {
+  /* phone: READ joins the mode buttons, so the file name gets its own line */
+  .ed-bar { flex-wrap: wrap; row-gap: 4px; }
+  #ed-file { flex-basis: 100%; }
+}

@@ -346,6 +346,19 @@ account; the clone step itself needs kyutai's gated weights once: accept
 the terms on the model page and run `.venv/bin/hf auth login` (no restart).
 Needs `ffmpeg` on PATH for streaming (falls back to whole-clip WAV).
 
+**🔊 READ in FILES.** Markdown and plain-text files (and PDFs with a text
+layer, via `GET /api/fs/text` = `pdftotext`, re-flowed into paragraphs)
+read aloud from the editor bar: your selection if you made one, else the
+whole buffer, unsaved edits included. The text goes out in ~1.2k-char parts
+cut at paragraph boundaries (code fences kept whole and skipped), each an
+ordinary cached `/api/tts` clip, so speech starts in about a second and a
+long document never hits the 20k-char cap. The player bar has ⏸ ⏮ ⏭ ■,
+PART n/m and a seekable bar. Part N+1 is requested once part N has finished
+synthesizing (`GET /api/tts/clip/<key>/done`: a browser reads a live stream
+only ~2 s ahead, so it can't tell), which never steals Pocket's single
+synthesis slot from the part you're hearing. Chat read-aloud takes over
+from the reader; closing FILES stops it; TALK won't listen over it.
+
 **🎙 MIC (speech → text).** Tap 🎙 in the composer and talk: recording
 stops itself after ~1.4 s of quiet once speech was heard (or tap again; it
 gives up after 8 s of nothing, caps at 60 s), the browser downsamples to
