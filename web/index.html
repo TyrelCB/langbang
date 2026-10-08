@@ -235,11 +235,19 @@
         </div>
         <div id="pv-clone" class="pv-clone hidden">
           <div class="group-label">CLONE A VOICE</div>
-          <div class="hint">Upload ~10–30 s of one person speaking clearly (any audio or video file — a phone voice memo works; only the first 30 s are used). Saved voices run on the normal model; cloning itself needs kyutai's gated weights once (accept the terms at huggingface.co/kyutai/pocket-tts + <code>hf auth login</code> on this box).</div>
+          <div class="hint">Upload ~10–30 s of one person speaking clearly (any audio or video file — a phone voice memo works; only the first 30 s are used), or ● RECORD it here. Saved voices run on the normal model; cloning itself needs kyutai's gated weights once (accept the terms at huggingface.co/kyutai/pocket-tts + <code>hf auth login</code> on this box).</div>
           <div class="row">
             <label>Name <input id="pv-name" type="text" maxlength="40" autocomplete="off" spellcheck="false" placeholder="tyrel_warm"></label>
             <label>Audio <input id="pv-file" type="file" accept="audio/*,video/*"></label>
           </div>
+          <div class="row pv-rec-row">
+            <button id="btn-pv-rec" class="btn ghost sm" type="button" title="Record straight from the mic (needs HTTPS or localhost). Quiet room, normal speaking voice, 15–30 s.">● RECORD</button>
+            <span id="pv-rec-time" class="pv-rec-time hidden">0:00 / 0:30</span>
+            <span id="pv-rec-bar" class="pv-rec-bar hidden"><span id="pv-rec-fill"></span></span>
+            <audio id="pv-rec-audio" class="hidden" controls></audio>
+            <button id="btn-pv-rec-clear" class="btn ghost sm hidden" type="button" title="discard this recording">✕</button>
+          </div>
+          <div id="pv-rec-script" class="pv-rec-script hidden">Read this aloud at your normal pace: “I'm recording a sample of my voice so LangBang can read its replies the way I sound. Some days are calm and quiet; others are loud, busy, and full of surprises. Numbers like three, seven and twelve sound different from words like whisper, thunder and jazz. Why does the bright yellow kite drift over the river? Thanks for listening — that should be plenty.”</div>
           <label class="chk pv-consent"><input type="checkbox" id="pv-consent"> This is my voice, or I have the speaker's permission to clone it</label>
           <div class="row">
             <button id="btn-pv-clone" class="btn accent sm" type="button">CLONE &amp; SAVE</button>

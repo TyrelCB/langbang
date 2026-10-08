@@ -2174,11 +2174,13 @@ async function pvPreview() {
 
 async function pvClone() {
   const name = $("#pv-name").value.trim();
-  const file = $("#pv-file").files[0];
+  const file = $("#pv-file").files[0] ||
+    (PVREC.blob && new File([PVREC.blob], "recording.wav", { type: "audio/wav" }));
   const st = $("#pv-status");
   const fail = (m) => { st.textContent = "✕ " + m; st.className = "pv-status warn"; SFX.play("error"); };
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(name)) return fail("name: letters, digits, _ or - (max 40)");
-  if (!file) return fail("pick an audio file");
+  if (PVREC.state !== "idle") return fail("stop the recording first");
+  if (!file) return fail("pick an audio file or ● RECORD one");
   if (!$("#pv-consent").checked) return fail("confirm you have permission to clone this voice");
   const fd = new FormData();
   fd.append("name", name);
@@ -2195,6 +2197,7 @@ async function pvClone() {
     await pvLoad(out.name);        // selected — SAVE makes it the reading voice
     cfgDirtyCompute();
     $("#pv-name").value = ""; $("#pv-file").value = ""; $("#pv-consent").checked = false;
+    pvRecClear();
     st.textContent = `✓ saved “${out.name}” — ▶ to hear it, SAVE to use it`;
     st.className = "pv-status ok";
     SFX.play("message_received");
@@ -2227,7 +2230,11 @@ $("#btn-pv-preview").onclick = () => {
   pvPreview();
 };
 $("#btn-pv-clone").onclick = pvClone;
-$("#btn-pv-cancel").onclick = () => { $("#set-voice-pocket_voice").value = pvPrev; pvSync(); cfgDirtyCompute(); };
+$("#btn-pv-cancel").onclick = () => {
+  pvRecStop(false);
+  pvRecClear();
+  $("#set-voice-pocket_voice").value = pvPrev; pvSync(); cfgDirtyCompute();
+};
 $("#btn-pv-delete").onclick = pvDelete;
 
 async function openSettings() {
@@ -4857,16 +4864,17 @@ async function micStop(keep) {
   }
 }
 
-// Float32 chunks at the context rate → 16 kHz mono PCM16 WAV (what /api/stt
-// takes). Box-filter decimation: averaging each output sample's input window
+// Float32 chunks at the context rate → mono PCM16 WAV at outRate (16 kHz is
+// what /api/stt takes; the voice-clone recorder keeps the native rate). Box-filter decimation: averaging each output sample's input window
 // is the low-pass, so 48 kHz speech doesn't alias into the 0–8 kHz band.
-function wav16k(chunks, rate) {
+const wav16k = (chunks, rate) => wavEncode(chunks, rate, 16000);
+function wavEncode(chunks, rate, outRate) {
   let n = 0;
   for (const c of chunks) n += c.length;
   const all = new Float32Array(n);
   let o = 0;
   for (const c of chunks) { all.set(c, o); o += c.length; }
-  const ratio = rate / 16000, len = Math.floor(n / ratio);
+  const ratio = rate / outRate, len = Math.floor(n / ratio);
   const pcm = new Int16Array(len);
   for (let i = 0; i < len; i++) {
     const a = Math.floor(i * ratio), b = Math.min(n, Math.max(a + 1, Math.floor((i + 1) * ratio)));
@@ -4878,7 +4886,7 @@ function wav16k(chunks, rate) {
   const tag = (p, s) => { for (let i = 0; i < 4; i++) d.setUint8(p + i, s.charCodeAt(i)); };
   tag(0, "RIFF"); d.setUint32(4, 36 + pcm.length * 2, true); tag(8, "WAVE");
   tag(12, "fmt "); d.setUint32(16, 16, true); d.setUint16(20, 1, true); d.setUint16(22, 1, true);
-  d.setUint32(24, 16000, true); d.setUint32(28, 32000, true); d.setUint16(32, 2, true);
+  d.setUint32(24, outRate, true); d.setUint32(28, outRate * 2, true); d.setUint16(32, 2, true);
   d.setUint16(34, 16, true); tag(36, "data"); d.setUint32(40, pcm.length * 2, true);
   new Int16Array(buf, 44).set(pcm);
   return new Blob([buf], { type: "audio/wav" });
@@ -4891,6 +4899,107 @@ $("#btn-mic").onclick = () => {
 };
 micPaint();
 
+// ---- ● RECORD a clone sample (same secure-context rule as 🎙 MIC) ----------
+// Native sample rate, and NO noise suppression / echo cancellation: those
+// filters reshape the voice, and the clone would learn the processing.
+// Stops at 30 s (all the server uses), or when the panel/clone box closes.
+const PVREC = { state: "idle", stream: null, ctx: null, node: null, chunks: [], rate: 48000, blob: null, url: null };
+const PVREC_MAX_S = 30;
+
+async function pvRecStart() {
+  if (PVREC.state !== "idle") return;
+  if (!micSupported()) return pvRecFail("recording needs HTTPS (or localhost): use the https:// address, or upload a file");
+  PVREC.state = "arming";
+  stopSpeaking();
+  if (MIC.state === "rec") micStop(false); // TALK's mic gives way
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: true },
+    });
+  } catch (e) {
+    PVREC.state = "idle";
+    return pvRecFail(e.name === "NotAllowedError" ? "mic permission denied" : e.message || e.name);
+  }
+  const ctx = new AudioContext();
+  await ctx.resume();
+  const node = ctx.createScriptProcessor(4096, 1, 1);
+  pvRecClear();
+  Object.assign(PVREC, { state: "rec", stream, ctx, node, chunks: [], rate: ctx.sampleRate });
+  let total = 0;
+  node.onaudioprocess = (e) => {
+    if (PVREC.state !== "rec") return;
+    // panel closed / clone box hidden mid-take: never keep a hidden mic open
+    if ($("#settings-panel").classList.contains("hidden") || $("#pv-clone").classList.contains("hidden"))
+      return pvRecStop(false);
+    const x = e.inputBuffer.getChannelData(0);
+    PVREC.chunks.push(new Float32Array(x));
+    total += x.length;
+    let peak = 0;
+    for (let i = 0; i < x.length; i++) peak = Math.max(peak, Math.abs(x[i]));
+    const sec = total / PVREC.rate;
+    $("#pv-rec-time").textContent = `${fmtMS(sec)} / ${fmtMS(PVREC_MAX_S)}`;
+    $("#pv-rec-fill").style.width = Math.min(100, peak * 140) + "%";
+    if (sec >= PVREC_MAX_S) pvRecStop(true);
+  };
+  ctx.createMediaStreamSource(stream).connect(node);
+  node.connect(ctx.destination);
+  $("#pv-file").value = ""; // the newest source wins
+  $("#btn-pv-rec").textContent = "■ STOP";
+  $("#btn-pv-rec").classList.add("on");
+  for (const id of ["#pv-rec-time", "#pv-rec-bar", "#pv-rec-script"]) $(id).classList.remove("hidden");
+  $("#pv-status").textContent = "";
+}
+
+function pvRecStop(keep) {
+  if (PVREC.state !== "rec") return;
+  PVREC.state = "idle";
+  PVREC.node.onaudioprocess = null;
+  PVREC.node.disconnect();
+  PVREC.stream.getTracks().forEach((t) => t.stop());
+  PVREC.ctx.close();
+  $("#btn-pv-rec").textContent = "● RECORD";
+  $("#btn-pv-rec").classList.remove("on");
+  $("#pv-rec-bar").classList.add("hidden");
+  $("#pv-rec-script").classList.add("hidden");
+  const chunks = PVREC.chunks;
+  PVREC.chunks = [];
+  const secs = chunks.reduce((a, c) => a + c.length, 0) / PVREC.rate;
+  if (!keep) { $("#pv-rec-time").classList.add("hidden"); return; }
+  PVREC.blob = wavEncode(chunks, PVREC.rate, PVREC.rate);
+  PVREC.url = URL.createObjectURL(PVREC.blob);
+  $("#pv-rec-audio").src = PVREC.url;
+  $("#pv-rec-audio").classList.remove("hidden");
+  $("#btn-pv-rec-clear").classList.remove("hidden");
+  $("#pv-rec-time").textContent = fmtMS(secs) + " recorded";
+  const st = $("#pv-status");
+  st.textContent = secs < 8 ? "⚠ short take: 10–30 s clones better" : "✓ recorded: ▶ to check it, then CLONE & SAVE";
+  st.className = "pv-status" + (secs < 8 ? " warn" : " ok");
+}
+
+function pvRecClear() {
+  if (PVREC.url) URL.revokeObjectURL(PVREC.url);
+  PVREC.blob = PVREC.url = null;
+  const a = $("#pv-rec-audio");
+  a.pause(); a.removeAttribute("src"); a.classList.add("hidden");
+  $("#btn-pv-rec-clear").classList.add("hidden");
+  $("#pv-rec-time").classList.add("hidden");
+}
+
+function pvRecFail(m) {
+  SFX.play("error");
+  $("#pv-status").textContent = "✕ " + m;
+  $("#pv-status").className = "pv-status warn";
+}
+
+$("#btn-pv-rec").onclick = () => {
+  SFX.play("click");
+  if (PVREC.state === "idle") pvRecStart();
+  else if (PVREC.state === "rec") pvRecStop(true);
+};
+$("#btn-pv-rec-clear").onclick = () => { pvRecClear(); $("#pv-status").textContent = ""; };
+$("#pv-file").addEventListener("change", () => { if ($("#pv-file").files.length) pvRecClear(); });
+
 // ---- TALK (hands-free): listen → send on a pause → hear the answer → listen.
 // The mic re-opens only once everything is quiet: no run in this thread, no
 // clip playing / synthesizing / queued — so it never records the read-aloud
@@ -4900,6 +5009,7 @@ function talkTick() {
   if (voiceMode !== "talk" || MIC.state !== "idle" || talkSending) return;
   if (voiceCur || synthing || speakQ.length) return;
   if ((threadId && RUNS.has(threadId)) || uploading) return;
+  if (PVREC.state !== "idle") return; // the clone recorder owns the mic
   micStart();
 }
 setInterval(talkTick, 400);

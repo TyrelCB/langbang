@@ -334,7 +334,10 @@ and seekable. STOP on a long reply cancels the synthesis after ~20 s without
 a listener. CONFIG → VOICE's **Pocket voice** dropdown lists MY VOICES (saved clones),
 the 27 PRESETS and **＋ Clone a new voice…**; ▶ previews any of them
 without saving, ✕ deletes a saved one (two clicks). Cloning: upload 10–30 s
-of one speaker (any audio/video ffmpeg reads; first 30 s used; consent box
+of one speaker (any audio/video ffmpeg reads; first 30 s used), or
+**● RECORD** it in place (secure context; native sample rate with no noise
+suppression or echo cancellation, which would reshape the voice; a read-aloud
+passage is shown, auto-stops at 30 s, ▶ to check the take; consent box
 required — kyutai's terms forbid cloning without permission). The server
 encodes it once into a voice state, `data/voices/<name>.safetensors`
 (gitignored; the uploaded clip is deleted), which then loads on the normal

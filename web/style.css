@@ -897,3 +897,13 @@ html[data-theme="light"] body.draft.has-splash #chat:empty::before { mix-blend-m
 #btn-mic.busy { color: var(--cyan); border-color: var(--cyan); }
 #btn-mic:disabled { opacity: 0.4; cursor: not-allowed; }
 #btn-voice.talk { color: var(--danger); border-color: var(--danger); }
+
+/* clone-a-voice recorder */
+.pv-rec-row { align-items: center; gap: 8px; }
+#btn-pv-rec.on { color: var(--danger); border-color: var(--danger); }
+.pv-rec-time { font-size: 11px; color: var(--muted); min-width: 78px; font-variant-numeric: tabular-nums; }
+.pv-rec-bar { width: 120px; height: 4px; background: var(--line); position: relative; overflow: hidden; }
+#pv-rec-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--danger); }
+#pv-rec-audio { height: 28px; max-width: 260px; }
+.pv-rec-script { font-size: 12px; line-height: 1.5; color: var(--text); background: var(--bg2);
+  border-left: 2px solid var(--danger); padding: 8px 10px; margin: 6px 0 4px; }
