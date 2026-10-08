@@ -264,6 +264,7 @@ _TECH_WORDS = {
     "ipv4": "I P v four", "ipv6": "I P v six", "v4": "v four", "v6": "v six",
     "SNMPv2c": "S N M P v two C", "SNMPv3": "S N M P v three", "sudo": "sue doo",
     "nginx": "engine X", "kubectl": "kube control", "k8s": "kubernetes",
+    "oper": "opper",  # YANG *-oper models; Pocket says "opera"
 }
 # lowercase protocol / platform acronyms inside identifiers (ios_actions,
 # utd-oper, lldp) — spelled; ALL-CAPS forms are handled by the caps pass

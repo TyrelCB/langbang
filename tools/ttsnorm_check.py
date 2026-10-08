@@ -55,7 +55,7 @@ CASES = [
     ('<filter select="/native/hostname"/> returns a silently empty <data/>.',
      'filter, select hostname, returns a silently empty data.'),
     ('Cisco-IOS-XE-acl-oper returns 7 ACLs; ios_actions RPCs; lldp, utd-oper, pnp: all 404 at container level.',
-     'Cisco I O S X E A C L oper returns seven A C Ls; I O S actions R P Cs; L L D P, U T D oper, P N P: all four oh four at container level.'),
+     'Cisco I O S X E A C L opper returns seven A C Ls; I O S actions R P Cs; L L D P, U T D opper, P N P: all four oh four at container level.'),
     ('ping 8.8.8.8 hangs SSH; NTP (10.17.251.250) stuck at stratum 16.',
      'ping eight dot eight dot eight dot eight hangs S S H; N T P, ten dot seventeen dot two fifty-one dot two fifty, stuck at stratum sixteen.'),
     ('hostname c9000v-terraform-netconf (domain mohamed.local), Loopback99 / 99.99.99.99, LAB_TEST_POLICY on Gi1/0/3.',
