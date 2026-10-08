@@ -1159,8 +1159,16 @@ async def tts(body: TTSIn):
         # URL served as a seekable file. Load errors (model/voice) surface
         # here as a readable 502 rather than a silent empty stream.
         clip = f"/api/tts/clip/{key}.mp3"
-        if os.path.isfile(os.path.join(TTS_CACHE_DIR, key + ".mp3")):
-            return {"stream": clip, "cache": "hit"}
+        mp3 = os.path.join(TTS_CACHE_DIR, key + ".mp3")
+        if os.path.isfile(mp3):
+            if os.path.isfile(ttsjobs.words_path(mp3)):
+                return {"stream": clip, "cache": "hit"}
+            # cached before word timings existed: synthesize once more so the
+            # read-aloud highlight has them (a tab mid-play keeps its open file)
+            try:
+                os.remove(mp3)
+            except OSError:
+                pass
         try:
             await run_in_threadpool(voice.pocket_ready, v)
         except RuntimeError as e:
@@ -1263,6 +1271,24 @@ async def voices_delete(name: str):
 
 
 _CLIP_RE = re.compile(r"^[0-9a-f]{64}\.mp3$")
+
+
+@app.get("/api/tts/clip/{name}/words")
+async def tts_clip_words(name: str):
+    """Word timings for read-aloud highlighting: [{w, s, e}] in SPOKEN text
+    (after normalization: "gig one slash zero…"), seconds from clip start.
+    Grows while a Pocket job streams (done=false: poll again); null for
+    clips without timings (gTTS/gcloud, or cached before this existed)."""
+    if not _CLIP_RE.match(name):
+        raise HTTPException(404, "no such clip")
+    wp = ttsjobs.words_path(os.path.join(TTS_CACHE_DIR, name))
+    if os.path.isfile(wp):
+        with open(wp) as fh:
+            return {"done": True, "words": json.load(fh)}
+    job = ttsjobs.get(name[:-4])
+    if job is not None:
+        return {"done": job.done, "words": list(job.words)}
+    return {"done": True, "words": None}
 
 
 @app.get("/api/tts/clip/{name}/done")

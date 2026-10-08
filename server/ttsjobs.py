@@ -18,6 +18,7 @@ a second job queues behind the first; its follower just waits for bytes.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import subprocess
@@ -28,6 +29,11 @@ from typing import AsyncIterator
 from . import voice
 
 logger = logging.getLogger("langbang.ttsjobs")
+
+
+def words_path(mp3: str) -> str:
+    """<key>.mp3 → <key>.words.json (read-aloud word timings, same TTL)."""
+    return mp3[:-4] + ".words.json"
 
 ABANDON_S = 20.0   # never-joined job (POST but no GET yet) → cancel after this
 LEFT_S = 1.0       # every listener left (released / closed tab) → cancel after this
@@ -47,6 +53,7 @@ class Job:
         self.key, self.text, self.v, self.final = key, text, dict(v), final
         self.part = final + ".part"
         self.chunks: list[bytes] = []
+        self.words: list[dict] = []  # {w, s, e} per spoken word, filled per Pocket chunk
         self.done = False
         self.error: str | None = None
         self.cancelled = False
@@ -78,7 +85,7 @@ class Job:
             proc = subprocess.Popen(FFMPEG, stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0)
             reader = threading.Thread(target=self._read, args=(proc,), daemon=True)
             reader.start()
-            for pcm in voice.pocket_pcm(self.text, self.v, stop=self.stop):
+            for pcm in voice.pocket_pcm(self.text, self.v, stop=self.stop, words=self.words):
                 if self._abandoned():
                     self.stop.set()  # model stops generating new frames
                     self.cancelled = True
@@ -93,6 +100,13 @@ class Job:
                 self.error = f"ffmpeg exited {rc}"
                 self._drop_part()
             else:
+                # timings land BEFORE the clip: once the .mp3 exists, so do its words
+                try:
+                    with open(words_path(self.final) + ".tmp", "w") as fh:
+                        json.dump(self.words, fh, separators=(",", ":"))
+                    os.replace(words_path(self.final) + ".tmp", words_path(self.final))
+                except OSError as e:
+                    logger.warning("tts words not saved for %s: %s", self.key[:12], e)
                 os.replace(self.part, self.final)  # the stream IS the cache entry now
         except Exception as e:  # noqa: BLE001 - followers see a truncated stream; log why
             self.error = f"{type(e).__name__}: {e}"

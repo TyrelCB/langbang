@@ -924,3 +924,12 @@ html[data-theme="light"] body.draft.has-splash #chat:empty::before { mix-blend-m
   .ed-bar { flex-wrap: wrap; row-gap: 4px; }
   #ed-file { flex-basis: 100%; }
 }
+
+/* the word being read aloud (CSS Custom Highlight API: no DOM changes) */
+::highlight(lb-speak) { background-color: rgba(63, 214, 255, 0.30); color: #ffffff; }
+html[data-theme="light"] ::highlight(lb-speak) { background-color: rgba(11, 126, 168, 0.25); color: #10283c; }
+.rd-snip.live { color: var(--text); }
+.rd-snip b.rd-now { color: var(--cyan); font-weight: 700; }
+
+/* 👁 PREVIEW of html / svg code blocks */
+.cb-frame { display: block; width: 720px; max-width: 100%; height: 240px; border: 0; background: #fff; }
