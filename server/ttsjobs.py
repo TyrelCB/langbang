@@ -179,7 +179,9 @@ def start(key: str, text: str, v: dict, final: str) -> Job:
     global _worker
     _sweep()
     j = JOBS.get(key)
-    if j and not j.cancelled and not j.error:
+    # join a live job, or a finished one whose clip is still on disk; a done
+    # job whose file was removed (re-synthesis for word timings) is stale
+    if j and not j.cancelled and not j.error and (not j.done or os.path.isfile(j.final)):
         with j._lock:
             j.last_seen = time.time()  # a fresh request keeps it alive
         return j
