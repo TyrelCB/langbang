@@ -2172,8 +2172,9 @@ async def run_chat(
                     t_first = time.time()  # includes prefill + first-token latency
                 chunk = ev["data"]["chunk"]
                 text = chunk.content
-                if isinstance(text, str) and text:
-                    yield {"type": "token", "text": text}
+                # reasoning BEFORE content: vLLM's parser can put the last
+                # reasoning "\n" and the first answer text in ONE delta —
+                # token-first opened a stray empty ◈ THINKING card under the answer
                 reasoning = (chunk.additional_kwargs or {}).get("reasoning_content")
                 if reasoning:
                     # Belt & braces: with thinking off we explicitly asked the
@@ -2185,6 +2186,8 @@ async def run_chat(
                         if s.get("enable_thinking")
                         else {"type": "token", "text": reasoning}
                     )
+                if isinstance(text, str) and text:
+                    yield {"type": "token", "text": text}
             elif kind == "on_chat_model_end":
                 # stream_usage=True makes sglang append a final usage chunk;
                 # langchain merges it into the assembled message's usage_metadata.
