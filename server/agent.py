@@ -331,7 +331,7 @@ async def current_todos(thread_id: str):
 
 
 class SGlangChatOpenAI(ChatOpenAI):
-    """ChatOpenAI that recovers `reasoning_content` from streamed deltas.
+    """ChatOpenAI that recovers `reasoning_content` / `reasoning` from streamed deltas.
 
     langchain-openai >=1.x deliberately ignores non-spec delta fields, so
     sglang's/vLLM's separated thinking would be dropped on the floor; we
@@ -375,7 +375,10 @@ class SGlangChatOpenAI(ChatOpenAI):
             return None
         choices = chunk.get("choices") or []
         delta = choices[0].get("delta") if choices else None
-        rc = delta.get("reasoning_content") if isinstance(delta, dict) else None
+        # sglang streams `reasoning_content`; newer vLLM renamed it `reasoning`.
+        # Either way it's stored as reasoning_content (history/UI/keep_reasoning).
+        rc = (delta.get("reasoning_content") or delta.get("reasoning")) \
+            if isinstance(delta, dict) else None
         if rc:
             gc.message.additional_kwargs["reasoning_content"] = rc
         return gc
