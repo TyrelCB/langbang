@@ -46,6 +46,24 @@ CASES = [
      "captured twenty ten to twenty twelve and twenty nineteen to twenty twenty-one; splits, twenty thirteen, twenty seventeen, inception November fifth, two thousand eight"),
     ("| Year | TNA | IWM |\n|---|---|---|\n| 2024 | +8% | +11% |", "Year, T N A, I W M. twenty twenty-four, plus eight percent, plus eleven percent."),
     ("It ran 24/7 w/ 99.9% uptime ±0.1%, ≥ 3 nodes.", "It ran twenty-four seven with ninety-nine point nine percent uptime plus or minus zero point one percent, at least three nodes."),
+    # 2026-10-08: network-engineering report (switch API probe): interfaces,
+    # IPs, status codes, XML, namespaced / hyphen-chain identifiers, VLANs
+    ('openconfig-interfaces gives per-port counters (Gi1/0/1: 3.06 MB in / 14.78 MB out, 0 errors).',
+     'open config-interfaces gives per-port counters, gig one slash zero slash one: three point zero six megabytes in, fourteen point seven eight megabytes out, zero errors.'),
+    ('VLAN 777 LANGBANG_DEMO (201 Created) plus SVI Vlan777 / 10.77.77.1, deleted in reverse order (204/204).',
+     'vee-lan seven seventy-seven langbang demo, two oh one, Created, plus S V I vee-lan seven seventy-seven, ten dot seventy-seven dot seventy-seven dot one, deleted in reverse order, two oh four, two oh four.'),
+    ('<filter select="/native/hostname"/> returns a silently empty <data/>.',
+     'filter, select hostname, returns a silently empty data.'),
+    ('Cisco-IOS-XE-acl-oper returns 7 ACLs; ios_actions RPCs; lldp, utd-oper, pnp: all 404 at container level.',
+     'Cisco I O S X E A C L oper returns seven A C Ls; I O S actions R P Cs; L L D P, U T D oper, P N P: all four oh four at container level.'),
+    ('ping 8.8.8.8 hangs SSH; NTP (10.17.251.250) stuck at stratum 16.',
+     'ping eight dot eight dot eight dot eight hangs S S H; N T P, ten dot seventeen dot two fifty-one dot two fifty, stuck at stratum sixteen.'),
+    ('hostname c9000v-terraform-netconf (domain mohamed.local), Loopback99 / 99.99.99.99, LAB_TEST_POLICY on Gi1/0/3.',
+     'hostname c9000v terraform net conf, domain mohamed dot local, loopback ninety-nine, ninety-nine dot ninety-nine dot ninety-nine dot ninety-nine, lab test policy on gig one slash zero slash three.'),
+    ('an ISE/802.1X lab; no ip domain lookup; NETCONF XPath over RESTCONF.',
+     'an I S E eight oh two dot one X lab; no I P domain lookup; net conf X path over rest conf.'),
+    ('Set Te1/1/4.100 to 192.168.1.0/24; Error 404 on /api/runs; hit localhost:8123.',
+     'Set ten gig one slash one slash four dot one hundred to one ninety-two dot one sixty-eight dot one dot zero slash twenty-four; Error four oh four on runs; hit localhost port eight thousand one hundred twenty-three.'),
 ]
 
 bad = 0

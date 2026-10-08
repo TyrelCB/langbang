@@ -220,8 +220,137 @@ _SYMBOLS = [("±", " plus or minus "), ("≥", " at least "), ("≤", " at most 
             ("\u2019", "'"), ("\u00a0", " ")]
 
 
+# ---- technical / network-engineering text (2026-10-08) ----------------------
+# Agent reports on switches and APIs are full of tokens Pocket can't say:
+# Gi1/0/1, 10.77.77.1/24, Vlan777, <filter select="…"/>, Cisco-IOS-XE-acl-oper,
+# LAB_TEST_POLICY, 204/204, 802.1X. _tech() rewrites them BEFORE the generic
+# number passes, which would otherwise shred them ("Gi1/zero/one").
+
+def short_num(n: int) -> str:
+    """How engineers say IDs, octets and status codes: 120 → one twenty,
+    404 → four oh four, 251 → two fifty-one, 4094 → forty ninety-four."""
+    if n < 100:
+        return cardinal(n)
+    if n < 1000:
+        h, r = divmod(n, 100)
+        return _ONES[h] + (" hundred" if r == 0 else " oh " + _ONES[r] if r < 10 else " " + cardinal(r))
+    if n < 10000:
+        return year(n)
+    return cardinal(n)
+
+
+_IFACES = {  # longest first in the regex; short forms need the digits glued on
+    "TwentyFiveGigE": "twenty-five gig", "TenGigabitEthernet": "ten gig",
+    "FortyGigabitEthernet": "forty gig", "HundredGigE": "hundred gig",
+    "GigabitEthernet": "gigabit ethernet", "FastEthernet": "fast ethernet",
+    "Ethernet": "ethernet", "Port-channel": "port channel", "port-channel": "port channel",
+    "Loopback": "loopback", "loopback": "loopback", "Vlan": "vee-lan", "vlan": "vee-lan",
+    "Tunnel": "tunnel", "Null": "null", "Mgmt": "management", "mgmt": "management",
+    "Twe": "twenty-five gig", "Gi": "gig", "Te": "ten gig", "Fo": "forty gig",
+    "Hu": "hundred gig", "Fa": "fast ethernet", "Eth": "ethernet", "Po": "port channel",
+    "Lo": "loopback", "Tu": "tunnel", "Vl": "vee-lan",
+}
+_IFACE_RE = re.compile(r"(?<![\w-])(" + "|".join(sorted(_IFACES, key=len, reverse=True)) +
+                       r")(\d+(?:/\d+){0,3})(?:\.(\d+))?(?![\w/])")
+
+# said as words / with a fixed reading, matched case-sensitively
+_TECH_WORDS = {
+    "NETCONF": "net conf", "netconf": "net conf", "Netconf": "net conf",
+    "RESTCONF": "rest conf", "restconf": "rest conf", "Restconf": "rest conf",
+    "openconfig": "open config", "OpenConfig": "open config",
+    "XPath": "X path", "xpath": "X path", "gNMI": "G N M I", "gRPC": "G R P C",
+    "VLAN": "vee-lan", "VLANs": "vee-lans", "vlan": "vee-lan", "vlans": "vee-lans", "Vlan": "vee-lan",
+    "VXLAN": "V X LAN", "vxlan": "V X LAN", "IPv4": "I P v four", "IPv6": "I P v six",
+    "ipv4": "I P v four", "ipv6": "I P v six", "v4": "v four", "v6": "v six",
+    "SNMPv2c": "S N M P v two C", "SNMPv3": "S N M P v three", "sudo": "sue doo",
+    "nginx": "engine X", "kubectl": "kube control", "k8s": "kubernetes",
+}
+# lowercase protocol / platform acronyms inside identifiers (ios_actions,
+# utd-oper, lldp) — spelled; ALL-CAPS forms are handled by the caps pass
+_LOWER_ACR = ("acl ios xe xr nx ietf utd oam ospf bgp eigrp vrf mtu snmp lldp cdp pnp ntp ssh "
+              "dhcp dns tcp udp icmp aaa hsrp vrrp stp lacp qos svi sgt bfd mpls evpn rpc "
+              "cli api json yaml vpn nat ip").split()
+_SAY_LOWER = {"json": "jason", "yaml": "yammel", "nat": "nat"}
+_TLDS = "local|lan|home|internal|arpa|com|net|org|io|dev|ai|app|cloud|sh|me|co|us|uk|edu|gov"
+_HTTP_REASON = (r"Created|OK|Accepted|No Content|Moved|Found|Not Modified|Bad Request|"
+                r"Unauthorized|Forbidden|Not Found|Method Not Allowed|Conflict|Gone|"
+                r"Unprocessable|Too Many|Internal|Bad Gateway|Service Unavailable|"
+                r"Gateway Timeout|errors?|responses?|status")
+
+
+def _xml_tag(m: re.Match) -> str:
+    """<filter type="xpath" select="/a/b"/> → filter, type xpath, select /a/b"""
+    parts = []
+    for am in re.finditer(r"([\w:.-]+)(?:=(?:\"([^\"]*)\"|'([^']*)'))?", m[2] or ""):
+        val = (am[2] if am[2] is not None else am[3] or "").strip()
+        parts.append(am[1] + (" " + val if val.strip(". ") else ""))
+    return " " + ", ".join([m[1]] + parts) + ", "
+
+
+def _ip(m: re.Match) -> str:
+    octs = [int(x) for x in m.groups()[:4]]
+    if any(o > 255 for o in octs):
+        return m[0]
+    out = " dot ".join(short_num(o) for o in octs)
+    return out + (" slash " + cardinal(int(m[5])) if m[5] else "")
+
+
+def _iface(m: re.Match) -> str:
+    nums = " slash ".join(short_num(int(x)) for x in m[2].split("/"))
+    sub = " dot " + short_num(int(m[3])) if m[3] else ""
+    return f"{_IFACES[m[1]]} {nums}{sub}"
+
+
+def _tech(t: str) -> str:
+    # markup tags (inline XML / HTML the model quotes)
+    t = re.sub(r"</?([A-Za-z][\w:.-]*)((?:\s+[\w:.-]+(?:=(?:\"[^\"]*\"|'[^']*'))?)*)\s*/?>",
+               _xml_tag, t)
+    # paths → their last segment, before the acronym speller sees "/api/…"
+    t = re.sub(r"(?<![\w])(?:~|\.{1,2})?(?:/[\w.@+-]+){2,}/?",
+               lambda m: m[0].rstrip("/").rsplit("/", 1)[-1], t)
+    # IPv4 (+ /prefix) — before anything reads its dots as decimals
+    t = re.sub(r"(?<![\w.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:/(\d{1,2}))?(?![\w]|\.\d)",
+               _ip, t)
+    # IEEE standards: 802.1X → eight oh two dot one X
+    t = re.sub(r"\b802\.(\d+)([A-Za-z]{0,2})\b",
+               lambda m: "eight oh two dot " + cardinal(int(m[1])) +
+               (" " + " ".join(m[2].upper()) if m[2] else ""), t)
+    # interfaces: Gi1/0/1, Te1/1/4.100, Vlan777, Loopback99, Po12
+    t = _IFACE_RE.sub(_iface, t)
+    t = re.sub(r"\b(VLAN|Vlan|vlan)(s?)\s+(\d{1,4})\b",
+               lambda m: f"vee-lan{m[2]} {short_num(int(m[3]))}", t)
+    # host:port → host port 8123
+    t = re.sub(r"\b([A-Za-z][\w.-]*[A-Za-z0-9]):(\d{2,5})\b(?![:\d])",
+               lambda m: f"{m[1]} port {cardinal(int(m[2]))}", t)
+    # hostnames: mohamed.local, fedora.tail34585a.ts.net → dot-separated
+    t = re.sub(rf"\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:{_TLDS})\b(?![\w-]|\.\w)",
+               lambda m: m[0].replace(".", " dot "), t)
+    # HTTP status codes: 204/204, "201 Created", "returns 404", "all 404"
+    t = re.sub(r"(?<![\w.])([1-5]\d\d)/([1-5]\d\d)(?![\w/])",
+               lambda m: f"{short_num(int(m[1]))}, {short_num(int(m[2]))}", t)
+    t = re.sub(rf"(?<![\w.])([1-5]\d\d)(?=,?\s+(?:{_HTTP_REASON})\b)",
+               lambda m: short_num(int(m[1])), t)
+    t = re.sub(r"\b(HTTP|[Ss]tatus|[Cc]ode|[Ee]rror|[Rr]eturns?|[Rr]eturned|[Rr]eturning|[Gg]ot|[Aa]ll|an?)\s+([1-5]0\d)\b(?![\w.,]\d)",
+               lambda m: f"{m[1]} {short_num(int(m[2]))}", t)
+    # SCREAMING_SNAKE identifiers are names, not acronyms: LAB_TEST_POLICY
+    t = re.sub(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b", lambda m: m[0].replace("_", " ").lower(), t)
+    t = re.sub(r"(?<=[A-Za-z0-9])_+(?=[A-Za-z0-9])", " ", t)  # snake_case → words
+    # YANG / namespaced identifiers: openconfig-system:system → … system
+    t = re.sub(r"(?<=[a-z0-9]):(?=[A-Za-z])", " ", t)
+    # long hyphen chains are identifiers, not compound words: Cisco-IOS-XE-acl-oper
+    t = re.sub(r"\b[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+){2,}\b", lambda m: m[0].replace("-", " "), t)
+    for w, say in _TECH_WORDS.items():
+        t = re.sub(rf"(?<!\w){re.escape(w)}(?!\w)", say, t)
+    t = re.sub(r"-?\b(" + "|".join(_LOWER_ACR) + r")(s?)\b-?",
+               lambda m: " " + (_SAY_LOWER.get(m[1]) or " ".join(m[1].upper())) + m[2] + " ", t)
+    # spaced slash is a separator: "3 MB in / 14 MB out", "Vlan120 / 10.120.0.1"
+    t = re.sub(r"\s+/\s+", ", ", t)
+    return t
+
+
 def _pre(t: str) -> str:
     """Characters Pocket can't say or that wreck its sentence chunker."""
+    t = _tech(t)
     t = t.replace("→", " → ")  # keep arrows for the "to" rule below
     t = re.sub(r" → ", "\x00", t)
     t = _EMOJI.sub(", ", t)  # an emoji marks a beat (bullet / sign-off), not nothing
@@ -244,6 +373,10 @@ def _pre(t: str) -> str:
     t = re.sub(r"(?<=[\d%])\s?/\s?(yr|year|y|mo|month|wk|week|day|d|hr|hour|h)\b",
                lambda m: " per " + {"yr": "year", "y": "year", "mo": "month", "wk": "week",
                                     "d": "day", "hr": "hour", "h": "hour"}.get(m[1], m[1]), t)
+    # paths: speak the file name, not the directory chain (an unbroken
+    # 80-char token can't be split into Pocket-sized chunks)
+    t = re.sub(r"(?<![\w])(?:~|\.{1,2})?(?:/[\w.@+-]+){2,}/?",
+               lambda m: m[0].rstrip("/").rsplit("/", 1)[-1], t)
     t = re.sub(r"(?<=[A-Za-z])/(?=[A-Za-z])", " ", t)  # ETF/futures, and/or → spaced
     t = re.sub(r"\bttm\b", "trailing twelve months", t, flags=re.I)
     t = re.sub(r"\bYTD\b", "year to date", t)
@@ -257,10 +390,6 @@ def _pre(t: str) -> str:
     # sign before a number: "+33%" → plus thirty-three percent; "-5" → minus five
     t = re.sub(r"(?:(?<=^)|(?<=[\s(,:;]))\+(?=\$?\d)", "plus ", t)
     t = re.sub(r"(?:(?<=^)|(?<=[\s(,:;]))-(?=\$?\d)", "minus ", t)
-    # paths: speak the file name, not the directory chain (an unbroken
-    # 80-char token can't be split into Pocket-sized chunks)
-    t = re.sub(r"(?<![\w])(?:~|\.{1,2})?(?:/[\w.@+-]+){2,}/?",
-               lambda m: m[0].rstrip("/").rsplit("/", 1)[-1], t)
     t = re.sub(r"(?<=[A-Za-z0-9])_+(?=[A-Za-z0-9])", " ", t)  # snake_case → words
     t = t.replace("*", " ")
     # closing quote AFTER the period ('stopped." Next') hides the sentence end
@@ -439,6 +568,8 @@ def normalize(text: str) -> str:
             return w  # STOP, SEND, DONE — shouted words, not initialisms
         return _spell_letters(w)
     t = re.sub(r"\b([A-Z]{2,4})\b", caps, t)
+    # plurals of spelled initialisms: ACLs → A C Ls (GPUs/APIs stay as-is)
+    t = re.sub(r"\b([A-Z]{2,4})s\b", lambda m: (lambda c: c + "s" if c != m[1] else m[0])(caps(m)), t)
 
     t = re.sub(r"\b([Tt]he) the\b", r"\1", t)  # "on the 3rd of March" → on the the third…
     t = re.sub(r"\b(\d+)(ers|ner)\b",  # 49ers → forty-niners, 76ers → seventy-sixers
