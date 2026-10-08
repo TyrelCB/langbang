@@ -140,6 +140,13 @@
         </div>
       </section>
       <section class="cfg-card">
+        <h3>APPEARANCE</h3>
+        <div class="tools-box col">
+          <label title="Shown on the empty NEW CHAT screen. Any image on this box (GIFs animate); black backgrounds blend into the dark theme. Blank = none.">New-chat splash image
+            <input id="set-splash_image" type="text" placeholder="~/Pictures/splash.gif — blank = none" spellcheck="false"></label>
+        </div>
+      </section>
+      <section class="cfg-card">
         <h3>DEEP AGENT</h3>
         <div class="tools-box col">
           <label class="chk"><input type="checkbox" id="set-deep_agent"> deep agent mode — planning (write_todos), sub-agent delegation (task), built-in file tools (replaces read_file/write_file below)</label>
@@ -181,6 +188,12 @@
               <option value="gtts">gtts — free, no key</option>
               <option value="gcloud">google cloud — key file</option>
               <option value="pocket">pocket — local CPU (kyutai), streams</option>
+            </select>
+          </label>
+          <label title="With VOICE: SPEAK on, also read each ◈ THINKING card as it finishes, before the answer. Long reasoning (xhigh) can run minutes and the answer waits behind it. Every thinking card gets its own 🔊 either way.">Read reasoning aloud
+            <select id="set-voice-speak_reasoning">
+              <option value="off">off — answers only</option>
+              <option value="on">on — thinking, then answer</option>
             </select>
           </label>
           <label>TTS lang <input id="set-voice-tts_lang" type="text" placeholder="en"></label>
