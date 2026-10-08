@@ -77,6 +77,9 @@ DEFAULTS = {
     # (1x1 pixel color tests) -> on by default. Images re-prefill every turn,
     # so keep attachments small/few.
     "capabilities": {"vision": True},
+    # image shown on the empty NEW CHAT screen (absolute path, ~ ok; GIFs
+    # animate). Lives outside the repo — served by GET /api/splash.
+    "splash_image": "",
     # Context compaction. LangGraph replays the whole thread into every model
     # call (~1.5-2.5k tok/s prefill on the Spark = ~5s dead air per 10k
     # tokens, and the 262k window is the hard stop). Past the trigger, a
@@ -122,6 +125,10 @@ DEFAULTS = {
         "pocket_threads": 2,
         # numbers/dates/times → words before synthesis: pocket | all | off
         "tts_normalize": "pocket",  # benchmarked: 2 = 4 = 8 on this i9 (~4.5x realtime)
+        # VOICE: SPEAK auto-read of ◈ THINKING cards (client-side): off | on.
+        # Off by default — xhigh reasoning runs to minutes of audio, and the
+        # queue is serial, so the answer would wait behind it.
+        "speak_reasoning": "off",
     },
     # Image generation / editing: Qwen-Image 2.1 GGUF on ComfyUI (server/comfy.py)
     "image_gen": {

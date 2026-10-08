@@ -871,3 +871,18 @@ details.block.tool.retried > summary { color: var(--orange); }
 .prov-row .prov-flags label.chk input { width: auto; margin: 0; }
 .cfg-card .row label:has(#set-model) { flex: 2 1 28ch; }
 #set-model { width: 100%; box-sizing: border-box; }
+
+/* 🔊 + mini player on ◈ THINKING cards ride inside <summary> */
+.block summary .block-voice { display: inline-flex; align-items: center; gap: 6px; margin-left: 8px;
+  vertical-align: middle; letter-spacing: 0; }
+.block summary .block-voice .speak-btn { display: inline-block; margin: 0; padding: 0 6px; }
+.block summary .block-voice .tts-player { margin: 0; min-width: 220px; }
+
+/* NEW CHAT splash (CONFIG → APPEARANCE): screen-blend drops the image's
+   black backdrop into the HUD background; light theme shows it as-is */
+body.draft.has-splash #chat:empty::before {
+  content: ""; flex: 1; width: 100%; max-height: 720px; margin: auto 0;
+  background: var(--splash) center / contain no-repeat;
+  mix-blend-mode: screen; pointer-events: none;
+}
+html[data-theme="light"] body.draft.has-splash #chat:empty::before { mix-blend-mode: normal; }

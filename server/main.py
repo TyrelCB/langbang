@@ -512,6 +512,16 @@ async def upload(files: list[UploadFile] = File(...)):
     return {"files": out}
 
 
+@app.get("/api/splash")
+async def splash():
+    """The NEW CHAT screen's image (CONFIG splash_image) — a path, not a
+    repo asset, so a personal picture never ships with the code."""
+    p = os.path.expanduser((config.load().get("splash_image") or "").strip())
+    if not p or not os.path.isfile(p):
+        raise HTTPException(404, "no splash image configured")
+    return FileResponse(p, headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/api/media")
 async def media(path: str):
     """Serve an asset by absolute path so answers can show their own

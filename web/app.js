@@ -477,6 +477,7 @@ function renderHistoryMsg(m, curSched) {
       if (m.thinking) {
         const b = addBlock("thinking", "◈ THINKING");
         b.querySelector("pre").textContent = m.thinking;
+        attachBlockSpeak(b, m.thinking);
       }
       if (textOf(m.content).trim()) {
         const b = addMsg("assistant", textOf(m.content));
@@ -694,6 +695,20 @@ function runPipeline(run) {
       if (run.viewing) scrollBottom();
     }, 80);
   };
+  // A ◈ THINKING card is complete once the model moves on — first answer
+  // token, a tool call, or the end of the run. Each step then gets its own
+  // card in order (the shape renderHistory paints from the checkpoint),
+  // instead of every step's reasoning piling into the first card.
+  // Auto-read only for runs this tab started: an attach replays the whole
+  // ring buffer in a burst, which would re-read reasoning already past.
+  const sealThinking = (speak) => {
+    if (!thinkingBlock) return;
+    const b = thinkingBlock;
+    thinkingBlock = null;
+    attachBlockSpeak(b, b.querySelector("pre").textContent);
+    if (speak && !run.attached && voiceMode === "speak" && loadedVoice.speak_reasoning === "on")
+      speakRaw(b._raw || "", b);
+  };
   // MUST run before any finalize-then-append (attachSpeak): a pending render
   // would fire after the append and setMarkdown() would wipe the new child
   const flushRender = () => {
@@ -727,6 +742,7 @@ function runPipeline(run) {
     run.seen++;
     if (ev.type === "done" || ev.type === "error") run.terminal = true;
     if (ev.type === "token") {
+      sealThinking(true);
       if (ev.text.trim()) ensureAsst(); // whitespace-only content never opens a bubble
       if (asstMsg) { asstRaw += ev.text; scheduleRender(); }
     }
@@ -735,6 +751,7 @@ function runPipeline(run) {
       thinkingBlock.querySelector("pre").textContent += ev.text;
     } else if (ev.type === "tool_start") {
       SFX.play("tool_start");
+      sealThinking(true);
       // close the current answer bubble; the next one opens on its first token
       if (asstMsg) {
         flushRender();
@@ -850,6 +867,7 @@ function runPipeline(run) {
       if (c) shellSeal(c, ev.result);
     } else if (ev.type === "done") {
       SFX.play("message_received");
+      sealThinking(true); // queues ahead of the answer below
       // run ended without ever writing the list while items sit open → the
       // card shows a mid-run snapshot; say so (model finished, bookkeeping
       // didn't follow — e.g. a resumed run that dove straight back to work)
@@ -871,6 +889,7 @@ function runPipeline(run) {
   // tool_end never arrived (aborted/errored runs — never a forever-spinner)
   function finalize() {
     if (run.waiting) { run.waiting.remove(); run.waiting = null; }
+    sealThinking(false); // STOP / error mid-thought: keep the 🔊, don't read it
     if (asstMsg) {
       flushRender();
       asstMsg.classList.remove("cursor");
@@ -955,6 +974,7 @@ async function endRun(run, repair = false) {
 async function attachRun(tid, since) {
   const run = newBundle(tid);
   run.seen = since;
+  run.attached = true; // replayed, not started here — no reasoning auto-read
   RUNS.set(tid, run);
   syncSendBtn();
   run.iv = setInterval(() => tickRun(run), 250);
@@ -1517,7 +1537,7 @@ async function refreshThreads() {
       // nodes off-screen until its stream tears itself down with the cancelled
       // terminal event (deleted thread can never be re-opened, so the parked
       // host is simply dropped — RUNS.delete happens in that teardown)
-      if (t.id === threadId) { parkRun(RUNS.get(t.id)); threadId = null; $("#chat").innerHTML = ""; resetTrajView(); }
+      if (t.id === threadId) { parkRun(RUNS.get(t.id)); threadId = null; syncDraft(); $("#chat").innerHTML = ""; resetTrajView(); }
       refreshThreads();
     };
     d.appendChild(x);
@@ -1617,6 +1637,7 @@ async function openThread(t) {
   closeRecap(); // one thread's recap must not follow you to another
   parkAll(); // every run's output leaves with its thread (ours re-attaches below)
   threadId = t.id;
+  syncDraft();
   $("#chat-title").textContent = t.title.toUpperCase();
   syncSendBtn(); // a busy thread opens to STOP, an idle one to SEND — even
                  // while other threads' runs stream on (per-thread gating)
@@ -1658,6 +1679,7 @@ async function newThread() {
   closeRecap();
   parkAll(); // switch to a draft: mid-run threads' output stays behind (runs go on)
   threadId = null;
+  syncDraft();
   syncTPrompt(null);
   syncTModel(null);
   $("#chat").innerHTML = "";
@@ -1674,6 +1696,7 @@ async function createThreadNow() {
   const t = await api.newThread("New chat");
   const draftPlan = planOn(null);
   threadId = t.id;
+  syncDraft();
   if (draftPlan) { setPlan(true, t.id); setPlan(false, null); } // plan toggled on the draft carries over
   if (draftModel) { // a model picked on the draft lands on the new thread BEFORE its first run
     const ov = draftModel; draftModel = null;
@@ -1839,7 +1862,7 @@ function buildPlayer(msg) {
   };
   p.append(pp, back, time, fwd, bar);
   msg._pp = pp; msg._ptime = time; msg._pfill = fill;
-  msg.appendChild(p);
+  (msg._playerHost || msg).appendChild(p);
 }
 
 async function synth(msg) {
@@ -2023,6 +2046,33 @@ function attachSpeak(msg, raw) {
   msg.appendChild(b);
 }
 
+// 🔊 for a ◈ THINKING card: button + mini player ride in the <summary> so
+// they work while the card is collapsed. A capture-phase preventDefault on
+// their wrapper keeps clicks from toggling the card open/closed.
+function attachBlockSpeak(block, raw) {
+  let text = (raw || "").trim();
+  if (!text || block._speakBtn) return;
+  if (text.length > 19500) { // /api/tts caps at 20k chars
+    const cut = text.lastIndexOf(".", 19500);
+    text = text.slice(0, cut > 9750 ? cut + 1 : 19500);
+  }
+  block._raw = text;
+  const wrap = el("span", "block-voice");
+  wrap.addEventListener("click", (e) => e.preventDefault(), true);
+  const b = el("button", "cb-btn speak-btn", "🔊");
+  b.title = "Read this reasoning aloud";
+  b.onclick = async (e) => {
+    e.stopPropagation();
+    if (speakOwner === block) { stopSpeaking(); return; }
+    stopSpeaking();
+    await playBubble(block);
+  };
+  wrap.appendChild(b);
+  block._speakBtn = b;
+  block._playerHost = wrap;
+  block.querySelector("summary").appendChild(wrap);
+}
+
 // ---------- settings ----------
 // config.save() merges the TOP level only — nested dicts must be sent whole,
 // hence the spread-from-loaded base in saveSettings.
@@ -2032,6 +2082,7 @@ const DEFAULT_VOICE = {
   gcloud_key_file: "", gcloud_tts_lang: "en-US", gcloud_tts_voice: "en-US-Wavenet-J",
   pocket_voice: "alba", pocket_language: "english", pocket_threads: 2,
   tts_normalize: "pocket",
+  speak_reasoning: "off",
 };
 let loadedVoice = { ...DEFAULT_VOICE };
 
@@ -2201,6 +2252,7 @@ async function openSettings() {
   renderSoundboard();
   sndStatusSweep();
   $("#set-vision").checked = !!(s.capabilities || {}).vision;
+  $("#set-splash_image").value = s.splash_image || "";
   $("#set-thinking").checked = !!s.enable_thinking;
   $("#set-reasoning_effort").value = s.reasoning_effort || "xhigh";
   $("#set-keep_reasoning").value = s.keep_reasoning || "off";
@@ -2260,6 +2312,7 @@ async function saveSettings() {
     max_react_iterations: parseInt($("#set-max_react_iterations").value),
     system_prompt: $("#set-system_prompt").value,
     capabilities: { vision: $("#set-vision").checked },
+    splash_image: $("#set-splash_image").value.trim(),
     enable_thinking: $("#set-thinking").checked,
     reasoning_effort: $("#set-reasoning_effort").value || "xhigh",
     keep_reasoning: $("#set-keep_reasoning").value || "off",
@@ -2292,6 +2345,7 @@ async function saveSettings() {
       pocket_language: $("#set-voice-pocket_language").value || "english",
       pocket_threads: Math.max(1, Math.min(8, parseInt($("#set-voice-pocket_threads").value, 10) || 2)),
       tts_normalize: $("#set-voice-tts_normalize").value || "pocket",
+      speak_reasoning: $("#set-voice-speak_reasoning").value || "off",
     },
     notify: notifyForm(),
     image_gen: {
@@ -2300,6 +2354,9 @@ async function saveSettings() {
       steps: Math.max(4, Math.min(60, parseInt($("#set-img-steps").value, 10) || 25)),
     },
   });
+  applySplash($("#set-splash_image").value.trim());
+  // runs read speak_reasoning from loadedVoice — take the saved value now
+  loadedVoice = { ...loadedVoice, speak_reasoning: $("#set-voice-speak_reasoning").value || "off" };
   $("#settings-panel").classList.add("hidden");
   cfgBase = null;  // the save closed the draft; next openSettings re-snapshots
   $("#cfg-dirty").classList.add("hidden");
@@ -4673,6 +4730,23 @@ $("#btn-voice").onclick = () => {
   applyVoiceMode();
 };
 applyVoiceMode();
+// runs need voice.speak_reasoning before CONFIG is ever opened
+api.settings().then((s) => {
+  loadedVoice = { ...DEFAULT_VOICE, ...(s.voice || {}) };
+  applySplash(s.splash_image);
+}).catch(() => {});
+
+// NEW CHAT splash: CSS paints /api/splash behind an EMPTY #chat (a ::before,
+// so no node lands in #chat), only on a draft — never while a thread loads
+function syncDraft() { document.body.classList.toggle("draft", !threadId); }
+// boot: a ?thread= link is about to open a thread — don't flash the splash first
+let splashVer = 0;
+function applySplash(path) {
+  document.body.classList.toggle("has-splash", !!(path || "").trim());
+  // cache-bust on change: same URL, different file
+  document.documentElement.style.setProperty("--splash", `url("/api/splash?v=${++splashVer}")`);
+}
+if (!new URLSearchParams(location.search).get("thread")) syncDraft();
 
 checkHealth();
 setInterval(checkHealth, 15000);
