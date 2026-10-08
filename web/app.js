@@ -216,10 +216,52 @@ function enhanceCodeBlocks(root) {
     };
     bar.append(copy, dl);
     const pre = code.parentElement;
+    if (/^(html|xhtml|svg)$/i.test(lang)) bar.appendChild(htmlPreviewBtn(code, pre, wrap));
     pre.replaceWith(wrap);
     wrap.append(bar, pre);
   });
 }
+
+// 👁 PREVIEW for html / svg blocks (llama-server style). The page runs in a
+// sandboxed iframe: scripts yes, but an opaque origin (no LangBang cookies,
+// storage or DOM), and a CSP injected first blocks fetch/XHR/websockets/
+// form posts. Model-written HTML, maybe steered by a page it read, must
+// not reach /api/shell or the LAN. No allow-modals: alert() can't block.
+// It reports its height by postMessage so the frame fits its content.
+const HTML_PV_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; " +
+  "font-src data: https://fonts.gstatic.com; img-src data: blob: https:; media-src data: blob: https:; " +
+  "connect-src 'none'; form-action 'none'; frame-src 'none'; base-uri 'none'";
+const HTML_PV_SIZER = "<script>(()=>{const p=()=>parent.postMessage({lbFrameH:Math.ceil(document.documentElement.scrollHeight)},'*');" +
+  "addEventListener('load',p);new ResizeObserver(p).observe(document.documentElement);})()<\/script>";
+function htmlPreviewDoc(src, lang) {
+  const head = `<meta http-equiv="Content-Security-Policy" content="${HTML_PV_CSP}">`;
+  const body = /^svg$/i.test(lang) ? `<body style="margin:0;display:grid;place-items:center">${src}</body>` : src;
+  // after a doctype (a meta before it would drop the page into quirks mode)
+  const m = /^\s*<!doctype[^>]*>/i.exec(body);
+  return m ? m[0] + head + body.slice(m[0].length) + HTML_PV_SIZER : head + body + HTML_PV_SIZER;
+}
+function htmlPreviewBtn(code, pre, wrap) {
+  const b = el("button", "cb-btn", "👁 PREVIEW");
+  b.title = "Render this HTML in a sandboxed frame (no network, no access to LangBang)";
+  let frame = null;
+  b.onclick = () => {
+    if (frame) { frame.remove(); frame = null; pre.classList.remove("hidden"); b.textContent = "👁 PREVIEW"; return; }
+    frame = el("iframe", "cb-frame");
+    frame.setAttribute("sandbox", "allow-scripts");
+    frame.setAttribute("referrerpolicy", "no-referrer");
+    frame.srcdoc = htmlPreviewDoc(code.textContent, codeLang(code));
+    pre.classList.add("hidden");
+    wrap.appendChild(frame);
+    b.textContent = "‹/› CODE";
+  };
+  return b;
+}
+window.addEventListener("message", (e) => {
+  const h = e.data && e.data.lbFrameH;
+  if (typeof h !== "number") return;
+  for (const f of document.querySelectorAll("iframe.cb-frame"))
+    if (f.contentWindow === e.source) f.style.height = Math.min(Math.max(h, 60), 900) + "px";
+});
 
 const fmtBytes = (n) =>
   n >= 1048576 ? (n / 1048576).toFixed(1) + " MB"
@@ -1775,6 +1817,159 @@ $("#search").addEventListener("keydown", (e) => {
   if (e.key === "Escape") { $("#search").value = ""; showThreadList(); }
 });
 
+// ---------- spoken-word highlight ----------
+// Pocket clips carry word timings (/api/tts/clip/<key>/words: exact per
+// sentence chunk, interpolated inside one; median error ~0.1 s vs Whisper).
+// They're words of the SPOKEN text ("gig one slash zero" for "Gi1/0/1"), so
+// they're aligned to the words on screen: an LCS on normalized words gives
+// anchors, and each unmatched run between anchors ("twenty twenty-six" ↔
+// "2026") maps proportionally onto the on-screen run. Painted with the CSS
+// Custom Highlight API: no DOM mutation, so markdown renders, search-jump
+// child indices and the bubble's own nodes are untouched.
+const SPK = { aud: null, root: null, opts: {}, src: [], words: [], map: null, k: -2, raf: 0, gen: 0, scrollHold: 0 };
+const spkOK = typeof CSS !== "undefined" && CSS.highlights && typeof Highlight === "function";
+const spkNorm = (w) => w.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+const SPK_SKIP = "pre, .tts-player, button, .speak-btn, .cb-bar, .cb-frame, .sched-strip, .run-chip, audio, video, .tool-media, .block-voice";
+
+function spkTokens(root) {
+  const out = [];
+  if (!root) return out;
+  const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => n.parentElement && !n.parentElement.closest(SPK_SKIP) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT,
+  });
+  // a <pre> ROOT (thinking card) is the text itself, not a code block
+  if (root.matches && root.matches("pre")) {
+    for (const n of root.childNodes) if (n.nodeType === 3) spkPush(out, n);
+    return out;
+  }
+  for (let n = walk.nextNode(); n; n = walk.nextNode()) spkPush(out, n);
+  return out;
+}
+function spkPush(out, node) {
+  for (const m of node.data.matchAll(/\S+/g)) {
+    const norm = spkNorm(m[0]);
+    if (norm) out.push({ node, start: m.index, end: m.index + m[0].length, norm });
+  }
+}
+
+// closed=false: the spoken list is still growing (or the screen side is a
+// window that runs past this clip), so the run after the last anchor has no
+// known end; leave it unmapped (the highlight holds on the last anchor) instead
+// of smearing a half-heard sentence over everything that follows.
+function spkAlign(src, spk, closed) { // → Int32Array: spoken index → src index (-1 = none)
+  const n = src.length, m = spk.length, map = new Int32Array(m).fill(-1);
+  if (!n || !m || n * m > 8e6) return map;
+  const W = m + 1, dp = new Uint16Array((n + 1) * W);
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--)
+      dp[i * W + j] = src[i] === spk[j] ? dp[(i + 1) * W + j + 1] + 1 : Math.max(dp[(i + 1) * W + j], dp[i * W + j + 1]);
+  const pairs = [];
+  for (let i = 0, j = 0; i < n && j < m;) {
+    if (src[i] === spk[j]) { pairs.push([i, j]); i++; j++; }
+    // ties skip the SPOKEN word: matches stay at the earliest on-screen
+    // occurrence (a repeated paragraph mustn't pull the highlight ahead)
+    else if (dp[(i + 1) * W + j] > dp[i * W + j + 1]) i++; else j++;
+  }
+  let pi = -1, pj = -1;
+  for (const [ai, aj] of [...pairs, [n, m]]) {
+    if (aj === m && !closed) break; // open tail: see above
+    const gs = ai - pi - 1, gk = aj - pj - 1;
+    for (let k = 0; k < gk; k++) map[pj + 1 + k] = gs > 0 ? pi + 1 + Math.floor((k * gs) / gk) : pi;
+    if (aj < m) map[aj] = ai;
+    pi = ai; pj = aj;
+  }
+  return map;
+}
+
+// where a FILES part starts on screen: its first few words, in order
+function spkLocate(src, text) {
+  const want = (text.match(/\S+/g) || []).map(spkNorm).filter(Boolean).slice(0, 5);
+  if (!want.length) return 0;
+  for (let i = 0; i + want.length <= src.length; i++)
+    if (want.every((w, k) => src[i + k].norm === w)) return i;
+  for (let i = 0; i < src.length; i++) if (src[i].norm === want[0]) return i; // weaker: first word
+  return 0;
+}
+
+function spkRemap() {
+  const o = SPK.opts;
+  let all = spkTokens(SPK.root), off = 0;
+  if (o.locate) { // a part of a longer document: align within a window from its start
+    off = spkLocate(all, o.locate);
+    all = all.slice(off, off + SPK.words.length * 2 + 200);
+  }
+  SPK.src = all;
+  SPK.off = off;
+  SPK.map = spkAlign(all.map((t) => t.norm), SPK.words.map((w) => spkNorm(w.w)), SPK.done && !o.locate);
+  SPK.k = -2;
+}
+
+function spkAttach(aud, root, opts = {}) {
+  if (SPK.aud === aud) return;
+  spkDetach();
+  const gen = ++SPK.gen;
+  Object.assign(SPK, { aud, root, opts, words: [], map: null, src: [], k: -2, done: false });
+  const m = /\/api\/tts\/clip\/([0-9a-f]{64}\.mp3)/.exec(aud.src || "");
+  const poll = async () => {
+    if (gen !== SPK.gen) return;
+    if (!m) { // no timings (gTTS / gcloud blob): spread on-screen words over the duration
+      if (!isFinite(aud.duration) || !aud.duration) return setTimeout(poll, 500);
+      const src = spkTokens(root), d = aud.duration;
+      SPK.words = src.map((t, i) => ({ w: t.norm, s: (i / src.length) * d * 0.97, e: ((i + 1) / src.length) * d * 0.97 }));
+      SPK.done = true;
+      return spkRemap();
+    }
+    let r = null;
+    try { r = await (await fetch(`/api/tts/clip/${m[1]}/words`)).json(); } catch {}
+    if (gen !== SPK.gen || !r) return;
+    if (r.words && (r.words.length !== SPK.words.length || r.done !== SPK.done)) {
+      SPK.words = r.words; SPK.done = r.done; spkRemap();
+    }
+    if (!r.done) setTimeout(poll, 1000);
+  };
+  poll();
+  const loop = () => { if (gen !== SPK.gen) return; spkFrame(); SPK.raf = requestAnimationFrame(loop); };
+  SPK.raf = requestAnimationFrame(loop);
+}
+
+function spkDetach() {
+  SPK.gen++;
+  cancelAnimationFrame(SPK.raf);
+  SPK.aud = null;
+  if (spkOK) CSS.highlights.delete("lb-speak");
+}
+
+function spkFrame() {
+  const a = SPK.aud, W = SPK.words;
+  if (!a || !W.length || !SPK.map) return;
+  if (a.ended) return spkDetach();
+  const t = a.currentTime;
+  let lo = 0, hi = W.length - 1, k = -1;
+  while (lo <= hi) { const mid = (lo + hi) >> 1; if (W[mid].s <= t) { k = mid; lo = mid + 1; } else hi = mid - 1; }
+  if (k === SPK.k) return;
+  SPK.k = k;
+  if (SPK.opts.onWord) SPK.opts.onWord(k, W);
+  if (!spkOK || k < 0) return;
+  if (SPK.map[k] < 0) return; // past the last anchor of a growing list: hold
+  const tok = SPK.src[SPK.map[k]];
+  if (!tok) return CSS.highlights.delete("lb-speak");
+  if (!tok.node.isConnected) { spkRemap(); return; } // the bubble re-rendered
+  const r = new Range();
+  r.setStart(tok.node, tok.start);
+  r.setEnd(tok.node, tok.end);
+  CSS.highlights.set("lb-speak", new Highlight(r));
+  const box = SPK.opts.scroll;
+  if (box && Date.now() > SPK.scrollHold) { // keep the spoken word in view (not while you scroll)
+    const rr = r.getBoundingClientRect(), bb = box.getBoundingClientRect();
+    if (rr.top < bb.top + 20 || rr.bottom > bb.bottom - 20)
+      box.scrollTop += rr.top - bb.top - bb.height / 3;
+  }
+}
+for (const ev of ["wheel", "touchmove", "keydown"])
+  document.addEventListener(ev, (e) => {
+    if (SPK.opts.scroll && SPK.opts.scroll.contains(e.target)) SPK.scrollHold = Date.now() + 4000;
+  }, { passive: true });
+
 // ---------- voice (read-aloud) ----------
 // Synthesis happens server-side (/api/tts -> one clip per request; the server
 // disk-caches by text+voice, so even a page reload never re-synthesizes).
@@ -1815,7 +2010,11 @@ function syncPlayer(msg) {
 
 function wireAudio(msg) {
   const a = msg._aud;
-  a.onplay = () => { voiceCur = msg; markSpeaking(msg); syncPlayer(msg); };
+  a.onplay = () => {
+    voiceCur = msg; markSpeaking(msg); syncPlayer(msg);
+    // highlight in the bubble (a thinking card: its <pre>, visible when open)
+    spkAttach(a, msg.matches?.(".block") ? msg.querySelector("pre") : msg);
+  };
   a.onpause = () => {
     if (voiceCur === msg) { voiceCur = null; markSpeaking(null); }
     syncPlayer(msg);
@@ -5013,6 +5212,7 @@ async function rdClip(i) {
 
 function rdRelease(a) {
   if (!a) return;
+  if (SPK.aud === a) spkDetach();
   a.onended = a.ontimeupdate = a.onerror = null;
   a.pause();
   a.removeAttribute("src");
@@ -5041,6 +5241,11 @@ async function rdPlay(i) {
   a.onerror = () => { if (gen === RD.gen) rdPlay(RD.i + 1); };
   a.ontimeupdate = rdPaint;
   a.onplay = a.onpause = rdPaint;
+  // highlight in the markdown preview when it's on screen; the bar's
+  // caption follows the spoken words either way (plain text, PDF, edit mode)
+  const pv = $("#ed-preview");
+  const onScreen = RD.src === ED.path && ED.md && !pv.classList.contains("hidden");
+  spkAttach(a, onScreen ? pv : null, { locate: RD.chunks[RD.i], scroll: onScreen ? pv : null, onWord: rdCaption });
   a.play().catch((e) => { if (e.name !== "AbortError" && gen === RD.gen) edStatus("✕ playback: " + e.message, "err"); });
 }
 
@@ -5076,6 +5281,16 @@ function rdStop(finished) {
   if (finished) edStatus("✓ finished reading");
 }
 
+// the bar's caption: the spoken words around the current one
+function rdCaption(k, W) {
+  if (k < 0) return;
+  const box = $("#rd-snip");
+  box.replaceChildren(document.createTextNode(W.slice(Math.max(0, k - 6), k).map((w) => w.w).join(" ") + " "),
+                      el("b", "rd-now", W[k].w),
+                      document.createTextNode(" " + W.slice(k + 1, k + 10).map((w) => w.w).join(" ")));
+  box.classList.add("live");
+}
+
 function rdPaint() {
   const a = RD.aud;
   $("#rd-part").textContent = `PART ${RD.i + 1}/${RD.chunks.length}`;
@@ -5083,7 +5298,7 @@ function rdPaint() {
   $("#rd-fill").style.width = a && isFinite(a.duration) && a.duration > 0
     ? (100 * a.currentTime) / a.duration + "%" : "0%";
   const name = RD.src.split("/").pop();
-  $("#rd-snip").textContent = `${name} · ` + (RD.chunks[RD.i] || "").replace(/[#*_`>|]/g, "").replace(/\s+/g, " ").trim().slice(0, 90);
+  if (!$("#rd-snip").classList.contains("live") || !RD.aud) $("#rd-snip").textContent = `${name} · ` + (RD.chunks[RD.i] || "").replace(/[#*_`>|]/g, "").replace(/\s+/g, " ").trim().slice(0, 90);
   rdSyncBtn();
 }
 

@@ -407,19 +407,66 @@ def pocket_fit(text: str, model) -> str:
         return text
 
 
-def pocket_pcm(text: str, v: dict, stop: threading.Event | None = None):
+def word_times(chunk: str, start: float, end: float) -> list[dict]:
+    """Spread one generated Pocket chunk's words over its measured span. The
+    chunk boundaries are exact (sample counts); inside one we weight words
+    by length and give , ; : and . ! ? a pause after the word. Pocket ends
+    each chunk with a few silent end-of-speech frames: keep them off words."""
+    words = chunk.split()
+    if not words:
+        return []
+    dur = max(0.0, end - start)
+    speech = dur - (0.3 if dur > 1.2 else 0.1 * dur)
+    def gap(w: str) -> float:
+        return 5.0 if w[-1] in ".!?" else 3.0 if w[-1] in ",;:" else 1.0
+    units = [max(1, len(re.sub(r"\W", "", w))) for w in words]
+    total = sum(units) + sum(gap(w) for w in words[:-1])
+    u = speech / total if total else 0.0
+    out, t = [], start
+    for i, w in enumerate(words):
+        e = t + units[i] * u
+        out.append({"w": w, "s": round(t, 3), "e": round(e, 3)})
+        t = e + (gap(w) * u if i < len(words) - 1 else 0.0)
+    return out
+
+
+def pocket_pcm(text: str, v: dict, stop: threading.Event | None = None,
+               words: list | None = None):
     """Yield mono PCM16 little-endian @ POCKET_RATE as it's generated. Holds
-    the generation lock for the whole utterance (callers queue behind it)."""
+    the generation lock for the whole utterance (callers queue behind it).
+
+    `words` (optional list) receives {w, s, e} word timings as each chunk
+    finishes — for read-aloud highlighting. We run Pocket's own sentence
+    splitter here and generate chunk by chunk (the same chunks its
+    generate_audio_stream would make), so each chunk's start/end in the
+    audio is an exact sample count instead of a guess."""
     import torch
+    from pocket_tts.models.text_chunking import split_into_best_sentences
 
     model, st = pocket_ready(v)
     text = pocket_fit(text, model)
+    # max_tokens 44 (default 50): Pocket regroups sentences by summing
+    # per-piece token counts, and the re-joined text can tokenize a few
+    # tokens longer — 6 of headroom keeps real chunks under its 50 limit
+    chunks = split_into_best_sentences(
+        model.flow_lm.conditioner.tokenizer, text, POCKET_CHUNK_TOKENS,
+        model.pad_with_spaces_for_short_inputs, remove_semicolons=model.remove_semicolons,
+        append_terminal_punctuation=model.append_terminal_punctuation,
+        capitalize_first_letter=model.capitalize_first_letter,
+        replace_characters=model.replace_characters)
+    pos = 0  # samples emitted so far
     with _pk_gen:
-        # max_tokens 44 (default 50): Pocket regroups sentences by summing
-        # per-piece token counts, and the re-joined text can tokenize a few
-        # tokens longer — 6 of headroom keeps real chunks under its 50 limit
-        for ch in model.generate_audio_stream(st, text, max_tokens=POCKET_CHUNK_TOKENS, stop=stop):  # copy_state=True: voice reusable
-            yield (ch.clamp(-1, 1) * 32767).to(torch.int16).numpy().tobytes()
+        for chunk in chunks:
+            if stop is not None and stop.is_set():
+                break
+            start = pos
+            # one chunk per call: it re-splits to itself (already within budget)
+            for ch in model.generate_audio_stream(st, chunk, max_tokens=POCKET_CHUNK_TOKENS, stop=stop):  # copy_state=True: voice reusable
+                b = (ch.clamp(-1, 1) * 32767).to(torch.int16).numpy().tobytes()
+                pos += len(b) // 2
+                yield b
+            if words is not None:
+                words.extend(word_times(chunk, start / POCKET_RATE, pos / POCKET_RATE))
 
 
 def _synthesize_pocket_wav(text: str, v: dict) -> tuple[bytes, str]:

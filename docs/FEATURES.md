@@ -346,6 +346,29 @@ account; the clone step itself needs kyutai's gated weights once: accept
 the terms on the model page and run `.venv/bin/hf auth login` (no restart).
 Needs `ffmpeg` on PATH for streaming (falls back to whole-clip WAV).
 
+**Spoken-word highlight.** While a chat bubble, thinking card or FILES
+markdown preview is read aloud, the word being spoken is highlighted (CSS
+Custom Highlight API: no DOM changes). Pocket clips carry word timings:
+`voice.pocket_pcm` runs Pocket's own sentence splitter and generates chunk
+by chunk, so every chunk's start/end in the audio is an exact sample count;
+words inside a chunk are spread by length plus punctuation pauses (median
+start error ~0.1 s against faster-whisper word timestamps, so no ASR pass is
+needed). Timings are saved as `data/tts/<key>.words.json` and served,
+growing while the clip streams, at `GET /api/tts/clip/<key>/words`. They
+are words of the SPOKEN text ("gig one slash zero…"), so the client aligns
+them to the words on screen: LCS anchors on normalized words, and each
+unmatched run maps proportionally onto the on-screen run ("twenty
+twenty-six" ↔ "2026"). The FILES bar also shows a live caption of the
+spoken words (PDF / plain text / edit mode, where nothing on screen can be
+highlighted). Old cached Pocket clips without timings re-synthesize once on
+replay; gTTS/gcloud fall back to spreading words over the duration.
+
+**👁 PREVIEW for html / svg code blocks** (like llama-server): renders the
+block in a sandboxed iframe: `sandbox="allow-scripts"` only (opaque
+origin: no LangBang cookies, storage or DOM; no modals), and a CSP
+injected first blocks fetch/XHR/websockets/form posts, so model-written HTML
+can't reach `/api/shell` or the LAN. The frame sizes itself to the page.
+
 **🔊 READ in FILES.** Markdown and plain-text files (and PDFs with a text
 layer, via `GET /api/fs/text` = `pdftotext`, re-flowed into paragraphs)
 read aloud from the editor bar: your selection if you made one, else the
