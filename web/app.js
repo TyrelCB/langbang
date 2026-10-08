@@ -1461,6 +1461,7 @@ let renamingTid = null;
 
 async function refreshThreads() {
   threads = await api.threads();
+  syncTitle(); // renames land here too (auto-title, ✎, the 4 s poll)
   const box = $("#threads");
   if (renamingTid && box.querySelector(".t-edit")) {
     for (const row of box.querySelectorAll(".thread")) {
@@ -3069,7 +3070,16 @@ $("#btn-sched-save").onclick = saveScheduleTask;
 // alerts for whatever you're not looking at.
 let notifyCursor = -1; // -1 = fresh tab: take the cursor, don't replay history
 let unseenNotes = 0;
-const BASE_TITLE = document.title;
+// tab title follows the open thread: "Home Lab Health · LangBang" (a draft
+// is just "LangBang"), with the unseen-notification count in front
+const BASE_TITLE = "LangBang";
+function syncTitle() {
+  const t = threadId && (threads.find((x) => x.id === threadId) || {}).title;
+  const name = (t || "").split("\n")[0].trim().slice(0, 60);
+  document.title = (unseenNotes ? `(${unseenNotes}) ` : "") + (name ? `${name} · ${BASE_TITLE}` : BASE_TITLE);
+}
+// every path that renames / switches / opens a thread repaints #chat-title
+new MutationObserver(syncTitle).observe($("#chat-title"), { childList: true, characterData: true, subtree: true });
 const NOTE_ICON = { input: "◆", done: "✓", failed: "✕", learned: "📘" };
 const NOTE_WORD = { input: "NEEDS YOUR INPUT", done: "FINISHED", failed: "FAILED", learned: "LEARNED" };
 
@@ -3103,11 +3113,11 @@ function notifyShow(ev) {
   while ($("#toasts").children.length > 4) $("#toasts").firstChild.remove();
   if (ev.kind === "learned") { refreshMemoryUI(); return; } // quiet: no sound/badge/popup
   SFX.play(ev.kind === "failed" ? "error" : "message_received");
-  if (document.hidden) { unseenNotes++; document.title = `(${unseenNotes}) ${BASE_TITLE}`; }
+  if (document.hidden) { unseenNotes++; syncTitle(); }
   desktopNotify(ev);
 }
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && unseenNotes) { unseenNotes = 0; document.title = BASE_TITLE; }
+  if (!document.hidden && unseenNotes) { unseenNotes = 0; syncTitle(); }
 });
 
 // desktop popups: per browser, and only in a secure context (https or
@@ -3122,6 +3132,7 @@ function desktopNotify(ev) {
   try {
     const n = new Notification(`${ev.title || "LangBang"} — ${(NOTE_WORD[ev.kind] || ev.kind).toLowerCase()}`, {
       body: ev.text || "", tag: "lb-" + ev.id, requireInteraction: ev.kind === "input",
+      icon: "/static/icon-192.png",
     });
     n.onclick = () => { window.focus(); notifyOpen(ev); n.close(); };
   } catch {}

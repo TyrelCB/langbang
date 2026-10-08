@@ -1251,6 +1251,12 @@ async def stt(request: Request):
 
 # ---- web UI ----
 
+@app.get("/favicon.ico")
+async def favicon():
+    # browsers (and some feed readers) ask the root blindly; PNG is fine there
+    return FileResponse(os.path.join(WEB_DIR, "icon-32.png"), media_type="image/png")
+
+
 @app.get("/")
 async def index():
     # no-store like the statics: a cached index.html pins stale asset refs
