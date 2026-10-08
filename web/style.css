@@ -896,3 +896,4 @@ html[data-theme="light"] body.draft.has-splash #chat:empty::before { mix-blend-m
   box-shadow: inset 0 0 0 999px rgba(255, 70, 70, calc(var(--lvl, 0) * 0.35)); }
 #btn-mic.busy { color: var(--cyan); border-color: var(--cyan); }
 #btn-mic:disabled { opacity: 0.4; cursor: not-allowed; }
+#btn-voice.talk { color: var(--danger); border-color: var(--danger); }
