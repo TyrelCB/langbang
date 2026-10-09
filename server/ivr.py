@@ -29,6 +29,7 @@ import time
 import uuid
 import wave
 
+import openai
 from fastapi.concurrency import run_in_threadpool
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -215,16 +216,27 @@ async def reply(cid: str, c: dict, said: str, s: dict, cfg: dict) -> dict:
     if sem.locked():
         raise Busy("all IVR lines busy")
     async with sem:
-        llm = agent.SGlangChatOpenAI(
-            model=s["model"], base_url=s["base_url"], api_key=s["api_key"],
-            temperature=s.get("temperature", 0.7), max_tokens=int(cfg.get("max_tokens") or 600),
-            streaming=False, extra_body=agent.extra_body(s, thinking=False))
         tools = await _tools(s, cfg)
-        graph = create_agent(llm, tools, system_prompt=cfg.get("system_prompt") or "")
         hist = c["msgs"][-MAX_TURNS_KEPT:]
-        out = await graph.ainvoke(
-            {"messages": [*hist, HumanMessage(said)]},
-            {"recursion_limit": 2 * int(cfg.get("max_steps") or 6) + 2})
+        # thinking OFF regardless of the provider's template_kwargs checkbox
+        # (Qwen hybrids think by default when the switch isn't sent — minutes
+        # of dead air on a phone line). Only a provider that 400s on the
+        # extra arg (OpenAI proper) gets the plain request.
+        for eb in ({"chat_template_kwargs": {"enable_thinking": False}}, None):
+            llm = agent.SGlangChatOpenAI(
+                model=s["model"], base_url=s["base_url"], api_key=s["api_key"],
+                temperature=s.get("temperature", 0.7), max_tokens=int(cfg.get("max_tokens") or 600),
+                streaming=False, extra_body=eb)
+            graph = create_agent(llm, tools, system_prompt=cfg.get("system_prompt") or "")
+            try:
+                out = await graph.ainvoke(
+                    {"messages": [*hist, HumanMessage(said)]},
+                    {"recursion_limit": 2 * int(cfg.get("max_steps") or 6) + 2})
+                break
+            except openai.BadRequestError as e:
+                if eb is None or "chat_template_kwargs" not in str(e):
+                    raise
+                logger.warning("provider rejected chat_template_kwargs; IVR asking without it")
         new = out["messages"][len(hist) + 1:]
         used = [m.name for m in new if isinstance(m, ToolMessage)]
         final = next((m for m in reversed(new) if isinstance(m, AIMessage) and not m.tool_calls), None)
