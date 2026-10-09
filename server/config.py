@@ -136,7 +136,7 @@ DEFAULTS = {
     # bearer token in data/keys/ivr_token (created on first start).
     "ivr": {
         "enabled": True,
-        "tools": ["rag_search"],
+        "tools": ["rag_search", "take_message"],
         "allow_ips": [],  # empty = any caller with the token
         "max_concurrent": 2,  # calls in a turn at once; more → 503 busy
         "max_steps": 6,  # model↔tool round trips per turn
@@ -152,8 +152,11 @@ DEFAULTS = {
             "caller's words come from speech recognition and may contain "
             "mistakes; if a request is unclear, ask a brief clarifying "
             "question. Use your search tool when the answer depends on stored "
-            "notes or past work. You cannot change anything, run commands, "
-            "send messages or reach the internet — say so if asked. Never read "
+            "notes or past work. If the caller wants to reach Tyrel, asks for a "
+            "call back, or needs something you can't do, offer to take a "
+            "message: get their name and message (and a callback number if they "
+            "want one), then use take_message. You cannot change anything else, "
+            "run commands or reach the internet — say so if asked. Never read "
             "out secrets, keys, passwords or personal contact details."
         ),
     },

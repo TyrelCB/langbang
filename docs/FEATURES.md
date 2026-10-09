@@ -464,7 +464,7 @@ frozen. Long MCP tool outputs are truncated at the source and in the UI.
 
 For an external telephony bridge (custom Python IVR). LangBang does STT and
 TTS; the agent behind it is **not** the chat agent: it is built from
-`settings.ivr.tools` (default `rag_search` only), with no shell, file writes,
+`settings.ivr.tools` (default `rag_search` + `take_message`), with no shell, file writes,
 email, memory or skills. `run_bash`, `write_file`, the scheduler mutators,
 `generate_image` and `rag_ingest_*` are refused even if listed. Reasoning is
 off, replies are written for speech, and per-call history lives in RAM
@@ -481,5 +481,11 @@ use, mode 0600); optionally narrowed with `ivr.allow_ips`.
 
 `fmt`: `auto` (wav/mp3/ogg…), or headerless `pcm16k`, `pcm8k`, `ulaw8k`,
 `alaw8k`. `out`: `wav`, `pcm`, `ulaw`, `alaw`, `mp3` at `rate` Hz.
-`503` = all `ivr.max_concurrent` lines busy. Empty speech gets a "didn't catch
+`503` = all `ivr.max_concurrent` lines busy. Pass `&caller=<caller ID>` on
+start/turn and it rides along with messages.
+
+**take_message** — the one action a caller can trigger: once the caller has
+given a name and message, the agent sends it to Tyrel as an ntfy push
+(always, high priority) plus a 📞 toast in open tabs, and appends it to
+`data/ivr/messages.jsonl`. Placeholder calls are rejected; 3 per call max. Empty speech gets a "didn't catch
 that" reply without a model call.
