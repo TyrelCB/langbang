@@ -152,7 +152,14 @@ def _ffmpeg(data: bytes, in_args: list[str], out_args: list[str]) -> bytes:
     return p.stdout
 
 
+# container names a bridge may reasonably send: all probe fine as "auto"
+IN_ALIASES = {"wav", "wave", "mp3", "ogg", "opus", "webm", "flac", "m4a", ""}
+
+
 def to_pcm16k(data: bytes, fmt: str) -> bytes:
+    fmt = (fmt or "").lower()
+    if fmt in IN_ALIASES:
+        fmt = "auto"
     if fmt not in IN_FORMATS:
         raise ValueError(f"unknown input format {fmt!r} (one of: {', '.join(IN_FORMATS)})")
     return _ffmpeg(data, IN_FORMATS[fmt], ["-f", "s16le", "-ar", "16000", "-ac", "1"])
