@@ -3563,6 +3563,36 @@ $("#input").addEventListener("paste", (e) => {
     files.forEach((f) => f && addImage(f));
   }
 });
+// drag-and-drop: files dropped anywhere on the chat column take the same
+// route as 📎 (images inline with vision, everything else uploads). The
+// window-level guard stops a stray drop elsewhere from navigating the tab
+// away to the file; real <input type=file> targets (voice clone) keep theirs.
+const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes("Files");
+let dragDepth = 0;
+for (const t of ["dragover", "drop"]) {
+  window.addEventListener(t, (e) => {
+    if (hasFiles(e) && !e.target.closest?.("input[type=file]")) e.preventDefault();
+  });
+}
+$("#main").addEventListener("dragenter", (e) => {
+  if (!hasFiles(e)) return;
+  dragDepth++;
+  $("#main").classList.add("drop-hot");
+});
+$("#main").addEventListener("dragleave", (e) => {
+  if (!hasFiles(e)) return;
+  if (--dragDepth <= 0) { dragDepth = 0; $("#main").classList.remove("drop-hot"); }
+});
+$("#main").addEventListener("dragover", (e) => {
+  if (hasFiles(e)) e.dataTransfer.dropEffect = "copy";
+});
+$("#main").addEventListener("drop", (e) => {
+  dragDepth = 0;
+  $("#main").classList.remove("drop-hot");
+  if (!hasFiles(e) || e.target.closest?.("input[type=file]")) return;
+  e.preventDefault();
+  if (e.dataTransfer.files.length) { SFX.play("click"); ingestFiles(e.dataTransfer.files); }
+});
 $("#btn-attach").onclick = () => { SFX.play("click"); $("#file-img").click(); };
 $("#file-img").onchange = (e) => {
   ingestFiles(e.target.files);
