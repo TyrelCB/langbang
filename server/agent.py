@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 import aiosqlite
+import openai
 from langchain_core.callbacks.manager import adispatch_custom_event
 from deepagents import (
     FilesystemPermission,
@@ -383,6 +384,59 @@ class SGlangChatOpenAI(ChatOpenAI):
             gc.message.additional_kwargs["reasoning_content"] = rc
         return gc
 
+    # optional_extra: extra_body is a best-effort thinking-off switch (see
+    # no_think) — a provider that 400s on it gets the request again without
+    # it, and is remembered so later calls skip the 400.
+    optional_extra: bool = False
+
+    def _drop_optional(self, e: Exception) -> bool:
+        if not (self.optional_extra and self.extra_body and isinstance(e, openai.BadRequestError)
+                and "chat_template_kwargs" in str(e)):
+            return False
+        _REJECTS_KWARGS.add(self.openai_api_base or "")
+        logger.warning("%s rejected chat_template_kwargs; asking without it", self.openai_api_base)
+        self.extra_body = None
+        return True
+
+    async def _agenerate(self, *a, **kw):  # noqa: ANN002, ANN003
+        try:
+            return await super()._agenerate(*a, **kw)
+        except Exception as e:
+            if not self._drop_optional(e):
+                raise
+            return await super()._agenerate(*a, **kw)
+
+    async def _astream(self, *a, **kw):  # noqa: ANN002, ANN003
+        started = False
+        try:
+            async for c in super()._astream(*a, **kw):
+                started = True
+                yield c
+        except Exception as e:
+            if started or not self._drop_optional(e):
+                raise
+            async for c in super()._astream(*a, **kw):
+                yield c
+
+
+_REJECTS_KWARGS: set[str] = set()  # base_urls that 400'd on chat_template_kwargs
+
+
+def no_think(s: dict) -> dict:
+    """Constructor kwargs for background calls that must not think (titles,
+    recap, compaction, file assist). A Qwen hybrid thinks by DEFAULT, and
+    these calls have small budgets — titles 24 tokens, recap 700 — so a
+    thinking model spends all of it reasoning and returns empty content
+    (seen: blank recaps, a compaction summary of "."). So the switch is sent
+    even when the provider's template_kwargs box is off; that box governs
+    the chat's thinking toggle, and an empty background result is never
+    what anyone wants. Providers that reject it are retried without."""
+    if s.get("template_kwargs", True):
+        return {"extra_body": extra_body(s, thinking=False)}
+    if (s.get("base_url") or "") in _REJECTS_KWARGS:
+        return {"extra_body": None}
+    return {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}, "optional_extra": True}
+
 
 REASONING_EFFORTS = ("xhigh", "medium", "low")
 COMPACTION_TAG = "lb_compaction"
@@ -454,7 +508,7 @@ def summarizer(s: dict) -> ChatOpenAI:
         temperature=0.3,
         max_tokens=int(s.get("compact_summary_tokens", 800)),
         streaming=False,
-        extra_body=extra_body(s, thinking=False),
+        **no_think(s),
     )
 
 
@@ -581,6 +635,12 @@ def _compaction_hook(s: dict):
             ]
         )
         t_sum = time.time() - t_sum
+        text = _text_only(summary.content).strip()
+        if len(text) < 40:
+            # an empty/near-empty summary would replace the archived messages
+            # with nothing — keep the full context; the next model step retries
+            logger.warning("compaction summary came back empty (%r); not compacting", text)
+            return None
         tid = (get_config() or {}).get("configurable", {}).get("thread_id", "")
         async with _wt(_db):
             for m in head:
@@ -588,7 +648,6 @@ def _compaction_hook(s: dict):
                     "INSERT INTO archived_messages(thread_id,msg) VALUES(?,?)",
                     (tid, json.dumps(_msg_dict(m), ensure_ascii=False)),
                 )
-        text = str(summary.content).strip()
         if in_turn:
             text += ("\n\n[CURRENT REQUEST — still in progress, quoted verbatim]\n"
                      + _text_only(current.content).strip()[:8000])
@@ -1921,7 +1980,7 @@ def _one_shot(s: dict, max_tokens: int, temperature: float) -> SGlangChatOpenAI:
     return SGlangChatOpenAI(
         model=s["model"], base_url=s["base_url"], api_key=s["api_key"],
         temperature=temperature, max_tokens=max_tokens, streaming=False,
-        extra_body=extra_body(s, thinking=False),
+        **no_think(s),
     )
 
 
@@ -2045,8 +2104,11 @@ async def recap_thread(tid: str) -> dict | None:
         SystemMessage(content=_RECAP_INSTRUCTION),
         HumanMessage(content=_flat_transcript(msgs, head=2, tail=40)),
     ])
-    return {"title": row[0], "summary": _text_only(summary.content).strip(),
-            "ts": time.time()}
+    text = _text_only(summary.content).strip()
+    if not text:
+        raise RuntimeError("the model returned no text (finish: %s)"
+                           % (summary.response_metadata or {}).get("finish_reason"))
+    return {"title": row[0], "summary": text, "ts": time.time()}
 
 
 # ---- streaming runner ----
