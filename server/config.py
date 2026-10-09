@@ -140,6 +140,14 @@ DEFAULTS = {
         "allow_ips": [],  # empty = any caller with the token
         "max_concurrent": 2,  # calls in a turn at once; more → 503 busy
         "max_steps": 6,  # model↔tool round trips per turn
+        # which model answers calls: a provider name from "providers" ("" = the
+        # chat default) and a model id ("" = that provider's own default model).
+        # A small model on another box keeps calls off the chat model's
+        # concurrency slots; if that box is unreachable the turn falls back
+        # to the chat default.
+        "provider": "",
+        "model": "",
+        "llm_timeout_s": 30,
         "max_tokens": 600,
         # streamed turns stop speaking at the first sentence end past this many
         # words (the model is cancelled); 0 = no cap. Phone answers that run
