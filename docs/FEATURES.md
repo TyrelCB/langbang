@@ -470,6 +470,16 @@ email, memory or skills. `run_bash`, `write_file`, the scheduler mutators,
 off, replies are written for speech, and per-call history lives in RAM
 (expires after `ivr.idle_s`). Every turn is appended to `data/ivr/calls.jsonl`.
 
+**Its own model.** `ivr.provider` names one of the CONFIG providers (and
+`ivr.model` a model id, `""` = that provider's default), so calls can run on
+a small model on another box (e.g. Ollama `gemma4:e2b-mlx` on the Mac mini)
+instead of taking the chat model's concurrency slots. `""` = the chat
+default. If that box is unreachable (`ivr.llm_timeout_s`), the turn falls
+back to the chat default. Thinking is switched off per backend: sglang/vLLM
+get `chat_template_kwargs.enable_thinking=false`, Ollama gets
+`reasoning_effort: "none"` (its `think:false` is ignored once tools are in
+the request). The first 400 is remembered per backend.
+
 Auth: `Authorization: Bearer $(cat data/keys/ivr_token)` (created on first
 use, mode 0600); optionally narrowed with `ivr.allow_ips`.
 

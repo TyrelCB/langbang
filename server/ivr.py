@@ -320,16 +320,73 @@ def _text(content) -> str:
 
 # thinking OFF regardless of the provider's template_kwargs checkbox (Qwen
 # hybrids think by default when the switch isn't sent — minutes of dead air
-# on a phone line). Only a provider that 400s on the extra arg (OpenAI
-# proper) gets the plain request.
-_THINKING_OFF = ({"chat_template_kwargs": {"enable_thinking": False}}, None)
+# on a phone line). Backends disagree on the switch: sglang/vLLM read
+# chat_template_kwargs; Ollama's /v1 ignores that (and its own "think":false
+# once tools are in the request) and honours only reasoning_effort "none",
+# which vLLM 400s on. So try both, then each alone-ish, then nothing, and
+# remember per backend what it accepted — the 400 round trip is paid once.
+_TPL_OFF = {"chat_template_kwargs": {"enable_thinking": False}}
+_THINKING_OFF = ({**_TPL_OFF, "reasoning_effort": "none"}, _TPL_OFF, None)
+_accepts: dict[str, int] = {}  # base_url → index into _THINKING_OFF that worked
 
 
-def _llm(s: dict, cfg: dict, extra_body: dict | None, streaming: bool):
+def _variants(conn: dict):
+    i = _accepts.get(conn["base_url"], 0)
+    return [(j, _THINKING_OFF[j]) for j in range(i, len(_THINKING_OFF))]
+
+
+def _rejected(e: Exception, eb: dict | None) -> bool:
+    """A 400 about one of the thinking switches (→ try the next variant)."""
+    return eb is not None and isinstance(e, openai.BadRequestError) and \
+        any(k in str(e) for k in eb)
+
+
+def _conns(s: dict, cfg: dict) -> list[dict]:
+    """Connections to try, in order: the IVR's own provider/model (ivr.provider
+    — a small model on another box keeps phone calls off the chat model's
+    concurrency slots), then the chat default if that box is unreachable.
+    ivr.provider "" = the chat default only."""
+    main = s  # already resolved to the chat default by the caller
+    pname = cfg.get("provider") or ""
+    if pname and pname in (s.get("providers") or {}):
+        own = config.effective(s, {"provider": pname, "model": cfg.get("model") or ""})
+        return [own, main] if own["base_url"] != main["base_url"] else [own]
+    if pname:
+        logger.warning("ivr.provider %r not in providers; using the chat default", pname)
+    return [main]
+
+
+_UNREACHABLE = (openai.APIConnectionError, openai.APITimeoutError)
+
+
+def _llm(conn: dict, cfg: dict, extra_body: dict | None, streaming: bool):
     return agent.SGlangChatOpenAI(
-        model=s["model"], base_url=s["base_url"], api_key=s["api_key"],
-        temperature=s.get("temperature", 0.7), max_tokens=int(cfg.get("max_tokens") or 600),
+        model=conn["model"], base_url=conn["base_url"], api_key=conn["api_key"],
+        temperature=conn.get("temperature", 0.7), max_tokens=int(cfg.get("max_tokens") or 600),
+        timeout=float(cfg.get("llm_timeout_s") or 30), max_retries=1,
         streaming=streaming, extra_body=extra_body)
+
+
+def _retryable(e: Exception, conn: dict, eb: dict | None) -> Exception:
+    """Return e (tagged with its backend) if the next attempt may succeed,
+    else re-raise it."""
+    if _rejected(e, eb):
+        logger.warning("%s rejected %s; IVR trying the next thinking switch",
+                       conn["base_url"], ", ".join(eb))
+    elif isinstance(e, _UNREACHABLE):
+        logger.warning("IVR model at %s unreachable (%s); falling back", conn["base_url"], e)
+    else:
+        raise e
+    e.base_url = conn["base_url"]
+    return e
+
+
+def _attempts(s: dict, cfg: dict):
+    """(conn, variant index, extra_body) in try order; callers `continue` on a
+    rejected thinking switch or an unreachable backend, `break` on success."""
+    for conn in _conns(s, cfg):
+        for j, eb in _variants(conn):
+            yield conn, j, eb
 
 
 async def reply(cid: str, c: dict, said: str, s: dict, cfg: dict) -> dict:
@@ -340,18 +397,22 @@ async def reply(cid: str, c: dict, said: str, s: dict, cfg: dict) -> dict:
     async with sem:
         tools = await _tools(s, cfg, cid, c)
         hist = c["msgs"][-MAX_TURNS_KEPT:]
-        for eb in _THINKING_OFF:
-            graph = create_agent(_llm(s, cfg, eb, streaming=False), tools,
+        err = None
+        for conn, j, eb in _attempts(s, cfg):
+            if err is not None and isinstance(err, _UNREACHABLE) and conn["base_url"] == err.base_url:
+                continue  # that backend is down — skip its other variants
+            graph = create_agent(_llm(conn, cfg, eb, streaming=False), tools,
                                  system_prompt=system_prompt(cfg))
             try:
                 out = await graph.ainvoke(
                     {"messages": [*hist, HumanMessage(said)]},
                     {"recursion_limit": 2 * int(cfg.get("max_steps") or 6) + 2})
+                _accepts[conn["base_url"]] = j
                 break
-            except openai.BadRequestError as e:
-                if eb is None or "chat_template_kwargs" not in str(e):
-                    raise
-                logger.warning("provider rejected chat_template_kwargs; IVR asking without it")
+            except Exception as e:  # noqa: BLE001 — sorted below
+                err = _retryable(e, conn, eb)
+        else:
+            raise err
         new = out["messages"][len(hist) + 1:]
         used = [m.name for m in new if isinstance(m, ToolMessage)]
         final = next((m for m in reversed(new) if isinstance(m, AIMessage) and not m.tool_calls), None)
@@ -461,8 +522,11 @@ async def reply_stream(cid: str, c: dict, said: str, s: dict, cfg: dict, ctl: di
         hist = c["msgs"][-MAX_TURNS_KEPT:]
         parts: list[str] = []
         final: list = []
-        for eb in _THINKING_OFF:
-            graph = create_agent(_llm(s, cfg, eb, streaming=True), tools,
+        err = None
+        for conn, j, eb in _attempts(s, cfg):
+            if err is not None and isinstance(err, _UNREACHABLE) and conn["base_url"] == err.base_url:
+                continue
+            graph = create_agent(_llm(conn, cfg, eb, streaming=True), tools,
                                  system_prompt=system_prompt(cfg))
             last_id = None
             stream = graph.astream(
@@ -487,13 +551,16 @@ async def reply_stream(cid: str, c: dict, said: str, s: dict, cfg: dict, ctl: di
                     last_id = chunk.id
                     parts.append(t)
                     yield ("text", t)
+                _accepts[conn["base_url"]] = j
                 break
-            except openai.BadRequestError as e:
-                if eb is None or parts or "chat_template_kwargs" not in str(e):
-                    raise
-                logger.warning("provider rejected chat_template_kwargs; IVR asking without it")
+            except Exception as e:  # noqa: BLE001 — sorted below
+                if parts or len(final) > len(hist) + 1:
+                    raise  # caller heard part of it / a tool already ran: no do-over
+                err = _retryable(e, conn, eb)
             finally:
                 await stream.aclose()  # cut: cancels the in-flight model request
+        else:
+            raise err
         new = final[len(hist) + 1:]
         used = [m.name for m in new if isinstance(m, ToolMessage)]
         cut = bool(ctl.get("stop"))
