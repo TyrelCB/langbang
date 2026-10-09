@@ -1375,6 +1375,29 @@ async def _ivr_say(text: str, s: dict, cfg: dict, out: str, rate: int) -> dict:
             "sample_rate": rate, "tts_s": round(time.time() - t, 2)}
 
 
+async def _ivr_hear(request: Request, fmt: str, s: dict) -> tuple[str, bool]:
+    """(the caller's words, whether STT ran). Body: JSON {"text": ...} to
+    skip STT (DTMF menus, testing), or audio in `fmt`."""
+    body = await request.body()
+    if (request.headers.get("content-type") or "").startswith("application/json"):
+        try:
+            text = str(json.loads(body or b"{}").get("text") or "").strip()
+        except ValueError:
+            raise HTTPException(400, "bad JSON body")
+        return text, False
+    if not body:
+        raise HTTPException(400, "empty audio body")
+    if len(body) > ivr.MAX_AUDIO_BYTES:
+        raise HTTPException(413, "audio too large (max 10 MB)")
+    try:
+        pcm = await run_in_threadpool(ivr.to_pcm16k, body, fmt)
+        return (await run_in_threadpool(voice.transcribe, pcm, s)).strip(), True
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"STT failed: {e}")
+
+
 @app.post("/api/ivr/start")
 async def ivr_start(request: Request, call_id: str = "", out: str = "wav", rate: int = 8000,
                     caller: str = ""):
@@ -1397,26 +1420,10 @@ async def ivr_turn(request: Request, call_id: str = "", fmt: str = "auto",
     audio_format, sample_rate, timings}. 503 = all lines busy."""
     s, cfg = _ivr_gate(request)
     cid, c = ivr.call(call_id, cfg, caller)
-    body = await request.body()
     timing = {}
     t0 = time.time()
-    if (request.headers.get("content-type") or "").startswith("application/json"):
-        try:
-            said = str(json.loads(body or b"{}").get("text") or "").strip()
-        except ValueError:
-            raise HTTPException(400, "bad JSON body")
-    else:
-        if not body:
-            raise HTTPException(400, "empty audio body")
-        if len(body) > ivr.MAX_AUDIO_BYTES:
-            raise HTTPException(413, "audio too large (max 10 MB)")
-        try:
-            pcm = await run_in_threadpool(ivr.to_pcm16k, body, fmt)
-            said = (await run_in_threadpool(voice.transcribe, pcm, s)).strip()
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(502, f"STT failed: {e}")
+    said, stt = await _ivr_hear(request, fmt, s)
+    if stt:
         timing["stt_s"] = round(time.time() - t0, 2)
     if not said:
         r = {"reply": "Sorry, I didn't catch that. Could you say it again?", "tools": []}
@@ -1437,6 +1444,49 @@ async def ivr_turn(request: Request, call_id: str = "", fmt: str = "auto",
     ivr.audit({"call_id": cid, "event": "turn", "transcript": said, "reply": r["reply"],
                "tools": r["tools"], "error": r.get("error"), **timing})
     return {"call_id": cid, "transcript": said, **r, **spoken, "timings": timing}
+
+
+@app.post("/api/ivr/turn/stream")
+async def ivr_turn_stream(request: Request, call_id: str = "", fmt: str = "auto", caller: str = ""):
+    """One caller utterance → streamed spoken reply (see ivr.stream_turn).
+    Body as /api/ivr/turn. Response: NDJSON, one event per line —
+      {"type":"transcript","call_id","text","stt_s"}   first, always
+      {"type":"text","text"}                           model output as written
+      {"type":"audio","pcm"}   base64 s16le mono @ 24 kHz, as synthesized
+      {"type":"done","reply","tools","timings",["error"]}
+    An empty transcript (silence, ringback, a beep) ends right after the
+    transcript with {"type":"done","empty":true} and NO audio — the bridge
+    decides whether to prompt again. 503 = all lines busy."""
+    s, cfg = _ivr_gate(request)
+    cid, c = ivr.call(call_id, cfg, caller)
+    t0 = time.time()
+    said, stt = await _ivr_hear(request, fmt, s)
+    stt_s = round(time.time() - t0, 2) if stt else None
+    if said and ivr._slot(cfg).locked():
+        raise HTTPException(503, "all IVR lines busy")
+
+    def line(ev: dict) -> bytes:
+        return (json.dumps(ev) + "\n").encode()
+
+    async def events():
+        yield line({"type": "transcript", "call_id": cid, "text": said, "stt_s": stt_s})
+        if not said:
+            ivr.audit({"call_id": cid, "event": "turn", "stream": True, "transcript": "", "empty": True,
+                       "stt_s": stt_s})
+            yield line({"type": "done", "empty": True, "reply": "", "tools": [], "timings": {"stt_s": stt_s}})
+            return
+        async for ev in ivr.stream_turn(cid, c, said, s, cfg, t0):
+            if ev["type"] == "audio":
+                ev = {"type": "audio", "pcm": base64.b64encode(ev["pcm"]).decode()}
+            elif ev["type"] == "done":
+                ev["timings"]["stt_s"] = stt_s
+                ivr.audit({"call_id": cid, "event": "turn", "stream": True, "transcript": said,
+                           "reply": ev["reply"], "tools": ev["tools"], "error": ev.get("error"),
+                           **ev["timings"]})
+            yield line(ev)
+
+    return StreamingResponse(events(), media_type="application/x-ndjson",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/ivr/hangup")
