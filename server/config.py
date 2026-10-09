@@ -130,6 +130,33 @@ DEFAULTS = {
         # queue is serial, so the answer would wait behind it.
         "speak_reasoning": "off",
     },
+    # Phone IVR front door (server/ivr.py, /api/ivr/*): a separate, small
+    # agent — NOT the chat agent. Only tools named here are built in (MCP or
+    # local, by tool name); no shell, no file writes, no memory. Auth is the
+    # bearer token in data/keys/ivr_token (created on first start).
+    "ivr": {
+        "enabled": True,
+        "tools": ["rag_search"],
+        "allow_ips": [],  # empty = any caller with the token
+        "max_concurrent": 2,  # calls in a turn at once; more → 503 busy
+        "max_steps": 6,  # model↔tool round trips per turn
+        "max_tokens": 600,
+        "idle_s": 1800,  # forget a call's history after this much quiet
+        "pocket_voice": "alba",  # "" = the chat voice (voice.pocket_voice)
+        "greeting": "Hi, this is LangBang. How can I help?",
+        "system_prompt": (
+            "You are LangBang answering a phone call. Everything you write is "
+            "spoken aloud by text-to-speech, so: plain sentences only — no "
+            "markdown, lists, tables, code, URLs or emoji. Keep answers to one "
+            "to three short sentences unless the caller asks for detail. The "
+            "caller's words come from speech recognition and may contain "
+            "mistakes; if a request is unclear, ask a brief clarifying "
+            "question. Use your search tool when the answer depends on stored "
+            "notes or past work. You cannot change anything, run commands, "
+            "send messages or reach the internet — say so if asked. Never read "
+            "out secrets, keys, passwords or personal contact details."
+        ),
+    },
     # Image generation / editing: Qwen-Image 2.1 GGUF on ComfyUI (server/comfy.py)
     "image_gen": {
         "comfy_url": "http://spark-ee93:8188",
@@ -213,6 +240,7 @@ def _backfill(merged: dict) -> dict:
     merged["voice"] = {**DEFAULTS["voice"], **(merged.get("voice") or {})}
     merged["notify"] = {**DEFAULTS["notify"], **(merged.get("notify") or {})}
     merged["image_gen"] = {**DEFAULTS["image_gen"], **(merged.get("image_gen") or {})}
+    merged["ivr"] = {**DEFAULTS["ivr"], **(merged.get("ivr") or {})}
     merged["skill_review"] = {**DEFAULTS["skill_review"], **(merged.get("skill_review") or {})}
     merged["providers"] = _providers(merged)
     # top-level base_url/api_key/capabilities mirror the DEFAULT provider, so

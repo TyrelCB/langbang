@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import agent, comfy, config, fileassist, learning, mcp, notify, runs, schedule, sfxgen, ttsjobs, voice
+from . import agent, comfy, config, fileassist, ivr, learning, mcp, notify, runs, schedule, sfxgen, ttsjobs, voice
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -1340,6 +1340,100 @@ async def stt(request: Request):
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, str(e) or type(e).__name__)
     return {"text": text}
+
+
+# ---- phone IVR (server/ivr.py): separate, tool-limited agent ----
+
+def _ivr_gate(request: Request) -> tuple[dict, dict]:
+    s = config.load()
+    cfg = s["ivr"]
+    why = ivr.check_auth(request.headers.get("authorization"),
+                         request.client.host if request.client else None, cfg)
+    if why:
+        raise HTTPException(403 if "allow_ips" in why or "disabled" in why else 401, why)
+    return s, cfg
+
+
+async def _ivr_say(text: str, s: dict, cfg: dict, out: str, rate: int) -> dict:
+    t = time.time()
+    try:
+        audio = await ivr.turn_audio(text, s, cfg, out, rate)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"TTS failed: {e}")
+    return {"audio_b64": base64.b64encode(audio).decode(), "audio_format": out,
+            "sample_rate": rate, "tts_s": round(time.time() - t, 2)}
+
+
+@app.post("/api/ivr/start")
+async def ivr_start(request: Request, call_id: str = "", out: str = "wav", rate: int = 8000):
+    """New call → {call_id, reply (greeting), audio_b64}. Optional: the
+    bridge can skip this and play its own greeting."""
+    s, cfg = _ivr_gate(request)
+    cid, _ = ivr.call(call_id, cfg)
+    greet = cfg.get("greeting") or ""
+    ivr.audit({"call_id": cid, "event": "start", "ip": request.client.host if request.client else None})
+    return {"call_id": cid, "reply": greet, **(await _ivr_say(greet, s, cfg, out, rate) if greet else {})}
+
+
+@app.post("/api/ivr/turn")
+async def ivr_turn(request: Request, call_id: str = "", fmt: str = "auto",
+                   out: str = "wav", rate: int = 8000):
+    """One caller utterance → spoken reply.
+    Body: raw audio (fmt=auto for wav/mp3/ogg…, or pcm16k|pcm8k|ulaw8k|alaw8k
+    for headerless frames) — or JSON {"text": ...} to skip STT (DTMF menus,
+    testing). Returns JSON {call_id, transcript, reply, tools, audio_b64,
+    audio_format, sample_rate, timings}. 503 = all lines busy."""
+    s, cfg = _ivr_gate(request)
+    cid, c = ivr.call(call_id, cfg)
+    body = await request.body()
+    timing = {}
+    t0 = time.time()
+    if (request.headers.get("content-type") or "").startswith("application/json"):
+        try:
+            said = str(json.loads(body or b"{}").get("text") or "").strip()
+        except ValueError:
+            raise HTTPException(400, "bad JSON body")
+    else:
+        if not body:
+            raise HTTPException(400, "empty audio body")
+        if len(body) > ivr.MAX_AUDIO_BYTES:
+            raise HTTPException(413, "audio too large (max 10 MB)")
+        try:
+            pcm = await run_in_threadpool(ivr.to_pcm16k, body, fmt)
+            said = (await run_in_threadpool(voice.transcribe, pcm, s)).strip()
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f"STT failed: {e}")
+        timing["stt_s"] = round(time.time() - t0, 2)
+    if not said:
+        r = {"reply": "Sorry, I didn't catch that. Could you say it again?", "tools": []}
+    else:
+        t1 = time.time()
+        try:
+            r = await ivr.reply(cid, c, said, s, cfg)
+        except ivr.Busy as e:
+            raise HTTPException(503, str(e))
+        except Exception as e:  # noqa: BLE001
+            ivr.logger.exception("ivr turn failed")
+            r = {"reply": "Sorry, something went wrong on my end. Please try again.",
+                 "tools": [], "error": f"{type(e).__name__}: {e}"}
+        timing["agent_s"] = round(time.time() - t1, 2)
+    spoken = await _ivr_say(r["reply"], s, cfg, out, rate)
+    timing["tts_s"] = spoken.pop("tts_s")
+    timing["total_s"] = round(time.time() - t0, 2)
+    ivr.audit({"call_id": cid, "event": "turn", "transcript": said, "reply": r["reply"],
+               "tools": r["tools"], "error": r.get("error"), **timing})
+    return {"call_id": cid, "transcript": said, **r, **spoken, "timings": timing}
+
+
+@app.post("/api/ivr/hangup")
+async def ivr_hangup(request: Request, call_id: str):
+    _ivr_gate(request)
+    ivr.audit({"call_id": call_id, "event": "hangup"})
+    return {"ok": ivr.hangup(call_id)}
 
 
 # ---- web UI ----
