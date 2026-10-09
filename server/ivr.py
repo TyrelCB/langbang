@@ -51,8 +51,8 @@ logger = logging.getLogger("langbang.ivr")
 TOKEN_PATH = os.path.join(config.DATA_DIR, "keys", "ivr_token")
 LOG_DIR = os.path.join(config.DATA_DIR, "ivr")
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
-MAX_TURNS_KEPT = 24
-MAX_MESSAGES_PER_CALL = 3  # messages of history sent back to the model per call
+PINNED_MSGS = 4  # a call's first two exchanges (who's calling, and why) always stay
+MAX_MESSAGES_PER_CALL = 3  # take_message sends per call
 MAX_KNOWLEDGE_CHARS = 40_000  # reference document cap (~10k tokens)
 
 # input formats: "auto" = anything ffmpeg can probe (wav/mp3/ogg/…);
@@ -146,6 +146,20 @@ def call(cid: str | None, cfg: dict, caller: str = "") -> tuple[str, dict]:
 
 def hangup(cid: str) -> bool:
     return _calls.pop(cid, None) is not None
+
+
+def history(c: dict, cfg: dict) -> list:
+    """The call's history sent to the model: all of it while it fits
+    ivr.max_history messages, then the opening exchanges (PINNED_MSGS — the
+    caller's name and reason usually come first) plus the most recent ones.
+    Spoken exchanges are short (~25 tokens a message), so the default 160
+    holds a 30+ minute call in ~4k tokens. Also trims what's kept in RAM."""
+    cap = max(PINNED_MSGS + 2, int(cfg.get("max_history") or 160))
+    cap -= cap % 2  # whole exchanges: the kept tail must start on a caller turn
+    msgs = c["msgs"]
+    if len(msgs) > cap:
+        msgs = c["msgs"] = msgs[:PINNED_MSGS] + msgs[-(cap - PINNED_MSGS):]
+    return list(msgs)
 
 
 def _slot(cfg: dict) -> asyncio.Semaphore:
@@ -396,7 +410,7 @@ async def reply(cid: str, c: dict, said: str, s: dict, cfg: dict) -> dict:
         raise Busy("all IVR lines busy")
     async with sem:
         tools = await _tools(s, cfg, cid, c)
-        hist = c["msgs"][-MAX_TURNS_KEPT:]
+        hist = history(c, cfg)
         err = None
         for conn, j, eb in _attempts(s, cfg):
             if err is not None and isinstance(err, _UNREACHABLE) and conn["base_url"] == err.base_url:
@@ -545,7 +559,7 @@ async def reply_stream(cid: str, c: dict, said: str, s: dict, cfg: dict, ctl: di
         raise Busy("all IVR lines busy")
     async with sem:
         tools = await _tools(s, cfg, cid, c)
-        hist = c["msgs"][-MAX_TURNS_KEPT:]
+        hist = history(c, cfg)
         parts: list[str] = []
         final: list = []
         err = None
