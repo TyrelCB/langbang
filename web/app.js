@@ -21,7 +21,7 @@ let pendingImages = []; // data URLs awaiting send
 let pendingFiles = []; // {file} non-image attachments, uploaded at send time
 let uploading = false; // blocks re-Enter while attachment bytes are in flight
 const MAX_IMAGES = 4;
-const MAX_IMG_BYTES = 6 * 1024 * 1024;
+const MAX_IMG_B64 = 7_000_000; // data-URL length cap, mirrors main.py MAX_IMG_B64
 // non-image attachments upload to data/uploads/ on send; caps mirror main.py
 const MAX_FILES = 6;
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
@@ -268,17 +268,54 @@ const fmtBytes = (n) =>
     : n >= 1024 ? Math.round(n / 1024) + " kB" : n + " B";
 
 // ---------- images: paste / attach ----------
-function addImage(file) {
-  if (!file || !supportsVision) return;
-  if (!IMG_TYPE_RE.test(file.type)) return;
-  if (pendingImages.length >= MAX_IMAGES) return;
-  if (file.size > MAX_IMG_BYTES) return;
+// Phone photos are routinely 5-15 MB / 12 MP — over the server's ~5 MB cap
+// and far more pixels than the vision encoder uses — so anything big (or in a
+// format the server won't take, e.g. HEIC/AVIF/BMP when the browser can
+// decode it) is redrawn to ≤ IMG_MAX_EDGE px JPEG. Small png/jpeg/webp/gif
+// pass through untouched (keeps gif animation + png sharpness).
+const IMG_MAX_EDGE = 2048;
+const IMG_PASS_BYTES = 1.5 * 1024 * 1024;
+const readDataURL = (blob) => new Promise((ok, bad) => {
   const fr = new FileReader();
-  fr.onload = () => {
-    pendingImages.push(fr.result);
+  fr.onload = () => ok(fr.result);
+  fr.onerror = () => bad(fr.error);
+  fr.readAsDataURL(blob);
+});
+async function shrinkImage(file) {
+  const bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+  const k = Math.min(1, IMG_MAX_EDGE / Math.max(bmp.width, bmp.height));
+  const c = document.createElement("canvas");
+  c.width = Math.round(bmp.width * k);
+  c.height = Math.round(bmp.height * k);
+  const g = c.getContext("2d");
+  g.fillStyle = "#fff"; // transparent png → jpeg: white, not black
+  g.fillRect(0, 0, c.width, c.height);
+  g.drawImage(bmp, 0, 0, c.width, c.height);
+  bmp.close();
+  return c.toDataURL("image/jpeg", 0.88);
+}
+async function addImage(file) {
+  if (!file || !supportsVision) return;
+  if (pendingImages.length >= MAX_IMAGES) {
+    addMsg("error", `⚠ max ${MAX_IMAGES} images per message — ${file.name || "image"} dropped`);
+    return;
+  }
+  try {
+    let url;
+    if (IMG_TYPE_RE.test(file.type) && file.size <= IMG_PASS_BYTES) {
+      (await createImageBitmap(file)).close(); // decodes? else → catch, not a 400 at SEND
+      url = await readDataURL(file);
+    } else url = await shrinkImage(file);
+    if (url.length > MAX_IMG_B64) throw new Error("still too large after resizing");
+    if (pendingImages.length >= MAX_IMAGES) return; // raced past the cap while decoding
+    pendingImages.push(url);
     renderAttachStrip();
-  };
-  fr.readAsDataURL(file);
+  } catch (e) {
+    // undecodable here (HEIC on desktop Chrome, corrupt file): hand it to the
+    // agent as a plain file rather than losing it
+    addMsg("error", `⚠ couldn't load ${file.name || "image"} as an image (${e.message || e}) — attached as a file instead`);
+    addFile(file);
+  }
 }
 
 // ---------- non-image attachments: upload on send, agent reads from disk ---
@@ -301,7 +338,7 @@ function addFile(file) {
 // file attachment the agent opens from disk with its tools
 function ingestFiles(list) {
   for (const f of list || []) {
-    if (IMG_TYPE_RE.test(f.type) && supportsVision) addImage(f);
+    if (f.type.startsWith("image/") && supportsVision) addImage(f);
     else addFile(f);
   }
 }
