@@ -459,3 +459,27 @@ The backing model runs on one DGX Spark (GB10): ~20–25 tok/s decode,
 ~1.5–2.5k tok/s prefill. Keep system prompts small and let auto-compaction
 (above) keep histories bounded; the UI shows token streaming so nothing feels
 frozen. Long MCP tool outputs are truncated at the source and in the UI.
+
+## Phone IVR endpoint (`/api/ivr/*`)
+
+For an external telephony bridge (custom Python IVR). LangBang does STT and
+TTS; the agent behind it is **not** the chat agent: it is built from
+`settings.ivr.tools` (default `rag_search` only), with no shell, file writes,
+email, memory or skills. `run_bash`, `write_file`, the scheduler mutators,
+`generate_image` and `rag_ingest_*` are refused even if listed. Reasoning is
+off, replies are written for speech, and per-call history lives in RAM
+(expires after `ivr.idle_s`). Every turn is appended to `data/ivr/calls.jsonl`.
+
+Auth: `Authorization: Bearer $(cat data/keys/ivr_token)` (created on first
+use, mode 0600); optionally narrowed with `ivr.allow_ips`.
+
+| Call | Body | Returns |
+|---|---|---|
+| `POST /api/ivr/start?call_id=&out=wav&rate=8000` | — | `{call_id, reply, audio_b64, …}` greeting |
+| `POST /api/ivr/turn?call_id=&fmt=auto&out=wav&rate=8000` | raw audio, or JSON `{"text": …}` to skip STT | `{call_id, transcript, reply, tools, audio_b64, audio_format, sample_rate, timings}` |
+| `POST /api/ivr/hangup?call_id=` | — | `{ok}` |
+
+`fmt`: `auto` (wav/mp3/ogg…), or headerless `pcm16k`, `pcm8k`, `ulaw8k`,
+`alaw8k`. `out`: `wav`, `pcm`, `ulaw`, `alaw`, `mp3` at `rate` Hz.
+`503` = all `ivr.max_concurrent` lines busy. Empty speech gets a "didn't catch
+that" reply without a model call.
