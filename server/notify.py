@@ -31,8 +31,10 @@ _seq = 0
 PRESENCE: dict[str, dict] = {}  # tab id -> {tid, visible, ts}
 PRESENCE_TTL = 15.0  # a tab silent this long (closed / asleep) isn't watching
 
-KIND_TAG = {"input": "raising_hand", "done": "white_check_mark", "failed": "x"}
-KIND_WORD = {"input": "needs your input", "done": "finished", "failed": "failed"}
+KIND_TAG = {"input": "raising_hand", "done": "white_check_mark", "failed": "x",
+            "message": "telephone_receiver"}
+KIND_WORD = {"input": "needs your input", "done": "finished", "failed": "failed",
+             "message": "phone message"}
 
 
 def defaults() -> dict:
@@ -152,6 +154,22 @@ def learned(tid: str, title: str, results: list[dict]) -> None:
                    "title": title, "text": text[:280]})
 
 
+async def phone_message(title: str, text: str) -> dict:
+    """A message a caller left via the IVR (ivr.take_message): toast in every
+    open tab AND a phone push — always, not presence-gated: nobody is
+    "watching" a phone call from a browser tab."""
+    global _seq
+    _seq += 1
+    ev = {"id": _seq, "ts": time.time(), "kind": "message", "tid": None,
+          "title": title[:80],
+          "text": "\n".join(" ".join(ln.split()) for ln in text.splitlines() if ln.strip())[:600]}
+    EVENTS.append(ev)
+    s = settings()
+    if not (s["ntfy_enabled"] and s["ntfy_topic"]):
+        return {"ok": False, "error": "ntfy not enabled (CONFIG → NOTIFICATIONS)"}
+    return await send_ntfy({**ev, "priority": 4}, {**s, "preview": True})
+
+
 async def send_ntfy(ev: dict, s: dict | None = None) -> dict:
     """POST one message to the ntfy topic. Returns {ok, status|error}."""
     s = s or settings()
@@ -160,7 +178,7 @@ async def send_ntfy(ev: dict, s: dict | None = None) -> dict:
         "title": f"{ev['title'][:80]} — {KIND_WORD.get(ev['kind'], ev['kind'])}",
         "message": (ev.get("text") if s.get("preview", True) else "") or KIND_WORD.get(ev["kind"], ""),
         "tags": [KIND_TAG.get(ev["kind"], "bell")],
-        "priority": 4 if ev["kind"] in ("input", "failed") else 3,
+        "priority": ev.get("priority") or (4 if ev["kind"] in ("input", "failed") else 3),
     }
     if s.get("click_base") and ev.get("tid"):
         body["click"] = s["click_base"].rstrip("/") + "/?thread=" + ev["tid"]

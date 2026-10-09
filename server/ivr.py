@@ -23,6 +23,7 @@ import io
 import json
 import logging
 import os
+import re
 import secrets
 import subprocess
 import time
@@ -33,15 +34,17 @@ import openai
 from fastapi.concurrency import run_in_threadpool
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.tools import tool
 
-from . import agent, config, local_tools, mcp, voice
+from . import agent, config, local_tools, mcp, notify, voice
 
 logger = logging.getLogger("langbang.ivr")
 
 TOKEN_PATH = os.path.join(config.DATA_DIR, "keys", "ivr_token")
 LOG_DIR = os.path.join(config.DATA_DIR, "ivr")
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
-MAX_TURNS_KEPT = 24  # messages of history sent back to the model per call
+MAX_TURNS_KEPT = 24
+MAX_MESSAGES_PER_CALL = 3  # messages of history sent back to the model per call
 
 # input formats: "auto" = anything ffmpeg can probe (wav/mp3/ogg/…);
 # headerless telephony frames must say what they are
@@ -120,11 +123,15 @@ def _sweep(idle_s: float) -> None:
         _calls.pop(cid, None)
 
 
-def call(cid: str | None, cfg: dict) -> tuple[str, dict]:
+def call(cid: str | None, cfg: dict, caller: str = "") -> tuple[str, dict]:
+    """caller: the bridge's caller ID (?caller=), if it has one — attached to
+    take_message pushes so a message is never orphaned from its number."""
     _sweep(float(cfg.get("idle_s") or 1800))
     cid = (cid or "").strip()[:64] or uuid.uuid4().hex[:12]
-    c = _calls.setdefault(cid, {"msgs": [], "t": time.time(), "turns": 0})
+    c = _calls.setdefault(cid, {"msgs": [], "t": time.time(), "turns": 0, "caller": "", "left": 0})
     c["t"] = time.time()
+    if caller:
+        c["caller"] = caller.strip()[:40]
     return cid, c
 
 
@@ -196,14 +203,60 @@ def speak(text: str, s: dict, cfg: dict, out: str, rate: int) -> bytes:
 
 # ---- the agent ----
 
-async def _tools(s: dict, cfg: dict) -> list:
+def _take_message(cid: str, c: dict):
+    """Per-call tool: the one thing a caller can make happen. Fixed target
+    (Tyrel's ntfy topic + data/ivr/messages.jsonl), fixed shape, capped per
+    call — the worst a manipulated model can do is a strange message."""
+    @tool
+    async def take_message(caller_name: str, message: str, callback_number: str = "") -> str:
+        """Send the caller's message to Tyrel. Call this ONLY after the caller
+        has actually told you their name and their message in this call —
+        never with placeholders or guesses; if either is missing, ask the
+        caller instead of calling this. caller_name: the name they gave.
+        message: what they want Tyrel to know, in their words.
+        callback_number: only if they gave one."""
+        if c["left"] >= MAX_MESSAGES_PER_CALL:
+            return "ERROR: message limit for this call reached; tell the caller it's already been passed on."
+        name = " ".join(caller_name.split())[:80] or "unknown caller"
+        body = " ".join(message.split())[:500]
+        filler = re.compile(r"\b(unknown|placeholder|tbd|n/?a|not (yet )?(given|provided)|"
+                            r"still needed|to be (provided|determined)|caller)\b", re.I)
+        if not body or len(body.split()) < 2 or filler.search(body) or \
+                not re.search(r"[A-Za-z]", name) or filler.fullmatch(name.strip()) or \
+                name.lower() in ("unknown caller", "the caller", "anonymous caller"):
+            return ("ERROR: not sent — you don't have the caller's name and message yet. "
+                    "Ask the caller for them, then call take_message with their actual words.")
+        cb = " ".join(callback_number.split())[:40]
+        row = {"ts": round(time.time(), 3), "call_id": cid, "caller_id": c["caller"],
+               "name": name, "callback": cb, "message": body}
+        try:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            with open(os.path.join(LOG_DIR, "messages.jsonl"), "a") as fh:
+                fh.write(json.dumps(row) + "\n")
+        except OSError:
+            logger.exception("ivr message log write failed")
+        lines = [body, f"From: {name}"]
+        if cb:
+            lines.append(f"Callback: {cb}")
+        if c["caller"]:
+            lines.append(f"Caller ID: {c['caller']}")
+        sent = await notify.phone_message(f"📞 Message from {name}", "\n".join(lines))
+        c["left"] += 1
+        if not sent.get("ok"):
+            logger.warning("ivr message %s saved but push failed: %s", cid, sent.get("error"))
+        return "Message saved and sent to Tyrel."  # saved either way; push is best-effort
+    return take_message
+
+
+async def _tools(s: dict, cfg: dict, cid: str = "", c: dict | None = None) -> list:
     want = set(cfg.get("tools") or [])
     if want & NEVER:
         logger.warning("ivr.tools: refusing %s (never exposed to callers)", ", ".join(sorted(want & NEVER)))
         want -= NEVER
     if not want:
         return []
-    have = [t for t in local_tools.LOCAL_TOOLS if t.name in want]
+    have = [_take_message(cid, c)] if "take_message" in want and c is not None else []
+    have += [t for t in local_tools.LOCAL_TOOLS if t.name in want]
     have += [t for t in await mcp.get_tools(s.get("mcp_servers") or {}) if t.name in want]
     missing = want - {t.name for t in have}
     if missing:
@@ -223,7 +276,7 @@ async def reply(cid: str, c: dict, said: str, s: dict, cfg: dict) -> dict:
     if sem.locked():
         raise Busy("all IVR lines busy")
     async with sem:
-        tools = await _tools(s, cfg)
+        tools = await _tools(s, cfg, cid, c)
         hist = c["msgs"][-MAX_TURNS_KEPT:]
         # thinking OFF regardless of the provider's template_kwargs checkbox
         # (Qwen hybrids think by default when the switch isn't sent — minutes

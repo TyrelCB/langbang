@@ -1367,11 +1367,12 @@ async def _ivr_say(text: str, s: dict, cfg: dict, out: str, rate: int) -> dict:
 
 
 @app.post("/api/ivr/start")
-async def ivr_start(request: Request, call_id: str = "", out: str = "wav", rate: int = 8000):
+async def ivr_start(request: Request, call_id: str = "", out: str = "wav", rate: int = 8000,
+                    caller: str = ""):
     """New call → {call_id, reply (greeting), audio_b64}. Optional: the
     bridge can skip this and play its own greeting."""
     s, cfg = _ivr_gate(request)
-    cid, _ = ivr.call(call_id, cfg)
+    cid, _ = ivr.call(call_id, cfg, caller)
     greet = cfg.get("greeting") or ""
     ivr.audit({"call_id": cid, "event": "start", "ip": request.client.host if request.client else None})
     return {"call_id": cid, "reply": greet, **(await _ivr_say(greet, s, cfg, out, rate) if greet else {})}
@@ -1379,14 +1380,14 @@ async def ivr_start(request: Request, call_id: str = "", out: str = "wav", rate:
 
 @app.post("/api/ivr/turn")
 async def ivr_turn(request: Request, call_id: str = "", fmt: str = "auto",
-                   out: str = "wav", rate: int = 8000):
+                   out: str = "wav", rate: int = 8000, caller: str = ""):
     """One caller utterance → spoken reply.
     Body: raw audio (fmt=auto for wav/mp3/ogg…, or pcm16k|pcm8k|ulaw8k|alaw8k
     for headerless frames) — or JSON {"text": ...} to skip STT (DTMF menus,
     testing). Returns JSON {call_id, transcript, reply, tools, audio_b64,
     audio_format, sample_rate, timings}. 503 = all lines busy."""
     s, cfg = _ivr_gate(request)
-    cid, c = ivr.call(call_id, cfg)
+    cid, c = ivr.call(call_id, cfg, caller)
     body = await request.body()
     timing = {}
     t0 = time.time()
