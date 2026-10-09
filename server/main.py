@@ -1447,7 +1447,8 @@ async def ivr_turn(request: Request, call_id: str = "", fmt: str = "auto",
 
 
 @app.post("/api/ivr/turn/stream")
-async def ivr_turn_stream(request: Request, call_id: str = "", fmt: str = "auto", caller: str = ""):
+async def ivr_turn_stream(request: Request, call_id: str = "", fmt: str = "auto", caller: str = "",
+                          reply: int = 1):
     """One caller utterance → streamed spoken reply (see ivr.stream_turn).
     Body as /api/ivr/turn. Response: NDJSON, one event per line —
       {"type":"transcript","call_id","text","stt_s"}   first, always
@@ -1456,13 +1457,14 @@ async def ivr_turn_stream(request: Request, call_id: str = "", fmt: str = "auto"
       {"type":"done","reply","tools","timings",["error"]}
     An empty transcript (silence, ringback, a beep) ends right after the
     transcript with {"type":"done","empty":true} and NO audio — the bridge
-    decides whether to prompt again. 503 = all lines busy."""
+    decides whether to prompt again. reply=0 stops after the transcript too
+    (STT only: answer detection, "did they say anything?"). 503 = all lines busy."""
     s, cfg = _ivr_gate(request)
     cid, c = ivr.call(call_id, cfg, caller)
     t0 = time.time()
     said, stt = await _ivr_hear(request, fmt, s)
     stt_s = round(time.time() - t0, 2) if stt else None
-    if said and ivr._slot(cfg).locked():
+    if said and reply and ivr._slot(cfg).locked():
         raise HTTPException(503, "all IVR lines busy")
 
     def line(ev: dict) -> bytes:
@@ -1470,6 +1472,10 @@ async def ivr_turn_stream(request: Request, call_id: str = "", fmt: str = "auto"
 
     async def events():
         yield line({"type": "transcript", "call_id": cid, "text": said, "stt_s": stt_s})
+        if said and not reply:
+            ivr.audit({"call_id": cid, "event": "hear", "transcript": said, "stt_s": stt_s})
+            yield line({"type": "done", "reply": "", "tools": [], "timings": {"stt_s": stt_s}})
+            return
         if not said:
             ivr.audit({"call_id": cid, "event": "turn", "stream": True, "transcript": "", "empty": True,
                        "stt_s": stt_s})
