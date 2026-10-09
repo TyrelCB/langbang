@@ -230,6 +230,11 @@ body.hide-reasoning .block.thinking { display: none; }
 #attach-strip { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px; }
 #attach-strip:not(:empty) { padding-bottom: 10px; }
 #attach-strip:empty { display: none; padding: 0; }
+/* drag-and-drop target: the chat column lights up while files hover it */
+#main.drop-hot::after { content: "DROP TO ATTACH"; position: absolute; inset: 8px; z-index: 50;
+  display: flex; align-items: center; justify-content: center; pointer-events: none;
+  border: 2px dashed var(--cyan); border-radius: 10px; background: rgba(4, 16, 28, 0.72);
+  color: var(--cyan); font-weight: 700; letter-spacing: 0.2em; }
 .attach { position: relative; border: 1px solid var(--cyan-dim); background: var(--panel);
   clip-path: var(--clip); padding: 3px; }
 .attach img { display: block; max-height: 64px; max-width: 96px; object-fit: cover; }
