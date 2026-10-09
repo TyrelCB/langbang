@@ -68,7 +68,7 @@ async def stream(path: str, lang: str | None, content: str, instruction: str,
     model = agent.SGlangChatOpenAI(
         model=s["model"], base_url=s["base_url"], api_key=s["api_key"],
         temperature=0.2, max_tokens=4096, streaming=True,
-        extra_body=agent.extra_body(s, thinking=False),
+        **agent.no_think(s),
         stream_chunk_timeout=600,
     )
     try:
