@@ -17,15 +17,23 @@ Auth: Authorization: Bearer <data/keys/ivr_token> (generated on first start,
 Blocking work (ffmpeg, STT, Pocket) runs in the threadpool — see voice.py.
 Pocket synthesis shares the one generation lock with the web UI's
 read-aloud, so a long 🔊 in a browser delays a caller's reply.
+
+Two turn shapes: /api/ivr/turn returns the whole reply as one audio blob;
+/api/ivr/turn/stream (stream_turn below) streams it — the model's text is
+cut into sentences as it is written and each sentence goes to Pocket at
+once, so the caller hears the first sentence while the rest is still being
+written and synthesized.
 """
 import asyncio
 import io
 import json
 import logging
 import os
+import queue
 import re
 import secrets
 import subprocess
+import threading
 import time
 import uuid
 import wave
@@ -33,7 +41,7 @@ import wave
 import openai
 from fastapi.concurrency import run_in_threadpool
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 
 from . import agent, config, local_tools, mcp, notify, voice
@@ -45,6 +53,7 @@ LOG_DIR = os.path.join(config.DATA_DIR, "ivr")
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
 MAX_TURNS_KEPT = 24
 MAX_MESSAGES_PER_CALL = 3  # messages of history sent back to the model per call
+MAX_KNOWLEDGE_CHARS = 40_000  # reference document cap (~10k tokens)
 
 # input formats: "auto" = anything ffmpeg can probe (wav/mp3/ogg/…);
 # headerless telephony frames must say what they are
@@ -201,6 +210,45 @@ def speak(text: str, s: dict, cfg: dict, out: str, rate: int) -> bytes:
     return buf.getvalue()
 
 
+# ---- what the agent knows ----
+
+_kb_cache: dict[str, tuple[float, str]] = {}
+
+
+def knowledge(cfg: dict) -> str:
+    """ivr.knowledge_file's text (relative paths under data/), re-read when
+    its mtime changes. A missing file is logged, not fatal: the IVR still
+    answers, it just knows nothing about Tyrel."""
+    path = os.path.expanduser((cfg.get("knowledge_file") or "").strip())
+    if not path:
+        return ""
+    if not os.path.isabs(path):
+        path = os.path.join(config.DATA_DIR, path)
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        if path not in _kb_cache:
+            logger.warning("ivr.knowledge_file %s not found; answering without it", path)
+            _kb_cache[path] = (-1.0, "")
+        return ""
+    hit = _kb_cache.get(path)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        text = fh.read(MAX_KNOWLEDGE_CHARS).strip()
+    _kb_cache[path] = (mtime, text)
+    logger.info("ivr knowledge loaded: %s (%d chars)", path, len(text))
+    return text
+
+
+def system_prompt(cfg: dict) -> str:
+    base = cfg.get("system_prompt") or ""
+    kb = knowledge(cfg)
+    if not kb:
+        return base
+    return f"{base}\n\n=== REFERENCE DOCUMENT ===\n{kb}\n=== END OF REFERENCE DOCUMENT ==="
+
+
 # ---- the agent ----
 
 def _take_message(cid: str, c: dict):
@@ -270,6 +318,20 @@ def _text(content) -> str:
     return "".join(b.get("text", "") for b in content or [] if isinstance(b, dict))
 
 
+# thinking OFF regardless of the provider's template_kwargs checkbox (Qwen
+# hybrids think by default when the switch isn't sent — minutes of dead air
+# on a phone line). Only a provider that 400s on the extra arg (OpenAI
+# proper) gets the plain request.
+_THINKING_OFF = ({"chat_template_kwargs": {"enable_thinking": False}}, None)
+
+
+def _llm(s: dict, cfg: dict, extra_body: dict | None, streaming: bool):
+    return agent.SGlangChatOpenAI(
+        model=s["model"], base_url=s["base_url"], api_key=s["api_key"],
+        temperature=s.get("temperature", 0.7), max_tokens=int(cfg.get("max_tokens") or 600),
+        streaming=streaming, extra_body=extra_body)
+
+
 async def reply(cid: str, c: dict, said: str, s: dict, cfg: dict) -> dict:
     """One caller utterance → the agent's spoken answer (+ tools it used)."""
     sem = _slot(cfg)
@@ -278,16 +340,9 @@ async def reply(cid: str, c: dict, said: str, s: dict, cfg: dict) -> dict:
     async with sem:
         tools = await _tools(s, cfg, cid, c)
         hist = c["msgs"][-MAX_TURNS_KEPT:]
-        # thinking OFF regardless of the provider's template_kwargs checkbox
-        # (Qwen hybrids think by default when the switch isn't sent — minutes
-        # of dead air on a phone line). Only a provider that 400s on the
-        # extra arg (OpenAI proper) gets the plain request.
-        for eb in ({"chat_template_kwargs": {"enable_thinking": False}}, None):
-            llm = agent.SGlangChatOpenAI(
-                model=s["model"], base_url=s["base_url"], api_key=s["api_key"],
-                temperature=s.get("temperature", 0.7), max_tokens=int(cfg.get("max_tokens") or 600),
-                streaming=False, extra_body=eb)
-            graph = create_agent(llm, tools, system_prompt=cfg.get("system_prompt") or "")
+        for eb in _THINKING_OFF:
+            graph = create_agent(_llm(s, cfg, eb, streaming=False), tools,
+                                 system_prompt=system_prompt(cfg))
             try:
                 out = await graph.ainvoke(
                     {"messages": [*hist, HumanMessage(said)]},
@@ -319,3 +374,206 @@ def audit(row: dict) -> None:
 
 async def turn_audio(text: str, s: dict, cfg: dict, out: str, rate: int) -> bytes:
     return await run_in_threadpool(speak, text, s, cfg, out, rate)
+
+
+# ---- streaming turn (/api/ivr/turn/stream) ----
+
+STREAM_RATE = voice.POCKET_RATE  # streamed audio: mono s16le @ 24 kHz, Pocket's native rate
+FALLBACK_REPLY = "Sorry, I don't have an answer for that."
+ERROR_REPLY = "Sorry, something went wrong on my end. Please try again."
+
+
+def speak_pcm(text: str, s: dict, cfg: dict, stop: threading.Event | None = None):
+    """Yield mono s16le @ STREAM_RATE for `text` as it is generated (Pocket),
+    or in one piece for the non-streaming providers. Blocking: run in a thread."""
+    v = {**s["voice"]}
+    if cfg.get("pocket_voice"):
+        v["pocket_voice"] = cfg["pocket_voice"]
+    clean = voice.prepare(text, {**s, "voice": v})
+    if not clean:
+        return
+    if (v.get("tts_provider") or "gtts") == "pocket":
+        yield from voice.pocket_pcm(clean, v, stop)
+    else:
+        audio, _ = voice.synthesize(clean, {**s, "voice": v})
+        yield _ffmpeg(audio, [], ["-f", "s16le", "-ar", str(STREAM_RATE), "-ac", "1"])
+
+
+class Sentences:
+    """Cut streamed model text into speakable sentences. A sentence ends at
+    . ! ? (plus closing quotes/brackets) followed by whitespace, or at a
+    newline; "3.5" and "e.g." mid-word never split because the next char
+    isn't whitespace. Fragments shorter than `min_chars` wait for more text
+    so Pocket isn't handed "Sure." and "Okay." as separate chunks.
+
+    Until the first piece is out, a clause ending in , ; : also counts once
+    it is `first_clause` chars long: the caller hears audio as soon as there
+    is a natural pause to cut at, not after a long first sentence."""
+    _END = re.compile(r"[.!?]+[\"')\]]*\s+|\n+")
+    _CLAUSE = re.compile(r"[.!?,;:]+[\"')\]]*\s+|\n+")
+    _ABBREV = re.compile(r"(?:\b(?:e\.g|i\.e|etc|vs|Mr|Mrs|Ms|Dr|St|Jr|Sr|Inc|Co|No)|\b[A-Z])\.$")
+
+    def __init__(self, min_chars: int = 12, first_clause: int = 40):
+        self.buf, self.min, self.first, self.started = "", min_chars, first_clause, False
+
+    def feed(self, text: str) -> list[str]:
+        self.buf += text
+        out, start = [], 0
+        if not self.started:
+            for m in self._CLAUSE.finditer(self.buf):
+                piece = self.buf[:m.end()].strip()
+                if self._ABBREV.search(piece):
+                    continue
+                ends_sentence = bool(self._END.fullmatch(m.group()))
+                if len(piece) >= (self.min if ends_sentence else self.first):
+                    out.append(piece)
+                    start = m.end()
+                    self.started = True
+                    break
+        for m in self._END.finditer(self.buf, start):
+            piece = self.buf[start:m.end()].strip()
+            if len(piece) >= self.min and not self._ABBREV.search(piece):
+                out.append(piece)
+                start = m.end()
+        self.buf = self.buf[start:]
+        return out
+
+    def flush(self) -> list[str]:
+        rest, self.buf = self.buf.strip(), ""
+        self.started = True
+        return [rest] if rest else []
+
+
+async def reply_stream(cid: str, c: dict, said: str, s: dict, cfg: dict):
+    """reply(), streamed: yields ("text", delta) as the model writes what the
+    caller will hear, then ("done", {reply, tools, fallback}). Same tools,
+    prompt and history rules as reply(). Text the model writes before a tool
+    call ("Let me check.") is spoken too — natural filler while the tool runs."""
+    sem = _slot(cfg)
+    if sem.locked():
+        raise Busy("all IVR lines busy")
+    async with sem:
+        tools = await _tools(s, cfg, cid, c)
+        hist = c["msgs"][-MAX_TURNS_KEPT:]
+        parts: list[str] = []
+        final: list = []
+        for eb in _THINKING_OFF:
+            graph = create_agent(_llm(s, cfg, eb, streaming=True), tools,
+                                 system_prompt=system_prompt(cfg))
+            last_id = None
+            try:
+                async for mode, data in graph.astream(
+                        {"messages": [*hist, HumanMessage(said)]},
+                        {"recursion_limit": 2 * int(cfg.get("max_steps") or 6) + 2},
+                        stream_mode=["messages", "values"]):
+                    if mode == "values":
+                        final = data.get("messages") or final
+                        continue
+                    chunk = data[0]
+                    if not isinstance(chunk, AIMessageChunk):
+                        continue
+                    t = _text(chunk.content)
+                    if not t:
+                        continue
+                    if parts and chunk.id != last_id:  # a new model step: keep words apart
+                        t = " " + t
+                    last_id = chunk.id
+                    parts.append(t)
+                    yield ("text", t)
+                break
+            except openai.BadRequestError as e:
+                if eb is None or parts or "chat_template_kwargs" not in str(e):
+                    raise
+                logger.warning("provider rejected chat_template_kwargs; IVR asking without it")
+        new = final[len(hist) + 1:]
+        used = [m.name for m in new if isinstance(m, ToolMessage)]
+        text = "".join(parts).strip()
+        c["msgs"] += [HumanMessage(said), AIMessage(text or "…")]
+        c["turns"] += 1
+        yield ("done", {"reply": text or FALLBACK_REPLY, "tools": used, "fallback": not text})
+
+
+async def stream_turn(cid: str, c: dict, said: str, s: dict, cfg: dict, t0: float):
+    """Drive one streamed turn. Yields event dicts:
+      {"type": "text", "text": delta}         model output as written
+      {"type": "audio", "pcm": bytes}         s16le mono @ STREAM_RATE, as synthesized
+      {"type": "done", "reply", "tools", "timings", ["error"]}
+    The model runs as a task feeding sentences to one speaker thread (Pocket
+    is single-generation anyway), so synthesis of sentence 1 overlaps the
+    model writing sentence 2. Closing the generator (client hung up) stops
+    both."""
+    loop = asyncio.get_running_loop()
+    out: asyncio.Queue = asyncio.Queue()
+    todo: queue.Queue = queue.Queue()
+    stop = threading.Event()
+    marks: dict[str, float] = {}
+
+    def emit(ev):
+        loop.call_soon_threadsafe(out.put_nowait, ev)
+
+    def speaker():
+        try:
+            while (text := todo.get()) is not None:
+                if stop.is_set():
+                    continue
+                for pcm in speak_pcm(text, s, cfg, stop):
+                    emit(("audio", pcm))
+        except Exception as e:  # noqa: BLE001
+            logger.exception("ivr stream TTS failed")
+            emit(("tts_error", f"{type(e).__name__}: {e}"))
+        finally:
+            emit(("spoken", None))
+
+    async def think():
+        split, result = Sentences(), None
+        try:
+            async for kind, val in reply_stream(cid, c, said, s, cfg):
+                if kind == "text":
+                    marks.setdefault("first_text_s", time.time() - t0)
+                    await out.put(("text", val))
+                    for sentence in split.feed(val):
+                        todo.put(sentence)
+                else:
+                    result = val
+            marks["agent_s"] = time.time() - t0
+            for sentence in split.flush():
+                todo.put(sentence)
+            if result["fallback"]:
+                todo.put(result["reply"])
+        except Exception as e:  # noqa: BLE001
+            logger.exception("ivr stream turn failed")
+            result = {"reply": ERROR_REPLY, "tools": [], "error": f"{type(e).__name__}: {e}"}
+            todo.put(ERROR_REPLY)
+        finally:
+            todo.put(None)
+            await out.put(("thought", result))
+
+    threading.Thread(target=speaker, daemon=True, name=f"ivr-tts-{cid}").start()
+    task = asyncio.create_task(think())
+    result, spoken, tts_error = None, False, None
+    try:
+        while not (spoken and result is not None):
+            kind, val = await out.get()
+            if kind == "text":
+                yield {"type": "text", "text": val}
+            elif kind == "audio":
+                marks.setdefault("first_audio_s", time.time() - t0)
+                yield {"type": "audio", "pcm": val}
+            elif kind == "thought":
+                result = val
+            elif kind == "tts_error":
+                tts_error = val
+            elif kind == "spoken":
+                spoken = True
+        timings = {k: round(v, 2) for k, v in marks.items()}
+        timings["total_s"] = round(time.time() - t0, 2)
+        ev = {"type": "done", "reply": result["reply"], "tools": result["tools"], "timings": timings}
+        err = result.get("error") or (f"TTS failed: {tts_error}" if tts_error else None)
+        if err:
+            ev["error"] = err
+        yield ev
+    finally:
+        stop.set()
+        todo.put(None)  # release the speaker if think() never got to
+        if not task.done():
+            task.cancel()
