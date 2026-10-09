@@ -1430,8 +1430,19 @@ async def ivr_turn(request: Request, call_id: str = "", fmt: str = "auto",
 
 
 @app.post("/api/ivr/hangup")
-async def ivr_hangup(request: Request, call_id: str):
+async def ivr_hangup(request: Request, call_id: str = ""):
+    """call_id as ?call_id= or in a JSON / form body."""
     _ivr_gate(request)
+    if not call_id:
+        body = await request.body()
+        try:
+            call_id = str((json.loads(body) if body.strip().startswith(b"{") else
+                           dict(x.split("=", 1) for x in body.decode().split("&") if "=" in x)
+                           ).get("call_id") or "")
+        except ValueError:
+            pass
+    if not call_id:
+        raise HTTPException(400, "call_id required (?call_id= or JSON body)")
     ivr.audit({"call_id": call_id, "event": "hangup"})
     return {"ok": ivr.hangup(call_id)}
 
