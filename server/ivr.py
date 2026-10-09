@@ -444,11 +444,15 @@ class Sentences:
         return [rest] if rest else []
 
 
-async def reply_stream(cid: str, c: dict, said: str, s: dict, cfg: dict):
+async def reply_stream(cid: str, c: dict, said: str, s: dict, cfg: dict, ctl: dict | None = None):
     """reply(), streamed: yields ("text", delta) as the model writes what the
-    caller will hear, then ("done", {reply, tools, fallback}). Same tools,
-    prompt and history rules as reply(). Text the model writes before a tool
-    call ("Let me check.") is spoken too — natural filler while the tool runs."""
+    caller will hear, then ("done", {reply, tools, fallback, cut}). Same
+    tools, prompt and history rules as reply(). Text the model writes before
+    a tool call ("Let me check.") is spoken too — natural filler while the
+    tool runs. `ctl`: the consumer sets ctl["stop"] to cancel the model
+    mid-answer and ctl["spoken"] to what was actually said, which is then
+    what history records."""
+    ctl = ctl if ctl is not None else {}
     sem = _slot(cfg)
     if sem.locked():
         raise Busy("all IVR lines busy")
@@ -461,11 +465,14 @@ async def reply_stream(cid: str, c: dict, said: str, s: dict, cfg: dict):
             graph = create_agent(_llm(s, cfg, eb, streaming=True), tools,
                                  system_prompt=system_prompt(cfg))
             last_id = None
+            stream = graph.astream(
+                {"messages": [*hist, HumanMessage(said)]},
+                {"recursion_limit": 2 * int(cfg.get("max_steps") or 6) + 2},
+                stream_mode=["messages", "values"])
             try:
-                async for mode, data in graph.astream(
-                        {"messages": [*hist, HumanMessage(said)]},
-                        {"recursion_limit": 2 * int(cfg.get("max_steps") or 6) + 2},
-                        stream_mode=["messages", "values"]):
+                async for mode, data in stream:
+                    if ctl.get("stop"):
+                        break
                     if mode == "values":
                         final = data.get("messages") or final
                         continue
@@ -485,12 +492,16 @@ async def reply_stream(cid: str, c: dict, said: str, s: dict, cfg: dict):
                 if eb is None or parts or "chat_template_kwargs" not in str(e):
                     raise
                 logger.warning("provider rejected chat_template_kwargs; IVR asking without it")
+            finally:
+                await stream.aclose()  # cut: cancels the in-flight model request
         new = final[len(hist) + 1:]
         used = [m.name for m in new if isinstance(m, ToolMessage)]
-        text = "".join(parts).strip()
+        cut = bool(ctl.get("stop"))
+        text = (ctl.get("spoken") if cut else "".join(parts)) or ""
+        text = text.strip()
         c["msgs"] += [HumanMessage(said), AIMessage(text or "…")]
         c["turns"] += 1
-        yield ("done", {"reply": text or FALLBACK_REPLY, "tools": used, "fallback": not text})
+        yield ("done", {"reply": text or FALLBACK_REPLY, "tools": used, "fallback": not text, "cut": cut})
 
 
 async def stream_turn(cid: str, c: dict, said: str, s: dict, cfg: dict, t0: float):
@@ -524,20 +535,40 @@ async def stream_turn(cid: str, c: dict, said: str, s: dict, cfg: dict, t0: floa
         finally:
             emit(("spoken", None))
 
+    limit = int(cfg.get("max_spoken_words") or 0)
+    ctl: dict = {"spoken": ""}
+
+    def say(sentence: str) -> bool:
+        """Queue a sentence unless it would take the answer past the word
+        cap (the first sentence always goes, however long)."""
+        if limit and ctl["spoken"] and len(ctl["spoken"].split()) + len(sentence.split()) > limit:
+            ctl["stop"] = True
+            return False
+        todo.put(sentence)
+        ctl["spoken"] = f"{ctl['spoken']} {sentence}".strip()
+        return True
+
     async def think():
         split, result = Sentences(), None
         try:
-            async for kind, val in reply_stream(cid, c, said, s, cfg):
+            async for kind, val in reply_stream(cid, c, said, s, cfg, ctl):
                 if kind == "text":
+                    if ctl.get("stop"):
+                        continue
                     marks.setdefault("first_text_s", time.time() - t0)
                     await out.put(("text", val))
                     for sentence in split.feed(val):
-                        todo.put(sentence)
+                        if not say(sentence):
+                            break
                 else:
                     result = val
             marks["agent_s"] = time.time() - t0
-            for sentence in split.flush():
-                todo.put(sentence)
+            if not ctl.get("stop"):
+                for sentence in split.flush():
+                    say(sentence)
+                if ctl.get("stop"):  # the cap hit on the last fragment: history must match what was said
+                    c["msgs"][-1] = AIMessage(ctl["spoken"])
+                    result = {**result, "reply": ctl["spoken"], "cut": True}
             if result["fallback"]:
                 todo.put(result["reply"])
         except Exception as e:  # noqa: BLE001
@@ -568,6 +599,8 @@ async def stream_turn(cid: str, c: dict, said: str, s: dict, cfg: dict, t0: floa
         timings = {k: round(v, 2) for k, v in marks.items()}
         timings["total_s"] = round(time.time() - t0, 2)
         ev = {"type": "done", "reply": result["reply"], "tools": result["tools"], "timings": timings}
+        if result.get("cut"):
+            ev["cut"] = True
         err = result.get("error") or (f"TTS failed: {tts_error}" if tts_error else None)
         if err:
             ev["error"] = err

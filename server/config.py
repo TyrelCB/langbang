@@ -141,6 +141,10 @@ DEFAULTS = {
         "max_concurrent": 2,  # calls in a turn at once; more → 503 busy
         "max_steps": 6,  # model↔tool round trips per turn
         "max_tokens": 600,
+        # streamed turns stop speaking at the first sentence end past this many
+        # words (the model is cancelled); 0 = no cap. Phone answers that run
+        # long lose the caller — the prompt asks for brevity, this enforces it.
+        "max_spoken_words": 50,
         "idle_s": 1800,  # forget a call's history after this much quiet
         "pocket_voice": "alba",  # "" = the chat voice (voice.pocket_voice)
         "greeting": "Hi, this is LangBang, Tyrel's assistant. How can I help?",
@@ -160,8 +164,10 @@ DEFAULTS = {
             "ask for detail. Get dates right — check them against the document. "
             "The caller's words come from speech recognition and may "
             "contain mistakes; if a request is unclear, ask a brief clarifying "
-            "question. Speech recognition often writes Tyrel's name as Tyrell, "
-            "Terrell, Tyler or Darrell — treat those as Tyrel. "
+            "question. Speech recognition mangles Tyrel's name (Tyrell, Terrell, "
+            "Tyler, Tara, Darrell…): anyone asking about \"Barstow\", or about a "
+            "name that sounds like Tyrel, means Tyrel Barstow — answer about him "
+            "and don't point out the misspelling. "
             "Answer questions about Tyrel — his work history, skills, projects, "
             "education and background — from the reference document below, and "
             "use your general knowledge for everything else, such as explaining "
