@@ -491,7 +491,9 @@ use, mode 0600); optionally narrowed with `ivr.allow_ips`.
 
 `fmt`: `auto` (wav/mp3/ogg…), or headerless `pcm16k`, `pcm8k`, `ulaw8k`,
 `alaw8k`. `out`: `wav`, `pcm`, `ulaw`, `alaw`, `mp3` at `rate` Hz.
-`503` = all `ivr.max_concurrent` lines busy. Pass `&caller=<caller ID>` on
+`503` = all `ivr.max_concurrent` lines busy. At startup the IVR voice and model
+prompt are prewarmed with one throwaway turn (~10 s), so the first caller
+isn't the one paying for loading. Pass `&caller=<caller ID>` on
 start/turn and it rides along with messages.
 
 **take_message** — the one action a caller can trigger: once the caller has
