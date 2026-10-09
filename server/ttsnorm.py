@@ -107,10 +107,10 @@ _TZ_ALT = "|".join(sorted(_TZ, key=len, reverse=True))
 _SAY_AS_WORD = {"NASA", "NATO", "RAM", "ROM", "GIF", "JPEG", "PNG", "LAN", "WAN", "SIM",
                 "PIN", "FAQ", "ASAP", "SCUBA", "LASER", "RADAR", "WIFI", "CAPTCHA", "CRUD",
                 "OK", "NOAA", "FEMA", "OPEC", "UNICEF", "AIDS", "COVID", "YAML", "JSON",
-                "SQL", "GUI", "MCP", "LLM", "TTS", "ASR", "CPU", "GPU", "API", "URL"}
-# (the last row are initialisms people DO spell — kept out of the generic
-#  letter-spacer because TTS models already say them letter by letter; spacing
-#  them only adds pauses)
+                "GUI", "SONET", "CIGNA", "RADIUS", "ITIL", "SPAN"}
+# (MCP/LLM/API/SQL/CPU… used to be listed here on the theory that TTS models
+#  spell them anyway — Pocket doesn't: a 2026-10-09 Pocket → faster-whisper
+#  round trip heard "mcpservers", "lmtools", "restapp", "esql". Spelled now.)
 
 _CAPS_WORDS = {"AN", "AND", "THE", "FOR", "NOT", "BUT", "ALL", "NEW", "OFF", "ON", "IN", "TO",
                "OF", "IS", "IT", "NO", "YES", "RUN", "GO", "DO", "UP", "OR", "AT", "BY", "WE",
@@ -226,6 +226,18 @@ _SYMBOLS = [("±", " plus or minus "), ("≥", " at least "), ("≤", " at most 
 # LAB_TEST_POLICY, 204/204, 802.1X. _tech() rewrites them BEFORE the generic
 # number passes, which would otherwise shred them ("Gi1/zero/one").
 
+def model_num(s: str) -> str:
+    """4-digit product numbers in pairs: 6509 → sixty-five oh nine, 2800 →
+    twenty-eight hundred, 2000 → two thousand, 6880 → sixty-eight eighty."""
+    n = int(s)
+    hi, lo = divmod(n, 100)
+    if n % 1000 == 0:
+        return cardinal(n)
+    if lo == 0:
+        return cardinal(hi) + " hundred"
+    return cardinal(hi) + " " + ("oh " + cardinal(lo) if lo < 10 else cardinal(lo))
+
+
 def short_num(n: int) -> str:
     """How engineers say IDs, octets and status codes: 120 → one twenty,
     404 → four oh four, 251 → two fifty-one, 4094 → forty ninety-four."""
@@ -265,6 +277,22 @@ _TECH_WORDS = {
     "SNMPv2c": "S N M P v two C", "SNMPv3": "S N M P v three", "sudo": "sue doo",
     "nginx": "engine X", "kubectl": "kube control", "k8s": "kubernetes",
     "oper": "opper",  # YANG *-oper models; Pocket says "opera"
+    # résumé / infra vocabulary (2026-10-09): mixed-case names the generic
+    # rules can't split, and words Pocket mangles as written
+    "SQL": "sequel", "NoSQL": "no sequel", "SQLite": "sequel-ite", "MySQL": "my sequel",
+    "PostgreSQL": "postgres", "PostgREST": "post grest", "sqlite-vec": "sequel-ite vec",
+    "LoRA": "lora", "QLoRA": "Q lora", "QoS": "Q O S", "NetQoS": "net Q O S",
+    "ToR": "T O R", "EoR": "E O R", "pfSense": "P F sense", "iRules": "I rules",
+    "dnsmasq": "D N S mask", "uvicorn": "you-vee-corn", "llama.cpp": "llama C P P",
+    "nvidia-smi": "nvidia S M I", "dmon": "D mon", "systemd": "system D",
+    "Nginx": "engine X", "Iperf": "I perf", "iperf": "I perf", "macOS": "mac O S",
+    "NX-OS": "N X O S", "MP-BGP": "M P B G P", "SD-WAN": "S D WAN", "BIG-IP": "big I P",
+    "EVPN": "E V P N", "OSPF": "O S P F", "EIGRP": "E I G R P", "RSPAN": "R span",
+    "ERSPAN": "E R span", "CCNA": "C C N A", "CCNP": "C C N P", "ISDN": "I S D N",
+    "AT&T": "A T and T", "C++": "C plus plus", "B.S.": "B S", "M.S.": "M S",
+    "Ph.D.": "P H D", "LOC": "lines of code", "GenAI": "gen A I", "vLLM": "V L L M",
+    "SGLang": "S G lang", "TCPDump": "T C P dump", "tcpdump": "T C P dump",
+    "tyrelcb": "tyrel C B", "EVPN-VXLAN": "E V P N V X LAN", "I/O": "I O", "N/A": "N A",
 }
 # lowercase protocol / platform acronyms inside identifiers (ios_actions,
 # utd-oper, lldp) — spelled; ALL-CAPS forms are handled by the caps pass
@@ -323,6 +351,21 @@ def _tech(t: str) -> str:
     # host:port → host port 8123
     t = re.sub(r"\b([A-Za-z][\w.-]*[A-Za-z0-9]):(\d{2,5})\b(?![:\d])",
                lambda m: f"{m[1]} port {cardinal(int(m[2]))}", t)
+    # emails: name@host.com → name at host dot com
+    t = re.sub(r"\b([\w.+-]+)@([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b",
+               lambda m: m[1].replace(".", " dot ") + " at " + m[2].replace(".", " dot "), t)
+    # URLs: host + path segments, "slash"-joined; opaque id tails dropped
+    # (linkedin.com/in/tyrel-barstow-260a17102 → … slash in slash tyrel barstow)
+    def _url(m):
+        host = m[2].replace(".", " dot ")
+        segs = []
+        for seg in (m[3] or "").strip("/").split("/"):
+            seg = re.sub(r"-?\b(?=[a-z0-9]*\d)[a-z0-9]{6,}$", "", seg)  # trailing id
+            if seg:
+                segs.append(seg.replace("-", " "))
+        return " slash ".join([host, *segs])
+    t = re.sub(rf"(https?://)?\b((?:[a-z0-9-]+\.)+(?:{_TLDS}))((?:/[\w.~%-]*[\w~%-])+)/?(?=[\s),.;:]|$)",
+               _url, t)
     # hostnames: mohamed.local, fedora.tail34585a.ts.net → dot-separated
     t = re.sub(rf"\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:{_TLDS})\b(?![\w-]|\.\w)",
                lambda m: m[0].replace(".", " dot "), t)
@@ -333,6 +376,35 @@ def _tech(t: str) -> str:
                lambda m: short_num(int(m[1])), t)
     t = re.sub(r"\b(HTTP|[Ss]tatus|[Cc]ode|[Ee]rror|[Rr]eturns?|[Rr]eturned|[Rr]eturning|[Gg]ot|[Aa]ll|an?)\s+([1-5]0\d)\b(?![\w.,]\d)",
                lambda m: f"{m[1]} {short_num(int(m[2]))}", t)
+    # lexicon BEFORE the hyphen-chain/camel rules below take its words apart
+    for w, say in _TECH_WORDS.items():
+        t = re.sub(rf"(?<![\w&+]){re.escape(w)}(?![\w&+])", say, t)
+    t = re.sub(r"\bCI/CD\b", "C I C D", t)
+    t = re.sub(r"\b(\d+)/(\d+)G\b", lambda m: f"{cardinal(int(m[1]))}, {cardinal(int(m[2]))} gig", t)
+    # slash between capitalized names / acronyms is a list: BGP/OSPF/EVPN,
+    # Docker/Podman, IOS/NX-OS → commas (and/or, ETF/futures stay spaced)
+    t = re.sub(r"\b([A-Z][\w-]*)/(?=[A-Z])", r"\1, ", t)
+    # camel-case with an initialism inside: MongoDB → Mongo D B, FastAPI,
+    # TyrelCB, VertexAI, CompTIA; leading lowercase: vMX, iOS
+    t = re.sub(r"\b([A-Z]?[a-z]{2,})([A-Z]{2,})(s?)\b(?![.\d])",
+               lambda m: f"{m[1]} {' '.join(m[2])}{chr(39) + 's' if m[3] else ''}", t)
+    t = re.sub(r"\b([a-z])([A-Z]{2,})\b(?![.\d])", lambda m: f"{m[1]} {' '.join(m[2])}", t)
+    # link speeds: 10G / 40G / 100G → ten gig
+    t = re.sub(r"\b(1|10|25|40|50|100|400)G\b", lambda m: cardinal(int(m[1])) + " gig", t)
+    t = re.sub(r"\b(\d{1,2})k/(\d{1,2})k\b",  # Nexus 7k/2k
+               lambda m: f"{cardinal(int(m[1]))} K, {cardinal(int(m[2]))} K", t)
+    # model numbers read the way engineers say them: 6509-E → sixty-five oh
+    # nine E, i2800 → i twenty-eight hundred, Catalyst 6880, MX67, GB10, BM25
+    t = re.sub(r"\b(\d{4})-?([A-Z])\b", lambda m: f"{model_num(m[1])} {m[2]}", t)
+    t = re.sub(r"\b([a-z])(\d{4})\b", lambda m: f"{m[1]} {model_num(m[2])}", t)
+    t = re.sub(r"\b(Catalyst|Nexus|ASR|ISR|ASA|Meraki|series|model)\s+(\d{4})\b",
+               lambda m: f"{m[1]} {model_num(m[2])}", t)
+    t = re.sub(r"\b([A-Z]{1,3})(\d{1,3})\b(?![/:\d-]|\.\d)",
+               lambda m: f"{' '.join(m[1])} {cardinal(int(m[2]))}", t)
+    t = re.sub(r"\b([A-Z][a-z]{2,})(\d)\b(?![/:\d-]|\.\d)", lambda m: f"{m[1]} {cardinal(int(m[2]))}", t)
+    # credential/version plus: A+, Network+, Security+ → "A plus"; spaced " + "
+    t = re.sub(r"\b([A-Za-z]+)\+(?=[\s,.;:)]|$)", r"\1 plus", t)
+    t = re.sub(r"(?<=\w)\s\+\s(?=\w)", " plus ", t)
     # SCREAMING_SNAKE identifiers are names, not acronyms: LAB_TEST_POLICY
     t = re.sub(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b", lambda m: m[0].replace("_", " ").lower(), t)
     t = re.sub(r"(?<=[A-Za-z0-9])_+(?=[A-Za-z0-9])", " ", t)  # snake_case → words
@@ -340,10 +412,11 @@ def _tech(t: str) -> str:
     t = re.sub(r"(?<=[a-z0-9]):(?=[A-Za-z])", " ", t)
     # long hyphen chains are identifiers, not compound words: Cisco-IOS-XE-acl-oper
     t = re.sub(r"\b[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+){2,}\b", lambda m: m[0].replace("-", " "), t)
-    for w, say in _TECH_WORDS.items():
-        t = re.sub(rf"(?<!\w){re.escape(w)}(?!\w)", say, t)
     t = re.sub(r"-?\b(" + "|".join(_LOWER_ACR) + r")(s?)\b-?",
-               lambda m: " " + (_SAY_LOWER.get(m[1]) or " ".join(m[1].upper())) + m[2] + " ", t)
+               lambda m: " " + (_SAY_LOWER.get(m[1]) or " ".join(m[1].upper())) +
+               ("'s" if m[2] and m[1] not in _SAY_LOWER else m[2]) + " ", t)
+    # hyphen between spelled letters is a pause Pocket mangles: E V P N-V X LAN
+    t = re.sub(r"(?<=\b[A-Z])-(?=[A-Z]\b)", " ", t)
     # spaced slash is a separator: "3 MB in / 14 MB out", "Vlan120 / 10.120.0.1"
     t = re.sub(r"\s+/\s+", ", ", t)
     return t
@@ -383,6 +456,7 @@ def _pre(t: str) -> str:
     t = re.sub(r"\bYTD\b", "year to date", t)
     t = re.sub(r"\bQoQ\b", "quarter over quarter", t)
     t = re.sub(r"\bYoY\b", "year over year", t)
+    t = re.sub(r"\b([Aa]n?) ~(?=\d)", r"\1 roughly ", t)  # "a ~20M-parameter" ≠ "a about"
     t = re.sub(r"~(?=\s?[$€£+-]?\d)", "about ", t)
     # year ranges: 2010–12 → twenty ten to twenty twelve; 2019-2021
     t = re.sub(r"(?<![\d-])((?:19|20)\d\d)[–-]((?:19|20)?\d\d)\b(?!%|\.\d|[–-]\d|[T ]\d\d:)",
@@ -404,7 +478,7 @@ def _pre(t: str) -> str:
 def _post(t: str) -> str:
     """Scores and long clauses: give Pocket somewhere to breathe."""
     # "Colts thirty Commanders thirteen" → comma after a score before a Name
-    t = re.sub(r"\b((?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:-[a-z]+)?|"
+    t = re.sub(r"(?<!\bpoint )\b((?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:-[a-z]+)?|"
                r"zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
                r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen)"
                r" (?=(?!(?:" + "|".join(MONTHS) + r")\b)[A-Z][a-z])", r"\1, ", t)
@@ -436,6 +510,9 @@ def normalize(text: str) -> str:
         yy = int(y) + (2000 if len(y) == 2 else 0)
         return _date_words(yy, mo, d)
     t = re.sub(r"(?<![\d/])(\d{1,2})/(\d{1,2})/(\d{4}|\d{2})(?![\d/])", us_date, t)
+    # month/year: 05/2024 → May twenty twenty-four
+    t = re.sub(r"(?<![\d/])(0?[1-9]|1[0-2])/((?:19|20)\d\d)(?![\d/])",
+               lambda m: f"{MONTHS[int(m[1]) - 1]} {year(int(m[2]))}", t)
 
     # 4. weekday abbreviations — only right before a date ("Thu, Oct 1")
     t = re.sub(rf"\b({_DAY_ALT})\.?(?=,?\s+(?:{_MON_ALT}\b|\d))",
@@ -569,8 +646,9 @@ def normalize(text: str) -> str:
             return w  # STOP, SEND, DONE — shouted words, not initialisms
         return _spell_letters(w)
     t = re.sub(r"\b([A-Z]{2,4})\b", caps, t)
-    # plurals of spelled initialisms: ACLs → A C Ls (GPUs/APIs stay as-is)
-    t = re.sub(r"\b([A-Z]{2,4})s\b", lambda m: (lambda c: c + "s" if c != m[1] else m[0])(caps(m)), t)
+    # plurals of spelled initialisms: APIs → A P I's ("A P Is" is heard as
+    # "API is"; the apostrophe form round-trips as "APIs")
+    t = re.sub(r"\b([A-Z]{2,4})s\b", lambda m: (lambda c: c + "'s" if c != m[1] else m[0])(caps(m)), t)
 
     t = re.sub(r"\b([Tt]he) the\b", r"\1", t)  # "on the 3rd of March" → on the the third…
     t = re.sub(r"\b(\d+)(ers|ner)\b",  # 49ers → forty-niners, 76ers → seventy-sixers

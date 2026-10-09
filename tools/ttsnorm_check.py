@@ -30,8 +30,8 @@ CASES = [
     ("call 555-1234 or (303) 555-0199.", "call five five five, one two three four or three zero three, five five five, zero one nine nine."),
     ("ids 007 and 1,2,3; it returned 200.", "ids zero zero seven and one, two, three; it returned two hundred."),
     # left alone: glued to letters, versions, shouted words, spelled-anyway initialisms
-    ("Qwen3.8 on a GB10, v1.2.3, H100.", "Qwen3.8 on a GB10, v1.2.3, H100."),
-    ("Use the STOP button, then NEW CHAT. The API runs on the GPU.", "Use the STOP button, then NEW CHAT. The API runs on the GPU."),
+    ("Qwen3.8 on a GB10, v1.2.3, H100.", "Qwen3.8 on a G B ten, v1.2.3, H one hundred."),
+    ("Use the STOP button, then NEW CHAT. The API runs on the GPU.", "Use the STOP button, then NEW CHAT. The A P I runs on the G P U."),
     ("The Sun was out; I sat on Mar Vista.", "The Sun was out; I sat on Mar Vista."),
     # 2026-10-06: emoji + "·"-joined scores sent Pocket off the rails (one 300-token "sentence")
     ("🏈 NFL — Week 4 final. Colts 30 Commanders 13 (London) · 49ers 24 Broncos 14 · Panthers 32 Lions 26.",
@@ -55,7 +55,7 @@ CASES = [
     ('<filter select="/native/hostname"/> returns a silently empty <data/>.',
      'filter, select hostname, returns a silently empty data.'),
     ('Cisco-IOS-XE-acl-oper returns 7 ACLs; ios_actions RPCs; lldp, utd-oper, pnp: all 404 at container level.',
-     'Cisco I O S X E A C L opper returns seven A C Ls; I O S actions R P Cs; L L D P, U T D opper, P N P: all four oh four at container level.'),
+     "Cisco I O S X E A C L opper returns seven A C L's; I O S actions R P C's; L L D P, U T D opper, P N P: all four oh four at container level."),
     ('ping 8.8.8.8 hangs SSH; NTP (10.17.251.250) stuck at stratum 16.',
      'ping eight dot eight dot eight dot eight hangs S S H; N T P, ten dot seventeen dot two fifty-one dot two fifty, stuck at stratum sixteen.'),
     ('hostname c9000v-terraform-netconf (domain mohamed.local), Loopback99 / 99.99.99.99, LAB_TEST_POLICY on Gi1/0/3.',
@@ -64,6 +64,17 @@ CASES = [
      'an I S E eight oh two dot one X lab; no I P domain lookup; net conf X path over rest conf.'),
     ('Set Te1/1/4.100 to 192.168.1.0/24; Error 404 on /api/runs; hit localhost:8123.',
      'Set ten gig one slash one slash four dot one hundred to one ninety-two dot one sixty-eight dot one dot zero slash twenty-four; Error four oh four on runs; hit localhost port eight thousand one hundred twenty-three.'),
+    # résumé vocabulary — 2026-10-09 Pocket (alba) → faster-whisper small round trip
+    ("Pairs BGP/OSPF/EVPN-VXLAN and F5 with REST APIs, MongoDB and SQLite.",
+     "Pairs B G P, O S P F, E V P N V X LAN and F five with REST A P I's, Mongo D B and sequel-ite."),
+    ("Replaced a 6509-E core with Nexus 7k/2k over 40G links; i2800 and Catalyst 6880.",
+     "Replaced a sixty-five oh nine E core with Nexus seven K, two K over forty gig links; i twenty-eight hundred and Catalyst sixty-eight eighty."),
+    ("tyrelcb@gmail.com · linkedin.com/in/tyrel-barstow-260a17102",
+     "tyrel C B at gmail dot com. linkedin dot com slash in slash tyrel barstow"),
+    ("CompTIA Linux+ valid 05/2024 – 05/2027; built a ~20M-parameter model, ~13K LOC, CI/CD, 10/40G.",
+     "Comp T I A Linux plus valid May twenty twenty-four to May twenty twenty-seven; built a roughly twenty million-parameter model, about thirteen thousand lines of code, C I C D, ten, forty gig."),
+    ("AT&T, B.S., Python + JS, Gemini 2.0 Flash, MX67, BM25, Boto3.",
+     "A T and T, B S, Python plus J S, Gemini two point zero Flash, M X sixty-seven, B M twenty-five, Boto three."),
 ]
 
 bad = 0
