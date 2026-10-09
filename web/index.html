@@ -242,7 +242,7 @@
         </div>
         <div id="pv-clone" class="pv-clone hidden">
           <div class="group-label">CLONE A VOICE</div>
-          <div class="hint">Upload ~10–30 s of one person speaking clearly (any audio or video file — a phone voice memo works; only the first 30 s are used), or ● RECORD it here. Saved voices run on the normal model; cloning itself needs kyutai's gated weights once (accept the terms at huggingface.co/kyutai/pocket-tts + <code>hf auth login</code> on this box).</div>
+          <div class="hint">Upload ~15–30 s of one person speaking clearly (any audio or video file — a phone voice memo works), or ● RECORD it here. Talk the way you want it to sound: conversational pace, close to the mic, quiet room — the clone copies pace and room as well as the voice. Pauses are trimmed and the level evened out; about 15 s of speech is used. Saved voices run on the normal model; cloning itself needs kyutai's gated weights once (accept the terms at huggingface.co/kyutai/pocket-tts + <code>hf auth login</code> on this box).</div>
           <div class="row">
             <label>Name <input id="pv-name" type="text" maxlength="40" autocomplete="off" spellcheck="false" placeholder="tyrel_warm"></label>
             <label>Audio <input id="pv-file" type="file" accept="audio/*,video/*"></label>
