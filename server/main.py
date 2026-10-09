@@ -1220,8 +1220,8 @@ async def voices_list():
 @app.post("/api/voices")
 async def voices_clone(name: str = Form(...), language: str = Form("english"),
                        consent: bool = Form(False), file: UploadFile = File(...)):
-    """Clone a voice from an uploaded clip (first 30 s used) and save it to
-    the library. Any audio/video ffmpeg reads is accepted (phone voice memo,
+    """Clone a voice from an uploaded clip (~15 s of speech used, after
+    cleanup) and save it to the library. Any audio/video ffmpeg reads is accepted (phone voice memo,
     webm, m4a…); it's normalized to 24 kHz mono WAV first. The consent box
     is required — kyutai's terms forbid cloning a voice without permission."""
     if not consent:
@@ -1237,12 +1237,21 @@ async def voices_clone(name: str = Form(...), language: str = Form("english"),
             while chunk := await file.read(1 << 20):
                 size += len(chunk)
                 if size > MAX_CLONE_BYTES:
-                    raise HTTPException(413, "audio too large (max 25 MB — 30 s is all it uses)")
+                    raise HTTPException(413, "audio too large (max 25 MB — about 15 s of speech is all it uses)")
                 fh.write(chunk)
         wav = os.path.join(work, "voice.wav")
+        # clean the prompt before encoding — Pocket copies what it hears: a
+        # quiet mic take cloned ~6 dB under the presets (Tyrel: -24.7 vs -19
+        # dB RMS), so loudnorm to -16 LUFS; rumble out; leading silence and
+        # long read-aloud pauses cut to 0.25 s; then ~15 s of speech (the
+        # 10 s Tyrel_Warm prompt paced better than the 30 s Tyrel one)
         p = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-t", "30",
-            "-vn", "-ac", "1", "-ar", "24000", wav,
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-t", "60",
+            "-vn", "-ac", "1", "-af",
+            "highpass=f=70,silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.1"
+            ":stop_periods=-1:stop_duration=0.3:stop_threshold=-45dB:stop_silence=0.25,"
+            "loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-ar", "24000", "-t", "15", wav,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
         _, err = await p.communicate()
         if p.returncode != 0 or not os.path.isfile(wav):
