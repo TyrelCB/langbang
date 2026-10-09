@@ -397,7 +397,7 @@ def _tech(t: str) -> str:
     # nine E, i2800 → i twenty-eight hundred, Catalyst 6880, MX67, GB10, BM25
     t = re.sub(r"\b(\d{4})-?([A-Z])\b", lambda m: f"{model_num(m[1])} {m[2]}", t)
     t = re.sub(r"\b([a-z])(\d{4})\b", lambda m: f"{m[1]} {model_num(m[2])}", t)
-    t = re.sub(r"\b(Catalyst|Nexus|ASR|ISR|ASA|Meraki|series|model)\s+(\d{4})\b",
+    t = re.sub(r"\b(Catalyst|Nexus|ASR|ISR|ASA|Meraki|RTX|GTX|series|model)\s+(\d{4})\b",
                lambda m: f"{m[1]} {model_num(m[2])}", t)
     t = re.sub(r"\b([A-Z]{1,3})(\d{1,3})\b(?![/:\d-]|\.\d)",
                lambda m: f"{' '.join(m[1])} {cardinal(int(m[2]))}", t)
