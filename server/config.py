@@ -154,6 +154,10 @@ DEFAULTS = {
         # long lose the caller — the prompt asks for brevity, this enforces it.
         "max_spoken_words": 50,
         "idle_s": 1800,  # forget a call's history after this much quiet
+        # messages of call history sent to the model (~25 tokens each); past
+        # this the first two exchanges are kept plus the most recent. 160 ≈ a
+        # 30+ minute call in ~4k tokens — size it to the IVR model's context.
+        "max_history": 160,
         "pocket_voice": "alba",  # "" = the chat voice (voice.pocket_voice)
         "greeting": "Hi, this is LangBang, Tyrel's assistant. How can I help?",
         # What the IVR knows about Tyrel: a text/markdown file (relative paths
