@@ -437,6 +437,32 @@ async def turn_audio(text: str, s: dict, cfg: dict, out: str, rate: int) -> byte
     return await run_in_threadpool(speak, text, s, cfg, out, rate)
 
 
+async def prewarm(s: dict) -> None:
+    """Startup: pay the first call's cold costs before a caller does —
+    the IVR voice (Pocket model + voice state + first synthesis, ~11 s) and
+    the IVR model's prompt prefix (system prompt + knowledge + tool schemas,
+    ~3k tokens: ~6 s of prefill on the Mac mini, then cached). One throwaway
+    turn on a scratch call, take_message disarmed, nothing audited."""
+    cfg = s.get("ivr") or {}
+    if not cfg.get("enabled"):
+        return
+    t0 = time.time()
+    try:
+        await run_in_threadpool(lambda: sum(len(b) for b in speak_pcm("Hello.", s, cfg)))
+    except Exception as e:  # noqa: BLE001 — the first real call will say why
+        logger.warning("ivr prewarm (voice) failed: %s", e)
+    t1 = time.time()
+    cid, c = call("_prewarm", cfg)
+    c["left"] = MAX_MESSAGES_PER_CALL  # a warm-up must never send a message
+    try:
+        await reply(cid, c, "Hello?", s, cfg)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ivr prewarm (model) failed: %s", e)
+    finally:
+        hangup(cid)
+    logger.warning("ivr prewarm: voice %.1fs, model %.1fs", t1 - t0, time.time() - t1)
+
+
 # ---- streaming turn (/api/ivr/turn/stream) ----
 
 STREAM_RATE = voice.POCKET_RATE  # streamed audio: mono s16le @ 24 kHz, Pocket's native rate

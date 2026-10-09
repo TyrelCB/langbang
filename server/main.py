@@ -45,7 +45,13 @@ async def _startup():
     _prune_tts_cache()     # TTS disk cache is a replay aid, not an archive
     # Pocket TTS active → load model + voice off the event loop now, so the
     # first 🔊 after a restart doesn't wait ~7 s (no-op for other providers)
-    asyncio.get_running_loop().run_in_executor(None, voice.prewarm, config.load())
+    # …then the phone line's own voice + model, so the first caller after a
+    # restart doesn't sit through ~17 s of loading. In sequence: two threads
+    # importing pocket_tts at once deadlock on its module lock.
+    async def _prewarm():
+        await asyncio.get_running_loop().run_in_executor(None, voice.prewarm, config.load())
+        await ivr.prewarm(config.load())
+    asyncio.create_task(_prewarm())
 
 
 @app.on_event("shutdown")
