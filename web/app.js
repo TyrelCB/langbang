@@ -3317,8 +3317,9 @@ function syncTitle() {
 }
 // every path that renames / switches / opens a thread repaints #chat-title
 new MutationObserver(syncTitle).observe($("#chat-title"), { childList: true, characterData: true, subtree: true });
-const NOTE_ICON = { input: "◆", done: "✓", failed: "✕", learned: "📘" };
-const NOTE_WORD = { input: "NEEDS YOUR INPUT", done: "FINISHED", failed: "FAILED", learned: "LEARNED" };
+const NOTE_ICON = { input: "◆", done: "✓", failed: "✕", learned: "📘", message: "📞" };
+const NOTE_WORD = { input: "NEEDS YOUR INPUT", done: "FINISHED", failed: "FAILED", learned: "LEARNED",
+                    message: "PHONE MESSAGE" };
 
 async function pollNotify() {
   let r;
@@ -3345,8 +3346,8 @@ function notifyShow(ev) {
   t.appendChild(x);
   t.onclick = () => { t.remove(); notifyOpen(ev); };
   $("#toasts").appendChild(t);
-  // needs-input waits for you; the rest fade on their own
-  if (ev.kind !== "input") setTimeout(() => t.remove(), ev.kind === "failed" ? 30000 : 15000);
+  // needs-input and phone messages wait for you; the rest fade on their own
+  if (ev.kind !== "input" && ev.kind !== "message") setTimeout(() => t.remove(), ev.kind === "failed" ? 30000 : 15000);
   while ($("#toasts").children.length > 4) $("#toasts").firstChild.remove();
   if (ev.kind === "learned") { refreshMemoryUI(); return; } // quiet: no sound/badge/popup
   SFX.play(ev.kind === "failed" ? "error" : "message_received");

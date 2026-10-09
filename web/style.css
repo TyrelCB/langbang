@@ -787,6 +787,9 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
 .toast.input .toast-head { color: var(--orange); }
 .toast.failed .toast-head { color: var(--danger); }
 .toast.learned { border-left-color: var(--cyan); }
+.toast.message { border-left-color: var(--orange); }
+.toast.message .toast-head { color: var(--orange); }
+.toast.message .toast-text { white-space: pre-line; }
 .toast.learned .toast-head { color: var(--cyan); }
 .toast-title { color: var(--text); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .toast-text { color: var(--muted); margin-top: 3px; display: -webkit-box; -webkit-line-clamp: 2;
