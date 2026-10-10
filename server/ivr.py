@@ -153,12 +153,21 @@ def history(c: dict, cfg: dict) -> list:
     ivr.max_history messages, then the opening exchanges (PINNED_MSGS — the
     caller's name and reason usually come first) plus the most recent ones.
     Spoken exchanges are short (~25 tokens a message), so the default 160
-    holds a 30+ minute call in ~4k tokens. Also trims what's kept in RAM."""
+    holds a 30+ minute call in ~4k tokens. Also trims what's kept in RAM.
+
+    Trimmed in chunks, not one exchange per turn: dropping the oldest
+    unpinned exchange changes the prompt right after the opening, so the
+    backend's prefix cache misses and re-prefills the whole history — every
+    turn (measured on the Mac mini: turns 81+ of a call went 1.3 s → 6.5 s).
+    Cutting a quarter of the window at once pays that once per ~20 turns."""
     cap = max(PINNED_MSGS + 2, int(cfg.get("max_history") or 160))
     cap -= cap % 2  # whole exchanges: the kept tail must start on a caller turn
     msgs = c["msgs"]
     if len(msgs) > cap:
-        msgs = c["msgs"] = msgs[:PINNED_MSGS] + msgs[-(cap - PINNED_MSGS):]
+        slack = max(2, cap // 4)
+        slack -= slack % 2
+        keep = max(2, cap - slack - PINNED_MSGS)
+        msgs = c["msgs"] = msgs[:PINNED_MSGS] + msgs[-keep:]
     return list(msgs)
 
 
