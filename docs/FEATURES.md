@@ -471,7 +471,9 @@ off, replies are written for speech, and per-call history lives in RAM
 (expires after `ivr.idle_s`). Every turn is appended to `data/ivr/calls.jsonl`.
 The model sees up to `ivr.max_history` messages of the call (default 160,
 ~4k tokens, a 30+ minute call); past that it keeps the first two exchanges
-(caller's name and reason) plus the most recent.
+(caller's name and reason) plus the most recent, trimmed a quarter of the
+window at a time so the model's prompt cache breaks once per ~20 turns
+instead of every turn.
 
 **Its own model.** `ivr.provider` names one of the CONFIG providers (and
 `ivr.model` a model id, `""` = that provider's default), so calls can run on
