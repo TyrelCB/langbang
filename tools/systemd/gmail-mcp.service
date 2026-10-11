@@ -1,0 +1,19 @@
+# Copy of /etc/systemd/system/gmail-mcp.service (LangBang's gmail MCP server,
+# repo ~/projects/gmail_mcp). Replaces the old systemd --user unit (now disabled).
+[Unit]
+Description=Gmail MCP HTTP Streamable Server (:4000)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tyrel
+Group=tyrel
+# Config (.env: PORT/HOST/token/Google creds) is loaded by dotenv from here.
+WorkingDirectory=/home/tyrel/projects/gmail_mcp
+ExecStart=/usr/bin/node /home/tyrel/projects/gmail_mcp/dist/index.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
