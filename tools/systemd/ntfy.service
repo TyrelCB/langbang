@@ -1,0 +1,27 @@
+# Self-hosted ntfy (LangBang push notifications) as a system service.
+# The container is owned by this unit (docker run --rm in the foreground), not
+# by a docker restart policy, so it starts only once tailscale0 has its IP —
+# the TAILNET_IP port bind fails if docker races tailscaled at boot.
+# Data/config persist in the bind mounts under ~/.local/share/ntfy.
+[Unit]
+Description=ntfy push server (docker, 127.0.0.1 + tailnet :2586)
+After=docker.service tailscaled.service network-online.target
+Requires=docker.service
+Wants=tailscaled.service network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/bash -c 'for i in $(seq 90); do ip -4 -o addr show dev tailscale0 2>/dev/null | grep -q " TAILNET_IP/" && exit 0; sleep 1; done; echo "tailnet IP never appeared" >&2; exit 1'
+ExecStartPre=-/usr/bin/docker rm -f ntfy
+ExecStart=/usr/bin/docker run --rm --name ntfy \
+  -p 127.0.0.1:2586:80 -p TAILNET_IP:2586:80 \
+  -v /home/tyrel/.local/share/ntfy/cache:/var/cache/ntfy:Z \
+  -v /home/tyrel/.local/share/ntfy/etc:/etc/ntfy:Z \
+  binwiederhier/ntfy:latest serve
+ExecStop=/usr/bin/docker stop -t 10 ntfy
+Restart=always
+RestartSec=5
+TimeoutStartSec=150
+
+[Install]
+WantedBy=multi-user.target
