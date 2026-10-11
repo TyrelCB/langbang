@@ -1,0 +1,34 @@
+# LangBang web app as a system service (starts at boot, restarts on crash).
+# Install: sudo cp tools/systemd/langbang.service /etc/systemd/system/ &&
+#          sudo systemctl daemon-reload && sudo systemctl enable --now langbang
+# Restart after server/ edits: sudo systemctl restart langbang
+#   (⚠ kills every live run hub — check GET /api/runs first)
+[Unit]
+Description=LangBang agent web UI (uvicorn :8123)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tyrel
+Group=tyrel
+WorkingDirectory=/home/tyrel/projects/LangBang
+# Login-shell PATH so the agent's shell tool finds the same binaries (uv, node, bun, ...).
+Environment=PATH=/home/tyrel/.npm-global/bin:/home/tyrel/.local/bin:/home/tyrel/.bun/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/var/lib/snapd/snap/bin
+Environment=PYTHONUNBUFFERED=1
+# Launched through /usr/bin/bash (bin_t) so the service transitions to
+# unconfined_service_t: SELinux denies init_t exec'ing the user_home_t venv
+# binaries directly (203/EXEC).
+ExecStart=/usr/bin/bash -c 'exec .venv/bin/uvicorn server.main:app --host 0.0.0.0 --port 8123'
+# Same log the ops notes/test suites grep.
+StandardOutput=append:/tmp/langbang.log
+StandardError=append:/tmp/langbang.log
+Restart=always
+RestartSec=3
+# Only uvicorn is signalled on stop/restart; processes the agent shell launched
+# (setsid'd jobs, ffmpeg, ...) survive, as with the old fuser -k restart.
+KillMode=process
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
