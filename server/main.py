@@ -1497,6 +1497,13 @@ async def _ivr_hear(request: Request, fmt: str, s: dict) -> tuple[str, bool]:
         raise HTTPException(502, f"STT failed: {e}")
 
 
+@app.get("/api/ivr/status")
+async def ivr_status():
+    """CONFIG → IVR card (web UI, like /api/settings): knowledge file, live
+    calls, recent take_message messages, tool names. Not the bearer token."""
+    return await ivr.status(config.load())
+
+
 @app.post("/api/ivr/start")
 async def ivr_start(request: Request, call_id: str = "", out: str = "wav", rate: int = 8000,
                     caller: str = ""):
