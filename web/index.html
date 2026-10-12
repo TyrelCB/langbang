@@ -338,6 +338,47 @@
         </div>
         <div class="hint" id="rag-detail"></div>
       </section>
+      <section class="cfg-card wide" id="cfg-ivr">
+        <h3>IVR — PHONE ASSISTANT</h3>
+        <div class="hint">The phone front door (<code>/api/ivr/*</code>, called by the telephony bridge with the bearer token in <code>data/keys/ivr_token</code>). A separate, small agent, not the chat agent: only the tools ticked here, and no shell, file writes or memory. Changes apply on the next call turn.</div>
+        <div class="tools-box col">
+          <label class="chk"><input type="checkbox" id="set-ivr-enabled"> enabled (off = the bridge gets 401 on every call)</label>
+        </div>
+        <div class="row">
+          <label>Provider <select id="set-ivr-provider"></select></label>
+          <label>Model <input id="set-ivr-model" type="text" list="dl-ivr-models" autocomplete="off" spellcheck="false" placeholder="(provider default)"></label>
+          <datalist id="dl-ivr-models"></datalist>
+          <label>Voice <select id="set-ivr-pocket_voice"></select></label>
+        </div>
+        <label>Greeting <textarea id="set-ivr-greeting" rows="2" spellcheck="true"></textarea></label>
+        <label>System prompt <textarea id="set-ivr-system_prompt" rows="7" spellcheck="true"></textarea></label>
+        <div class="row">
+          <button id="btn-ivr-reset-prompt" class="btn ghost sm" type="button" title="Put the built-in prompt and greeting back in the boxes (SAVE to keep)">↺ DEFAULT PROMPT + GREETING</button>
+        </div>
+        <div class="row">
+          <label>Knowledge file <input id="set-ivr-knowledge_file" type="text" autocomplete="off" spellcheck="false" placeholder="ivr/knowledge.md — relative = under data/"></label>
+          <button id="btn-ivr-kb-edit" class="btn ghost sm" type="button" title="Open the knowledge file in FILES">✎ EDIT</button>
+        </div>
+        <div class="hint" id="ivr-kb-info"></div>
+        <div class="group-label">TOOLS CALLERS CAN TRIGGER</div>
+        <div class="tools-box" id="set-ivr-tools"></div>
+        <div class="row ivr-nums">
+          <label>Concurrent calls <input id="set-ivr-max_concurrent" type="number" min="1" max="16"></label>
+          <label>Steps / turn <input id="set-ivr-max_steps" type="number" min="1" max="20"></label>
+          <label>Max tokens <input id="set-ivr-max_tokens" type="number" min="50" max="4000"></label>
+          <label>Spoken word cap <input id="set-ivr-max_spoken_words" type="number" min="0" max="500" title="0 = no cap"></label>
+          <label>LLM timeout s <input id="set-ivr-llm_timeout_s" type="number" min="5" max="300"></label>
+          <label>History msgs <input id="set-ivr-max_history" type="number" min="8" max="1000"></label>
+          <label>Forget call after s <input id="set-ivr-idle_s" type="number" min="60" max="86400"></label>
+        </div>
+        <label>Allowed bridge IPs <input id="set-ivr-allow_ips" type="text" autocomplete="off" spellcheck="false" placeholder="empty = any caller with the token · comma-separated"></label>
+        <div class="row">
+          <button id="btn-ivr-status" class="btn ghost sm" type="button">↻ STATUS</button>
+          <span id="ivr-status" class="pv-status"></span>
+        </div>
+        <div class="group-label">MESSAGES TAKEN</div>
+        <div id="ivr-messages" class="ivr-msgs"></div>
+      </section>
       <section class="cfg-card wide">
         <h3>MCP SERVERS</h3>
         <div id="mcp-list"></div>

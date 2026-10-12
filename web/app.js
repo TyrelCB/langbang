@@ -2522,6 +2522,7 @@ async function openSettings() {
   await pvLoad(loadedVoice.pocket_voice); // options must exist before .value is set
   notifyLoadForm(s.notify || {});
   ragLoadForm(s.rag || {});
+  ivrLoadForm(s.ivr || {}, s);
   const ig = s.image_gen || {};
   $("#set-img-comfy_url").value = ig.comfy_url || "http://spark-ee93:8188";
   $("#set-img-out_dir").value = ig.out_dir || "~/Pictures/langbang";
@@ -2600,6 +2601,7 @@ async function saveSettings() {
     },
     notify: notifyForm(),
     rag: ragForm(),
+    ivr: ivrForm(),
     image_gen: {
       comfy_url: $("#set-img-comfy_url").value.trim() || "http://spark-ee93:8188",
       out_dir: $("#set-img-out_dir").value.trim() || "~/Pictures/langbang",
@@ -3457,6 +3459,131 @@ async function ragStatus() {
   }
 }
 $("#btn-rag-status").onclick = () => { SFX.play("click"); ragStatus(); };
+
+// CONFIG → IVR (phone assistant, server/ivr.py). The server merges top-level
+// keys only, so ivrForm() sends the whole dict: loaded values + the form.
+let loadedIvr = {};
+const IVR_NUMS = { max_concurrent: [1, 16, 2], max_steps: [1, 20, 6], max_tokens: [50, 4000, 600],
+                   max_spoken_words: [0, 500, 50], llm_timeout_s: [5, 300, 30], max_history: [8, 1000, 160],
+                   idle_s: [60, 86400, 1800] };
+
+function ivrToolBox(name, on) {
+  const lab = el("label", "chk");
+  const cb = document.createElement("input");
+  cb.type = "checkbox"; cb.checked = on; cb.dataset.tool = name;
+  lab.append(cb, document.createTextNode(" " + name));
+  $("#set-ivr-tools").appendChild(lab);
+  return cb;
+}
+
+function ivrLoadForm(v, s) {
+  loadedIvr = { ...v };
+  $("#set-ivr-enabled").checked = v.enabled !== false;
+  // provider: "" = the chat default; a configured name that no longer exists stays visible
+  const ps = $("#set-ivr-provider");
+  ps.replaceChildren(new Option(`(chat default: ${s.provider || "—"})`, ""));
+  for (const n of Object.keys(s.providers || {})) ps.appendChild(new Option(n, n));
+  if (v.provider && ![...ps.options].some((o) => o.value === v.provider))
+    ps.appendChild(new Option(v.provider + " (missing)", v.provider));
+  ps.value = v.provider || "";
+  $("#set-ivr-model").value = v.model || "";
+  ivrModels();
+  // voice: the chat voice picker's options (presets + cloned), minus "clone…"
+  const vs = $("#set-ivr-pocket_voice");
+  vs.replaceChildren(new Option("(same as chat voice)", ""));
+  for (const o of $("#set-voice-pocket_voice").querySelectorAll("option"))
+    if (o.value !== PV_CLONE) vs.appendChild(new Option(o.textContent, o.value));
+  if (v.pocket_voice && ![...vs.options].some((o) => o.value === v.pocket_voice))
+    vs.appendChild(new Option("custom: " + v.pocket_voice.split("/").pop(), v.pocket_voice));
+  vs.value = v.pocket_voice || "";
+  $("#set-ivr-greeting").value = v.greeting || "";
+  $("#set-ivr-system_prompt").value = v.system_prompt || "";
+  $("#set-ivr-knowledge_file").value = v.knowledge_file || "";
+  for (const [k, [, , d]] of Object.entries(IVR_NUMS)) $("#set-ivr-" + k).value = v[k] ?? d;
+  $("#set-ivr-allow_ips").value = (v.allow_ips || []).join(", ");
+  // tools: the configured ones now (so the dirty baseline sees them); the
+  // rest of what's available arrives with the status call
+  $("#set-ivr-tools").replaceChildren();
+  for (const t of v.tools || []) ivrToolBox(t, true);
+  ivrStatus();
+}
+
+function ivrForm() {
+  const out = { ...loadedIvr };
+  out.enabled = $("#set-ivr-enabled").checked;
+  out.provider = $("#set-ivr-provider").value;
+  out.model = $("#set-ivr-model").value.trim();
+  out.pocket_voice = $("#set-ivr-pocket_voice").value;
+  out.greeting = $("#set-ivr-greeting").value.trim();
+  out.system_prompt = $("#set-ivr-system_prompt").value.trim();
+  out.knowledge_file = $("#set-ivr-knowledge_file").value.trim();
+  for (const [k, [lo, hi, d]] of Object.entries(IVR_NUMS)) {
+    const n = parseInt($("#set-ivr-" + k).value, 10);
+    out[k] = Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : d;
+  }
+  out.allow_ips = $("#set-ivr-allow_ips").value.split(/[\s,]+/).filter(Boolean);
+  out.tools = [...$("#set-ivr-tools").querySelectorAll("input")].filter((c) => c.checked).map((c) => c.dataset.tool);
+  return out;
+}
+
+function ivrModels() {
+  const pn = $("#set-ivr-provider").value;
+  const p = pn ? provForm()[pn] || {} : null;
+  fillModels($("#dl-ivr-models"), p ? { base_url: p.base_url, api_key: p.api_key } : { provider: $("#set-provider").value });
+}
+$("#set-ivr-provider").addEventListener("change", ivrModels);
+
+const ivrAgo = (ts) => {
+  const s0 = Math.max(0, Date.now() / 1000 - ts);
+  return s0 < 90 ? `${Math.round(s0)} s ago` : s0 < 5400 ? `${Math.round(s0 / 60)} min ago`
+    : s0 < 129600 ? `${Math.round(s0 / 3600)} h ago` : new Date(ts * 1000).toLocaleDateString();
+};
+
+let ivrDefaults = null;
+async function ivrStatus() {
+  const st = $("#ivr-status"), kb = $("#ivr-kb-info"), box = $("#ivr-messages");
+  st.textContent = "checking…";
+  let d;
+  try { d = await J(await fetch("/api/ivr/status")); }
+  catch (e) { st.textContent = "✕ " + e.message; return; }
+  ivrDefaults = d.defaults;
+  const live = d.active.length ? `${d.active.length} live call${d.active.length > 1 ? "s" : ""}` : "no live calls";
+  st.textContent = `${d.token_exists ? "✓ token ready" : "✕ no token yet (created on first request)"} · ${live}` +
+    (d.last_turn ? ` · last turn ${ivrAgo(d.last_turn)}` : "");
+  const k = d.knowledge;
+  kb.textContent = !k.path ? "no knowledge file — the IVR knows nothing about you"
+    : k.exists ? `${k.path} · ${fmtBytes(k.size)} · edited ${ivrAgo(k.mtime)}`
+    : `✕ ${k.path} not found — answering without it`;
+  kb.dataset.path = k.path || "";
+  // tools: add what's available that isn't ticked; keep the dirty baseline clean
+  const have = new Set([...$("#set-ivr-tools").querySelectorAll("input")].map((c) => c.dataset.tool));
+  for (const t of d.tools) if (!have.has(t)) {
+    const cb = ivrToolBox(t, false);
+    if (cfgBase) cfgBase.set(cb, false);
+  }
+  for (const c of $("#set-ivr-tools").querySelectorAll("input"))
+    c.closest("label").title = d.tools.includes(c.dataset.tool) ? "" : "not available right now (MCP server down?)";
+  box.replaceChildren();
+  if (!d.messages.length) box.appendChild(el("div", "hint", "none yet"));
+  for (const m of d.messages) {
+    const r = el("div", "ivr-msg");
+    r.append(el("span", "ivr-msg-who", `${m.name || "unknown"}${m.callback ? " · " + m.callback : ""}${m.caller_id ? " · caller " + m.caller_id : ""}`),
+             el("span", "ivr-msg-ts", ivrAgo(m.ts)), el("div", "ivr-msg-body", m.message || ""));
+    box.appendChild(r);
+  }
+}
+$("#btn-ivr-status").onclick = () => { SFX.play("click"); ivrStatus(); };
+$("#btn-ivr-reset-prompt").onclick = () => {
+  if (!ivrDefaults) return;
+  SFX.play("click");
+  $("#set-ivr-system_prompt").value = ivrDefaults.system_prompt;
+  $("#set-ivr-greeting").value = ivrDefaults.greeting;
+  cfgDirtyCompute();
+};
+$("#btn-ivr-kb-edit").onclick = () => {
+  const p = $("#ivr-kb-info").dataset.path;
+  if (p) openEditor(p);
+};
 
 // CONFIG → NOTIFICATIONS form
 function notifyLoadForm(n) {

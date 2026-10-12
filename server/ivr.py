@@ -242,11 +242,9 @@ def knowledge(cfg: dict) -> str:
     """ivr.knowledge_file's text (relative paths under data/), re-read when
     its mtime changes. A missing file is logged, not fatal: the IVR still
     answers, it just knows nothing about Tyrel."""
-    path = os.path.expanduser((cfg.get("knowledge_file") or "").strip())
+    path = knowledge_path(cfg)
     if not path:
         return ""
-    if not os.path.isabs(path):
-        path = os.path.join(config.DATA_DIR, path)
     try:
         mtime = os.path.getmtime(path)
     except OSError:
@@ -270,6 +268,60 @@ def system_prompt(cfg: dict) -> str:
     if not kb:
         return base
     return f"{base}\n\n=== REFERENCE DOCUMENT ===\n{kb}\n=== END OF REFERENCE DOCUMENT ==="
+
+
+def knowledge_path(cfg: dict) -> str:
+    path = os.path.expanduser((cfg.get("knowledge_file") or "").strip())
+    if path and not os.path.isabs(path):
+        path = os.path.join(config.DATA_DIR, path)
+    return path
+
+
+def _tail_jsonl(path: str, n: int) -> list[dict]:
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 256 * 1024))
+            lines = fh.read().decode("utf-8", "replace").splitlines()[-n:]
+    except OSError:
+        return []
+    out = []
+    for ln in lines:
+        try:
+            out.append(json.loads(ln))
+        except ValueError:
+            pass
+    return out
+
+
+async def status(s: dict) -> dict:
+    """CONFIG → IVR card. Never includes the token itself."""
+    cfg = s.get("ivr") or {}
+    kp = knowledge_path(cfg)
+    try:
+        st = os.stat(kp) if kp else None
+    except OSError:
+        st = None
+    now = time.time()
+    names = {t.name for t in local_tools.LOCAL_TOOLS} | {"take_message"}
+    try:
+        names |= {t.name for t in await asyncio.wait_for(mcp.get_tools(s.get("mcp_servers") or {}), 8)}
+    except Exception as e:  # noqa: BLE001 - a dead MCP server must not break the card
+        logger.warning("ivr status: MCP tools unavailable: %s", e)
+    turns = [r for r in _tail_jsonl(os.path.join(LOG_DIR, "calls.jsonl"), 400) if r.get("event") == "turn"]
+    return {
+        "token_file": TOKEN_PATH, "token_exists": os.path.exists(TOKEN_PATH),
+        "knowledge": {"path": kp, "exists": st is not None, "size": st.st_size if st else 0,
+                      "mtime": st.st_mtime if st else None},
+        "active": [{"id": cid, "turns": c.get("turns", 0), "caller": c.get("caller", ""),
+                    "idle_s": int(now - c["t"])} for cid, c in _calls.items()
+                   if not cid.startswith("_")],  # _prewarm is the startup warm-up, not a caller
+        "last_turn": turns[-1].get("ts") if turns else None,
+        "messages": _tail_jsonl(os.path.join(LOG_DIR, "messages.jsonl"), 10)[::-1],
+        "tools": sorted(names - NEVER),
+        "never": sorted(NEVER),
+        "defaults": {k: config.DEFAULTS["ivr"][k] for k in ("system_prompt", "greeting")},
+    }
 
 
 # ---- the agent ----
