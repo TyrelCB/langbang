@@ -34,6 +34,12 @@ voice-gcloud = [
 
 [tool.uv]
 package = false
+# rag node (dependency group below) and the main app share one venv; plain
+# `uv sync`/`uv add` must keep the group installed or the node breaks.
+default-groups = ["rag"]
+# gtts pins click<8.2 only for its `gtts-cli` entry point (LangBang never
+# calls it); transformers>=5.19 -> huggingface-hub>=1.31 needs click>=8.4.2.
+override-dependencies = ["click>=8.4.2"]
 
 # Pocket TTS (local CPU read-aloud) pulls torch: pin it to PyTorch's CPU-only
 # wheel index so a sync never drags in multi-GB CUDA builds. explicit=true
@@ -45,3 +51,21 @@ explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[dependency-groups]
+rag = [
+    "fastapi>=0.115",
+    "httpx>=0.27",
+    "librosa>=0.11",
+    "numpy>=2.2",
+    "pillow>=12",
+    "pymupdf>=1.28",
+    "python-docx>=1.2",
+    "python-multipart>=0.0.20",
+    "sentence-transformers>=6.1",
+    "torch>=2.5",
+    "torchvision>=0.29",
+    "transformers>=5.19",
+    "uvicorn[standard]>=0.32",
+]

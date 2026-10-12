@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LangBang RAG</title>
+<style>
+:root{--bg:#0a0e14;--panel:#111826;--line:#1e2a3f;--txt:#c9d6e8;--dim:#5c7292;--accent:#00e5ff;--accent2:#a78bfa;--danger:#ff5470}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.5 system-ui,sans-serif}
+header{position:sticky;top:0;background:var(--panel);border-bottom:1px solid var(--line);padding:12px 16px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;z-index:5}
+header h1{font-size:15px;margin:0 12px 0 0;color:var(--accent);letter-spacing:.12em;text-transform:uppercase}
+input[type=text]{flex:1 1 260px;background:var(--bg);border:1px solid var(--line);color:var(--txt);padding:9px 12px;border-radius:8px;outline:none}
+input[type=text]:focus{border-color:var(--accent)}
+select,button{background:var(--bg);border:1px solid var(--line);color:var(--txt);padding:9px 12px;border-radius:8px;cursor:pointer}
+button.go{border-color:var(--accent);color:var(--accent)}
+button:hover{border-color:var(--accent2)}
+label.up{position:relative}
+label.up input{display:none}
+#imgname{color:var(--dim);font-size:12px;max-width:180px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+#stats{color:var(--dim);font-size:12px;width:100%}
+main{padding:16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden;display:flex;flex-direction:column}
+.card .prev{aspect-ratio:16/10;background:#000;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative}
+.card img.previmg{width:100%;height:100%;object-fit:cover;cursor:pointer}
+.card img.previmg.gone{opacity:.15;filter:grayscale(1)}
+.card video{width:100%;height:100%;background:#000}
+.card audio{width:100%}
+.kind{position:absolute;top:6px;left:6px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;background:rgba(0,0,0,.65);color:var(--accent);padding:2px 8px;border-radius:99px;border:1px solid var(--accent)}
+.kind.atlas{color:var(--accent2);border-color:var(--accent2)}
+.card .body{padding:8px 10px;display:flex;flex-direction:column;gap:6px;min-height:0}
+.card .path{font-size:11px;color:var(--txt);word-break:break-all;max-height:44px;overflow:hidden}
+.card .snip{font-size:11px;color:var(--dim);max-height:60px;overflow:hidden}
+.score{font-size:11px;color:var(--accent)}
+.row{display:flex;gap:6px;margin-top:auto}
+.row button{padding:4px 8px;font-size:11px;border-radius:6px}
+button.rm{color:var(--dim)} button.del{color:var(--danger);border-color:#402030}
+.empty{grid-column:1/-1;text-align:center;color:var(--dim);padding:60px}
+dialog{background:var(--panel);color:var(--txt);border:1px solid var(--accent);border-radius:12px;max-width:80vw;padding:0}
+dialog video,dialog img{max-width:100%;max-height:70vh;display:block}
+dialog .close{position:absolute;top:4px;right:8px;background:none;border:none;color:var(--txt);font-size:20px}
+</style>
+</head>
+<body>
+<header>
+  <h1>LangBang RAG</h1>
+  <input type="text" id="q" placeholder="search this node + fleet (one vector space)…">
+  <select id="cat">
+    <option value="">All types</option><option value="text">Text/Code</option>
+    <option value="image">Images</option><option value="audio">Audio</option><option value="video">Video</option>
+  </select>
+  <select id="scope">
+    <option value="1">whole fleet</option><option value="0">this node only</option>
+  </select>
+  <select id="topk">
+    <option value="24">24 results</option><option value="48" selected>48 results</option>
+    <option value="96">96 results</option><option value="200">200 results</option>
+  </select>
+  <button class="go" onclick="go()">Search</button>
+  <label class="up"><button>↑ image query</button><input type="file" id="imgf" accept="image/*"></label>
+  <span id="imgname"></span>
+  <div id="stats"></div>
+</header>
+<main id="out"><div class="empty">Type a query or upload an image.</div></main>
+<dialog id="lightbox"><button class="close" onclick="lbclose()">✕</button><div id="lbcontent"></div></dialog>
+<script>
+const $=id=>document.getElementById(id);
+fetch('/api/stats').then(r=>r.json()).then(s=>{
+  const f=s.files||{};
+  $('stats').textContent=`${s.node||'local'} index: ${s.vectors?.toLocaleString?.()??s.indexed} vectors — ${Object.entries(f).map(([k,v])=>v+' '+k).join(', ')} · ${s.excluded??0} excluded`;
+});
+$('imgf').onchange=()=>{$('imgname').textContent=$('imgf').files[0]?.name||''};
+$('q').addEventListener('keydown',e=>{if(e.key==='Enter')go()});
+async function go(){
+  const K=parseInt($('topk').value);
+  const body={top_k:K, atlas:$('scope').value==='1'};
+  const cat=$('cat').value; if(cat)body.category=cat;
+  if($('imgf').files[0]){ body.image_file=true; }
+  else if($('q').value.trim()){ body.query=$('q').value.trim(); }
+  else return;
+  let r;
+  if(body.image_file){
+    const fd=new FormData(); fd.append('file',$('imgf').files[0]);
+    const qs=new URLSearchParams({top_k:K, atlas:$('scope').value});
+    if(cat)qs.set('category',cat);
+    r=await fetch('/search-image?'+qs,{method:'POST',body:fd});
+  } else r=await fetch('/search',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+  render(await r.json());
+}
+function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+function render(d){
+  const out=$('out'); out.innerHTML='';
+  const res=d.results||[];
+  if(!res.length){out.innerHTML='<div class="empty">No results.</div>';return}
+  for(const r of res){
+    const card=document.createElement('div'); card.className='card';
+    const prev=document.createElement('div'); prev.className='prev';
+    const pos=r.position?('&position='+r.position):'';
+    const local=r.origin==='local';
+    if(r.category==='image'&&r.thumb){prev.innerHTML=`<img class=previmg loading=lazy src="${esc(r.thumb)}" onerror="this.classList.add('gone')" title="${esc(r.path)}" onclick="show('${esc(r.url)}','img')">`}
+    else if(r.category==='video'&&r.thumb){const u=esc(r.url)+pos;prev.innerHTML=`<video src="${u}#t=${r.position||0}" controls preload=metadata onclick="event.stopPropagation()"></video>`}
+    else if(r.category==='audio'){prev.innerHTML=`<audio src="${esc(r.url)}${pos}" controls></audio>`}
+    else prev.innerHTML=`<div style="padding:12px;font-size:12px;color:var(--dim);align-self:flex-start">${esc(r.snippet).slice(0,240)}</div>`;
+    const kind=document.createElement('span'); kind.className='kind'+(local?'':' atlas');
+    kind.textContent=(local?'':r.origin+' · ')+(r.source&&r.source!=='home'?r.source+' · ':'')+r.category; prev.appendChild(kind);
+    const body=document.createElement('div'); body.className='body';
+    const sc=document.createElement('div'); sc.className='score'; sc.textContent=r.score.toFixed(3)+(r.position?` @ ${(r.position/60).toFixed(1)} min`:'');
+    const p=document.createElement('div'); p.className='path'; p.textContent=r.path;
+    body.appendChild(sc); body.appendChild(p);
+    if(r.category==='text'&&r.snippet){const s2=document.createElement('div');s2.className='snip';s2.textContent=r.snippet;body.appendChild(s2)}
+    if(local&&r.category!=='text'){
+      const row=document.createElement('div'); row.className='row';
+      const rm=document.createElement('button'); rm.className='rm'; rm.textContent='remove';
+      rm.onclick=()=>act(r.path,false);
+      const del=document.createElement('button'); del.className='del'; del.textContent='delete source';
+      del.onclick=()=>{if(confirm('PERMANENTLY delete '+r.path+'?'))act(r.path,true)};
+      row.appendChild(rm); row.appendChild(del); body.appendChild(row);
+    }
+    card.appendChild(prev); card.appendChild(body); out.appendChild(card);
+  }
+}
+async function act(path,del){
+  if(del&&!confirm('Delete source file permanently?'))return;
+  const r=await fetch('/api/remove',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({path,delete_source:del})});
+  const d=await r.json();
+  if(d.error){alert(d.error);return}
+  event.target.closest('.card').style.opacity=.25;
+}
+function show(url,kind){const lb=$('lightbox');$('lbcontent').innerHTML=kind==='img'?`<img src="${url}">`:`<video src="${url}" controls autoplay></video>`;lb.showModal()}
+function lbclose(){$('lightbox').close();$('lbcontent').innerHTML=''}
+$('lightbox').addEventListener('click',e=>{if(e.target.id==='lightbox')lbclose()});
+</script>
+</body>
+</html>

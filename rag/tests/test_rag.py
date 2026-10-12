@@ -1,0 +1,198 @@
+"""Offline tests for the RAG node (no model, no network).
+
+    .venv/bin/python -m unittest -v rag.tests.test_rag
+"""
+import asyncio
+import json
+import os
+import tempfile
+import time
+import unittest
+from unittest import mock
+
+import numpy as np
+
+from rag import embedder, federation
+from rag.store import Store
+
+
+def unit(seed):
+    v = np.random.default_rng(seed).standard_normal(embedder.DIM).astype(np.float32)
+    return v / np.linalg.norm(v)
+
+
+class FakeBackend:
+    name = "fake"
+
+    def __init__(self):
+        self.calls = []
+
+    def embed_text(self, texts, mode):
+        self.calls.append((list(texts), mode))
+        return np.stack([unit(hash(t) % 2**32) for t in texts])
+
+    def embed_image(self, image):
+        return unit(1)
+
+    def embed_audio(self, path):
+        return [(unit(2), 0.0)]
+
+
+class TmpStore(unittest.TestCase):
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.store = Store(os.path.join(self.td.name, "r.db"), "nodeA")
+
+    def tearDown(self):
+        self.td.cleanup()
+
+
+class StoreTests(TmpStore):
+    def test_put_search_and_incremental_cache(self):
+        a, b = unit(10), unit(11)
+        self.store.put_file("/x/a.txt", [(0, "alpha", a, 0)], category="text", source="home")
+        hit = self.store.search(a, 5)[0]
+        self.assertEqual(hit["path"], "/x/a.txt")
+        self.assertAlmostEqual(hit["score"], 1.0, places=2)
+        self.assertEqual(hit["snippet"], "alpha")
+        n0 = self.store.cache.n
+        self.store.put_file("/x/b.txt", [(0, "beta", b, 0)], category="text", source="output")
+        self.assertEqual(self.store.search(b, 1)[0]["path"], "/x/b.txt")  # picked up without reload
+        self.assertEqual(self.store.cache.n, n0 + 1)
+        self.assertEqual([r["path"] for r in self.store.search(a, 5, source="output")], ["/x/b.txt"])
+
+    def test_reindex_shrink_tombstones_old_chunks(self):
+        self.store.put_file("/x/doc", [(0, "c0", unit(1), 0), (1, "c1", unit(2), 0), (2, "c2", unit(3), 0)],
+                            category="text", source="home")
+        self.store.put_file("/x/doc", [(0, "c0'", unit(4), 0)], category="text", source="home")
+        live = self.store.con.execute("SELECT COUNT(*) FROM chunks WHERE deleted=0").fetchone()[0]
+        self.assertEqual(live, 1)
+        hits = self.store.search(unit(3), 5)  # old chunk 2's vector must be gone
+        self.assertTrue(all(h["score"] < 0.5 for h in hits))
+
+    def test_delete_and_dedupe_best_chunk_per_path(self):
+        q = unit(7)
+        self.store.put_file("/v.mp4", [(i, "v", q * (1 - i * 0.1) + unit(100 + i) * i * 0.1, i)
+                                       for i in range(5)], category="video", source="home")
+        hits = self.store.search(q, 5)
+        self.assertEqual(len(hits), 1)  # five chunks, one path
+        self.assertEqual(hits[0]["position"], 0)
+        self.store.delete_path("/v.mp4")
+        self.assertEqual(self.store.search(q, 5), [])
+
+    def test_delete_where_tid_and_refuses_whole_node(self):
+        self.store.put_file("lb-thread:t1/0", [(0, "hi", unit(1), 0)], category="text", source="thread",
+                            meta={"tid": "t1"})
+        self.store.put_file("lb-thread:t2/0", [(0, "yo", unit(2), 0)], category="text", source="thread",
+                            meta={"tid": "t2"})
+        self.assertEqual(self.store.delete_where(tid="t1"), 1)
+        self.assertEqual({h["path"] for h in self.store.search(unit(1), 5)}, {"lb-thread:t2/0"})
+        with self.assertRaises(ValueError):
+            self.store.delete_where()
+
+    def test_replication_roundtrip_with_tombstones(self):
+        other = Store(os.path.join(self.td.name, "b.db"), "nodeB")
+        other.put_file("/b/1", [(0, "one", unit(1), 0)], category="text", source="home")
+        other.put_file("/b/2", [(0, "two", unit(2), 0)], category="image", source="output")
+        rows = [json.loads(json.dumps(r)) for r in other.export(0)]  # through JSON like the wire
+        self.store.apply_replica(rows)
+        cur = max(r["seq"] for r in rows)
+        hit = self.store.search(unit(2), 1)[0]
+        self.assertEqual((hit["node"], hit["path"]), ("nodeB", "/b/2"))
+        other.delete_path("/b/2")
+        self.store.apply_replica(other.export(cur))
+        self.assertNotIn("/b/2", {h["path"] for h in self.store.search(unit(2), 5)})
+        # replicas are never re-exported (no loops through the fleet)
+        self.assertEqual(self.store.export(0), [])
+        # a peer can't overwrite our own rows
+        self.store.put_file("/mine", [(0, "m", unit(5), 0)], category="text", source="home")
+        self.store.apply_replica([{**rows[0], "node": "nodeA", "path": "/mine", "chunk_idx": 0,
+                                   "text": "hijack"}])
+        self.assertEqual(self.store.search(unit(5), 1)[0]["snippet"], "m")
+
+
+class PrefixTests(unittest.TestCase):
+    def test_prefixes(self):
+        self.assertEqual(embedder.prefixed(["x"], "query"), ["task: search result | query: x"])
+        self.assertEqual(embedder.prefixed(["x"], "document"), ["title: none | text: x"])
+        with self.assertRaises(ValueError):
+            embedder.prefixed(["x"], None)
+
+    def test_remote_sends_mode_and_never_preprefixes(self):
+        """Regression: the old indexer double-prefixed docs AND let Atlas default to query mode."""
+        rb = embedder.RemoteBackend("http://atlas")
+        sent = []
+
+        def fake_post(path, body, ctype):
+            d = json.loads(body)
+            sent.append(d)
+            return {"data": [{"index": i, "embedding": unit(i).tolist()} for i in range(len(d["input"]))]}
+        rb._post = fake_post
+        rb.embed_text(["chunk one", "chunk two"], "document")
+        self.assertEqual(sent[0]["mode"], "document")
+        self.assertEqual(sent[0]["input"], ["chunk one", "chunk two"])
+
+    def test_indexer_docs_use_document_mode(self):
+        from rag.indexer import Indexer
+        with tempfile.TemporaryDirectory() as td:
+            st = Store(os.path.join(td, "r.db"), "n")
+            fb = FakeBackend()
+            ix = Indexer(st, embedder.Embedder(fb), {"model_fp": "fp", "sources": {}})
+            ix.index_docs([{"path": "lb-thread:t/0", "text": "hello world " * 20, "source": "thread",
+                            "meta": {"tid": "t"}}])
+            self.assertTrue(fb.calls and all(mode == "document" for _, mode in fb.calls))
+            self.assertEqual(st.search(unit(0), 1)[0]["meta"], {"tid": "t"})
+
+
+class FederationTests(TmpStore):
+    def test_merge_dedupes_keeps_best(self):
+        out = federation.merge([{"node": "a", "path": "/p", "score": 0.5}, {"node": "a", "path": "/p", "score": 0.7},
+                                {"node": "b", "path": "/p", "score": 0.6}], 10)
+        self.assertEqual([(r["node"], r["score"]) for r in out], [("a", 0.7), ("b", 0.6)])
+
+    def _fed(self, peers, **kw):
+        s = {"model_fp": "fpA", "peers": peers, "peer_timeout": 0.5, "replicate_interval": 600, **kw}
+        return federation.Federation(self.store, s, log=lambda m: None)
+
+    def test_dead_peer_times_out_and_fp_mismatch_refused(self):
+        fed = self._fed([{"name": "dead", "url": "http://10.255.255.1:9", "kind": "langbang"},
+                         {"name": "wrongfp", "url": "http://x", "kind": "atlas", "model_fp": "other"}])
+        t0 = time.time()
+        res = asyncio.run(fed.search(qvec=unit(1), query="bears", k=5))
+        self.assertEqual(res, [])
+        self.assertLess(time.time() - t0, 2.5)
+        self.assertFalse(fed.status["dead"]["ok"])
+        self.assertIn("mismatch", fed.status["wrongfp"]["error"])
+
+    def test_langbang_peer_hits_are_proxied_and_tagged(self):
+        fed = self._fed([{"name": "b", "url": "http://b:8900", "kind": "langbang"}])
+
+        class R:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"model_fp": "fpA", "results": [
+                    {"node": "b", "path": "/pic.png", "category": "image", "score": 0.9,
+                     "url": "/media?path=%2Fpic.png", "thumb": "/thumbnail?path=%2Fpic.png&position=0"}]}
+
+        async def fake_post(self, url, json=None, headers=None):
+            self.sent = json
+            assert json["scope"] == "local" and json["vector"]
+            return R()
+        with mock.patch("httpx.AsyncClient.post", fake_post):
+            res = asyncio.run(fed.search(qvec=unit(1), query="q", k=5))
+        self.assertEqual(res[0]["origin"], "b")
+        self.assertTrue(res[0]["url"].startswith("/proxy?node=b&p=%2Fmedia"))
+
+    def test_fresh_replica_skips_network(self):
+        fed = self._fed([{"name": "b", "url": "http://10.255.255.1:9", "kind": "langbang", "replicate": True}])
+        self.store.kv_set("last_sync:b", time.time())
+        t0 = time.time()
+        asyncio.run(fed.search(qvec=unit(1), query="q", k=5))
+        self.assertLess(time.time() - t0, 0.3)
+        self.assertNotIn("b", fed.status)
+
+
+if __name__ == "__main__":
+    unittest.main()
