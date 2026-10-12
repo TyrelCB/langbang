@@ -231,10 +231,24 @@ class Indexer:
         return n
 
     # ---- full rescan ----------------------------------------------------
-    def rescan(self, categories=("text", "image", "audio", "video"), limit=0):
+    def in_window(self, now=None):
+        """`rescan_window` "HH:MM-HH:MM" (local, may wrap midnight): bulk
+        indexing runs on the index backend (Atlas), and while it does, Atlas's
+        own searches slow from ~0.1 s to 3-39 s — so the backlog runs at night
+        and resumes the next night (rescans are mtime-incremental)."""
+        w = (self.s.get("rescan_window") or "").strip()
+        if not w:
+            return True
+        a, b = ((int(x.split(":")[0]) * 60 + int(x.split(":")[1])) for x in w.split("-"))
+        t = time.localtime(now)
+        m = t.tm_hour * 60 + t.tm_min
+        return a <= m < b if a <= b else (m >= a or m < b)
+
+    def rescan(self, categories=("text", "image", "audio", "video"), limit=0, windowed=False):
         if self.state["running"]:
             return self.state
-        self.state.update(running=True, done=0, errors=0, started=time.time(), finished=None)
+        self.state.update(running=True, done=0, errors=0, started=time.time(), finished=None,
+                          stopped=None)
         try:
             known = self.store.known_mtimes()
             todo, live = [], set()
@@ -256,7 +270,9 @@ class Indexer:
                     and not os.path.exists(p)]
             for p in gone:
                 self.store.delete_path(p)
-            order = {"video": 0, "audio": 1, "image": 2, "text": 3}
+            # cheap + most-searched first; audio last: it is hours of Atlas GPU
+            # time (8 s windows, serial ffmpeg) and slows the fleet's searches
+            order = {"text": 0, "image": 1, "video": 2, "audio": 3}
             todo.sort(key=lambda t: order[t[1]])
             if limit:
                 todo = todo[:limit]
@@ -265,6 +281,12 @@ class Indexer:
             t0 = time.time()
 
             def work(item):
+                if self.state.get("stopped") or (windowed and not self.in_window()):
+                    if not self.state.get("stopped"):
+                        self.state["stopped"] = f"outside rescan_window {self.s.get('rescan_window')}"
+                        self.log(f"rescan: paused at {self.state['done']}/{len(todo)} "
+                                 f"({self.state['stopped']}); resumes next run")
+                    return
                 self.state["current"] = item[0]
                 try:
                     self.index_file(item[0], force=True)

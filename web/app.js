@@ -4888,7 +4888,11 @@ async function ragSearch(q) {
   RAG.last = q;
   const body = { ...q, category: RAG.cat };
   if (RAG.here && ED.dir && !q.image_path) body.path_prefix = ED.dir.replace(/\/?$/, "/");
-  ragRender(null, q.scope === "fleet" ? "≈ searching the fleet …" : "≈ searching …");
+  // Enter on a query already showing local hits: keep them up while the
+  // fleet (Atlas: seconds) answers, then swap in the merged list
+  const same = RAG.out && RAG.out.query === q.query && RAG.out.cat === RAG.cat && !q.image_path;
+  if (same && q.scope === "fleet") ragRender(RAG.out, "≈ adding the fleet … (Atlas takes a few seconds)");
+  else ragRender(null, q.scope === "fleet" ? "≈ searching the fleet …" : "≈ searching …");
   let out;
   try {
     const r = await fetch("/api/rag/search", { method: "POST", headers: { "Content-Type": "application/json" },
@@ -4901,6 +4905,10 @@ async function ragSearch(q) {
   }
   if (seq !== RAG.seq) return;
   if (q.exclude) out.results = out.results.filter((h) => !(h.local && h.path === q.exclude));
+  out.query = q.query;
+  out.cat = body.category;
+  out.scope = q.scope;
+  RAG.out = out;
   ragRender(out);
 }
 
@@ -4926,9 +4934,10 @@ function ragRender(out, note) {
   here.onclick = () => { RAG.here = !RAG.here; if (RAG.last) ragSearch(RAG.last); };
   bar.appendChild(here);
   tree.appendChild(bar);
-  const q = RAG.last || {};
+  const q = out && out.scope ? { ...RAG.last, scope: out.scope } : RAG.last || {};
   const what = q.image_path ? "like " + q.image_path.split("/").pop() : q.label || `“${q.query || ""}”`;
   if (!out) { tree.appendChild(el("div", "ed-note", note || "")); return; }
+  if (note) tree.appendChild(el("div", "ed-note rag-pending", note));
   const peers = Object.entries(out.peers || {}).map(([n, p]) => `${n} ${p.ok ? "✓" : "✕"}`).join(" ");
   tree.appendChild(el("div", "ed-note",
     `≈ ${what} · ${out.results.length} hits · ${q.scope === "fleet" ? "fleet" + (peers ? " (" + peers + ")" : "") : "this box · Enter = fleet"}`));

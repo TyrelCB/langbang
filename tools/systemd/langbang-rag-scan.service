@@ -7,4 +7,4 @@ Requires=langbang-rag.service
 Type=oneshot
 User=tyrel
 # loopback = authorized; the node runs the walk in its own background thread
-ExecStart=/usr/bin/curl -fsS -X POST http://127.0.0.1:8900/api/rescan
+ExecStart=/usr/bin/curl -fsS -X POST http://127.0.0.1:8900/api/rescan?windowed=1
