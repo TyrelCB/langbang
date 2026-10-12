@@ -1,0 +1,30 @@
+# LangBang RAG node (rag/ package): multimodal EmbeddingGemma 2 index + fleet
+# federation on :8900. Separate from langbang.service on purpose — restarting
+# the app must not reload the model, and torch encodes stay off its event loop.
+# Install: sudo cp tools/systemd/langbang-rag*.{service,timer} /etc/systemd/system/ &&
+#          sudo systemctl daemon-reload && sudo systemctl enable --now langbang-rag langbang-rag-scan.timer
+[Unit]
+Description=LangBang RAG node (EmbeddingGemma 2, :8900)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tyrel
+Group=tyrel
+WorkingDirectory=/home/tyrel/projects/LangBang
+Environment=PATH=/home/tyrel/.local/bin:/usr/local/bin:/usr/bin:/usr/sbin
+Environment=PYTHONUNBUFFERED=1
+Environment=OMP_NUM_THREADS=8
+# via /usr/bin/bash so SELinux transitions to unconfined_service_t (see langbang.service)
+ExecStart=/usr/bin/bash -c 'exec .venv/bin/uvicorn rag.server:app --host 0.0.0.0 --port 8900'
+StandardOutput=append:/tmp/langbang-rag.log
+StandardError=append:/tmp/langbang-rag.log
+Restart=always
+RestartSec=5
+# indexing is background work: never starve the chat app or the TTS threadpool
+Nice=10
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
