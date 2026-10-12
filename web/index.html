@@ -497,6 +497,7 @@
             placeholder="~/path… autocompletes (Tab) · or type a name to search this folder · Enter opens">
           <div id="ed-suggest" class="hidden"></div>
         </div>
+        <button id="btn-ed-rag" class="btn ghost sm" type="button" title="≈ search by meaning (RAG): text, code, PDFs, images, video, audio — this box + the fleet. Or start the box with ?">≈ RAG</button>
         <label class="chk ed-hid"><input type="checkbox" id="ed-hidden"> .dotfiles</label>
       </div>
       <div class="ed-body">
@@ -510,6 +511,7 @@
               <button class="btn ghost sm" data-mode="split">SPLIT</button>
               <button class="btn ghost sm" data-mode="preview">PREVIEW</button>
             </span>
+            <button id="btn-ed-related" class="btn ghost sm hidden" type="button" title="≈ find files related to this one (your selection, the text, or the image itself)">≈ RELATED</button>
             <button id="btn-ed-read" class="btn ghost sm hidden" type="button" title="Read aloud: your selection, or the whole file (unsaved edits included)">🔊 READ</button>
           </div>
           <div class="ed-wrap">

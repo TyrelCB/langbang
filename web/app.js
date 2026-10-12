@@ -4549,6 +4549,8 @@ async function edBrowse(dir) {
     return false;
   }
   ED.dir = out.path;
+  RAG.shown = false;
+  $(".ed-body").classList.remove("rag");
   try { localStorage.setItem("lb-ed-dir", out.path); } catch {}
   const showHidden = $("#ed-hidden").checked;
   tree.replaceChildren();
@@ -4582,6 +4584,7 @@ function edMarkTree() {
 
 function edSetBuffer(path, content, ver, eol, note) {
   edViewerOff();
+  ED.remote = false;
   if (ED.assist.path !== path) edAssistReset(path);
   $("#ed-assist").classList.remove("hidden");
   ED.path = path;
@@ -4627,9 +4630,12 @@ function edViewerOff() {
   $(".ed-wrap").classList.remove("viewer");
 }
 
-async function edShowMedia(path, kind) {
+// `remote` ({src, label}): a fleet hit from ≈ RAG — viewed through the node's
+// proxy, never editable, and the tree stays on the results
+async function edShowMedia(path, kind, remote) {
   edViewerOff();
-  const src = "/api/media?path=" + encodeURIComponent(path);
+  ED.remote = !!remote;
+  const src = remote ? remote.src : "/api/media?path=" + encodeURIComponent(path);
   ED.path = path; ED.ver = null; ED.orig = ""; ED.viewer = true; ED.md = false; ED.lang = null;
   const ta = $("#ed-text");
   ta.value = ""; ta.disabled = true;
@@ -4638,8 +4644,8 @@ async function edShowMedia(path, kind) {
   $("#ed-modes").classList.add("hidden");
   $("#ed-assist").classList.add("hidden");
   $("#ed-confirm").classList.add("hidden");
-  $("#ed-file").textContent = path;
-  $("#ed-path").value = path;
+  $("#ed-file").textContent = remote ? remote.label : path;
+  $("#ed-path").value = remote ? remote.label : path;
   $("#ed-lang").textContent = kind === "img" ? "IMAGE" : kind.toUpperCase();
   const v = $("#ed-viewer");
   v.classList.remove("hidden");
@@ -4667,7 +4673,8 @@ async function edShowMedia(path, kind) {
   open.href = src; open.target = "_blank";
   const bar = el("div", "ed-viewer-bar");
   bar.appendChild(open);
-  if (/\.svg$/i.test(path)) { // SVG is text too: offer the editor
+  if (remote) { /* not on this box: view only */ }
+  else if (/\.svg$/i.test(path)) { // SVG is text too: offer the editor
     const src2 = el("button", "btn ghost sm", "✎ EDIT SOURCE");
     src2.onclick = () => edLoad(path, true);
     bar.appendChild(src2);
@@ -4714,8 +4721,8 @@ async function edShowMedia(path, kind) {
   edRefreshChrome();
   edMarkTree();
   const dir = path.slice(0, path.lastIndexOf("/")) || "/";
-  if (dir !== ED.dir) await edBrowse(dir);
-  return true;
+  if (dir !== ED.dir && !remote && !RAG.shown) await edBrowse(dir);
+  return node;
 }
 
 async function edLoad(path, asText = false) {
@@ -4733,7 +4740,7 @@ async function edLoad(path, asText = false) {
     `${f.content.split("\n").length} LINES · ${fmtBytes(f.size)} · ${f.eol.toUpperCase()}` +
     (f.writable ? "" : " · ⚠ READ-ONLY ON DISK"));
   const dir = f.path.slice(0, f.path.lastIndexOf("/")) || "/";
-  if (dir !== ED.dir) await edBrowse(dir);
+  if (dir !== ED.dir && !RAG.shown) await edBrowse(dir);
   return true;
 }
 
@@ -4846,6 +4853,194 @@ $("#ed-hidden").onchange = () => {
   if (ED.dir) edBrowse(ED.dir);
   if (!$("#ed-suggest").classList.contains("hidden")) sugUpdate();
 };
+// ---- ≈ RAG: semantic search over the RAG node (this box + fleet) ----------
+// ≈ toggle (or a leading "?") turns the path box into a meaning search; /…
+// and ~/… still autocomplete. Typing searches this box (~0.15 s); Enter adds
+// the fleet (Atlas & peers, up to their timeouts). Hits replace the tree;
+// "↰ back" returns to the folder. Local hits open in the editor/viewer (text
+// scrolls to the matching chunk, video/audio seek to the hit); fleet media
+// streams through /api/rag/file; threads open in chat.
+const RAG = { on: false, shown: false, timer: null, seq: 0, last: null, cat: "", here: false };
+try { RAG.on = localStorage.getItem("lb-ed-rag") === "1"; } catch {}
+
+function ragQuery(raw) {
+  if (raw.startsWith("?")) return raw.slice(1).trim();
+  if (RAG.on && !isPathish(raw)) return raw;
+  return null;
+}
+
+function ragSyncBtn() {
+  $("#btn-ed-rag").classList.toggle("on", RAG.on);
+  $("#ed-path").placeholder = RAG.on
+    ? "≈ describe what you're looking for — text, images, video, audio · Enter = whole fleet"
+    : "~/path… autocompletes (Tab) · or type a name to search this folder · Enter opens";
+}
+
+const ragName = (h) => {
+  if (h.path.startsWith("lb-thread:")) return "💬 " + ((h.meta && h.meta.title) || "chat thread");
+  const i = h.path.lastIndexOf("/");
+  return i >= 0 && h.path.length > 1 ? h.path.slice(i + 1) || h.path : h.path;
+};
+const RAG_ICON = { image: "▣", video: "▶", audio: "♪", text: "≡" };
+
+async function ragSearch(q) {
+  const seq = ++RAG.seq;
+  RAG.last = q;
+  const body = { ...q, category: RAG.cat };
+  if (RAG.here && ED.dir && !q.image_path) body.path_prefix = ED.dir.replace(/\/?$/, "/");
+  ragRender(null, q.scope === "fleet" ? "≈ searching the fleet …" : "≈ searching …");
+  let out;
+  try {
+    const r = await fetch("/api/rag/search", { method: "POST", headers: { "Content-Type": "application/json" },
+                                               body: JSON.stringify(body) });
+    out = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(out.detail || "HTTP " + r.status);
+  } catch (e) {
+    if (seq === RAG.seq) ragRender(null, "✕ " + e.message);
+    return;
+  }
+  if (seq !== RAG.seq) return;
+  if (q.exclude) out.results = out.results.filter((h) => !(h.local && h.path === q.exclude));
+  ragRender(out);
+}
+
+function ragRender(out, note) {
+  const tree = $("#ed-tree");
+  RAG.shown = true;
+  $(".ed-body").classList.add("rag");
+  tree.replaceChildren();
+  const back = el("div", "ed-row dir", "↰ back to " + (ED.dir || "~"));
+  back.onclick = () => edBrowse(ED.dir || "~");
+  tree.appendChild(back);
+  // filters: kind + this-folder-only; re-run the last query on change
+  const bar = el("div", "rag-filters");
+  for (const [c, label] of [["", "all"], ["text", "≡ text"], ["image", "▣ img"], ["video", "▶ video"], ["audio", "♪ audio"]]) {
+    const b = el("button", "rag-chip" + (RAG.cat === c ? " on" : ""), label);
+    b.type = "button";
+    b.onclick = () => { RAG.cat = c; if (RAG.last) ragSearch(RAG.last); };
+    bar.appendChild(b);
+  }
+  const here = el("button", "rag-chip" + (RAG.here ? " on" : ""), "📁 this folder");
+  here.type = "button";
+  here.title = "only under " + (ED.dir || "~");
+  here.onclick = () => { RAG.here = !RAG.here; if (RAG.last) ragSearch(RAG.last); };
+  bar.appendChild(here);
+  tree.appendChild(bar);
+  const q = RAG.last || {};
+  const what = q.image_path ? "like " + q.image_path.split("/").pop() : q.label || `“${q.query || ""}”`;
+  if (!out) { tree.appendChild(el("div", "ed-note", note || "")); return; }
+  const peers = Object.entries(out.peers || {}).map(([n, p]) => `${n} ${p.ok ? "✓" : "✕"}`).join(" ");
+  tree.appendChild(el("div", "ed-note",
+    `≈ ${what} · ${out.results.length} hits · ${q.scope === "fleet" ? "fleet" + (peers ? " (" + peers + ")" : "") : "this box · Enter = fleet"}`));
+  if (!out.results.length) tree.appendChild(el("div", "ed-note", "nothing close enough"));
+  for (const h of out.results) {
+    const r = el("div", "rag-hit" + (h.local || h.url || h.path.startsWith("lb-thread:") ? "" : " noopen"));
+    if (h.thumb) {
+      const im = el("img", "rag-thumb");
+      im.loading = "lazy";
+      im.src = h.thumb;
+      im.alt = "";
+      im.onerror = () => im.remove();
+      r.appendChild(im);
+    } else r.appendChild(el("span", "rag-ico", RAG_ICON[h.category] || "·"));
+    const body = el("div", "rag-body");
+    const top = el("div", "rag-top");
+    top.append(el("span", "nm", ragName(h)), el("span", "rag-score", h.score.toFixed(2)));
+    body.appendChild(top);
+    const where = h.path.startsWith("lb-thread:") ? "chat" : h.path.slice(0, h.path.lastIndexOf("/") + 1);
+    const sub = el("div", "rag-sub");
+    if (!h.local || h.node !== out.node) sub.appendChild(el("span", "rag-node", h.node));
+    if (h.position && (h.category === "video" || h.category === "audio")) sub.appendChild(el("span", "rag-node", "@" + fmtMS(h.position)));
+    sub.appendChild(el("span", "rel", where + "‎"));
+    body.appendChild(sub);
+    if (h.category === "text" && h.snippet && !h.path.startsWith("lb-thread:")) body.appendChild(el("div", "rag-snip", h.snippet.slice(0, 220)));
+    else if (h.path.startsWith("lb-thread:") && h.snippet) body.appendChild(el("div", "rag-snip", h.snippet.replace(/^THREAD:.*\n/, "").slice(0, 220)));
+    r.appendChild(body);
+    r.title = (h.node !== out.node ? h.node + ":" : "") + h.path;
+    r.onclick = () => ragOpen(h, r);
+    tree.appendChild(r);
+  }
+}
+
+async function ragOpen(h, row) {
+  SFX.play("click");
+  for (const x of document.querySelectorAll("#ed-tree .rag-hit.on")) x.classList.remove("on");
+  row.classList.add("on");
+  if (h.path.startsWith("lb-thread:")) {
+    const tid = (h.meta && h.meta.tid) || h.path.slice(10).split("/")[0];
+    edClose();
+    if ($("#editor-panel").classList.contains("hidden"))
+      openThread(threads.find((x) => x.id === tid) || { id: tid, title: (h.meta && h.meta.title) || "thread" });
+    return;
+  }
+  const kind = edMediaKind(h.path) || (h.category === "image" ? "img" : h.category === "text" ? null : h.category);
+  if (!h.local) {
+    if (h.url && kind) {
+      edGuard(async () => {
+        const node = await edShowMedia(h.path, kind, { src: h.url, label: h.node + ":" + h.path });
+        ragSeek(node, h);
+      });
+    } else {
+      edStatus(`${h.node}:${h.path} — not openable from here (${h.node === "atlas" ? "an Atlas document" : "no file on this box"}). Snippet: ${(h.snippet || "").slice(0, 160)}`, "err");
+    }
+    return;
+  }
+  edGuard(async () => {
+    if (kind) { ragSeek(await edShowMedia(h.path, kind), h); return; }
+    if (await edLoad(h.path)) ragJump(h.snippet);
+  });
+}
+
+function ragSeek(node, h) {
+  if (!node || !h.position || !("currentTime" in node)) return;
+  const go = () => { node.currentTime = h.position; };
+  if (node.readyState >= 1) go(); else node.addEventListener("loadedmetadata", go, { once: true });
+}
+
+// text hit: select the chunk's first line and scroll it into view
+function ragJump(snippet) {
+  const ta = $("#ed-text");
+  const probe = (snippet || "").split("\n").map((x) => x.trim()).find((x) => x.length >= 8);
+  if (!probe) return;
+  const i = ta.value.indexOf(probe);
+  if (i < 0) return;
+  const line = ta.value.slice(0, i).split("\n").length - 1;
+  const lh = parseFloat(getComputedStyle(ta).lineHeight) || 18;
+  ta.scrollTop = Math.max(0, (line - 3) * lh);
+  edSyncScroll();
+  ta.setSelectionRange(i, i + probe.length);
+  edStatus(`≈ matching chunk at line ${line + 1}`);
+}
+
+// ≈ RELATED: the image itself, or the selection / the start of the text
+function ragRelated() {
+  if (ED.path === null) return;
+  SFX.play("click");
+  const kind = edMediaKind(ED.path);
+  if (ED.viewer && kind === "img" && !ED.remote) {
+    ragSearch({ image_path: ED.path, scope: "fleet", exclude: ED.path });
+    return;
+  }
+  if (ED.viewer) { edStatus("≈ RELATED works on text and images", "err"); return; }
+  const sel = edSelection();
+  const text = (sel && sel.text.trim()) || $("#ed-text").value;
+  const q = text.trim().slice(0, 1500);
+  if (!q) return;
+  ragSearch({ query: q, scope: "fleet", exclude: ED.path,
+              label: sel && sel.text.trim() ? "related to the selection" : "related to " + ED.path.split("/").pop() });
+}
+
+$("#btn-ed-rag").onclick = () => {
+  RAG.on = !RAG.on;
+  try { localStorage.setItem("lb-ed-rag", RAG.on ? "1" : "0"); } catch {}
+  SFX.play("click");
+  ragSyncBtn();
+  $("#ed-path").focus();
+  if ($("#ed-path").value.trim()) sugUpdate();
+};
+$("#btn-ed-related").onclick = ragRelated;
+ragSyncBtn();
+
 // ---- path box: autocomplete (/… ~/…) + recursive name search (anything else)
 // Path mode lists the typed folder (cached 10s) and filters by the last
 // segment; a segment that matches nothing there falls through to a search
@@ -4952,7 +5147,14 @@ function sugUpdate() {
   const raw = $("#ed-path").value.trim();
   const seq = ++SUG.seq;
   clearTimeout(SUG.timer);
+  clearTimeout(RAG.timer);
   if (!raw) { sugClose(); return; }
+  const rq = ragQuery(raw);
+  if (rq !== null) { // ≈ mode: results go to the tree pane, live = this box only
+    sugClose();
+    if (rq) RAG.timer = setTimeout(() => ragSearch({ query: rq, scope: "local" }), 450);
+    return;
+  }
   if (isPathish(raw)) {
     const v = raw === "~" ? "~/" : raw;
     SUG.timer = setTimeout(() => sugPath(v, seq), 60);
@@ -5008,7 +5210,9 @@ $("#ed-path").addEventListener("keydown", (e) => {
   else if (e.key === "Escape" && open) { e.preventDefault(); e.stopPropagation(); sugClose(); } // list only, not the panel
   else if (e.key === "Enter") {
     e.preventDefault();
-    if (open && SUG.sel >= 0) sugPick(SUG.sel);
+    const rq = ragQuery($("#ed-path").value.trim());
+    if (rq) { clearTimeout(RAG.timer); ragSearch({ query: rq, scope: "fleet" }); }
+    else if (open && SUG.sel >= 0) sugPick(SUG.sel);
     else { sugClose(); edGo($("#ed-path").value); }
   }
 });
@@ -5245,11 +5449,13 @@ const rdActive = () => RD.i >= 0;
 
 function rdReadable() {
   if (ED.path === null) return false;
-  if (ED.viewer) return /\.pdf$/i.test(ED.path);
+  if (ED.viewer) return !ED.remote && /\.pdf$/i.test(ED.path);
   return ED.md || !ED.lang || RD_PROSE.has(ED.lang);
 }
 function rdSyncBtn() {
   $("#btn-ed-read").classList.toggle("hidden", !rdReadable());
+  $("#btn-ed-related").classList.toggle("hidden", ED.path === null ||
+    (ED.viewer && (ED.remote || edMediaKind(ED.path) !== "img")));
   $("#btn-ed-read").classList.toggle("on", rdActive() && RD.src === ED.path);
 }
 
