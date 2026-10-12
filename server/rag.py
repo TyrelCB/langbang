@@ -74,10 +74,11 @@ def drop_thread(tid):
     drop(tid=tid)
 
 
-def search(query, *, category="", source="", scope="", top_k=8, image_path="", timeout=20):
+def search(query, *, category="", source="", scope="", top_k=8, image_path="", path_prefix="",
+           timeout=20):
     r = settings()
     body = {"top_k": int(top_k), "scope": scope or r["scope"], "category": category or None,
-            "source": source or None}
+            "source": source or None, "path_prefix": path_prefix or None}
     if image_path:
         body["image_path"] = os.path.abspath(os.path.expanduser(image_path))
     else:

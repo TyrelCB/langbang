@@ -8,6 +8,8 @@ import re
 import shutil
 import subprocess
 import time
+import urllib.error
+import urllib.parse
 import uuid
 
 import httpx
@@ -16,6 +18,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
 from . import agent, comfy, config, fileassist, ivr, learning, mcp, notify, rag, runs, schedule, sfxgen, ttsjobs, voice
 
@@ -857,6 +860,7 @@ async def fs_write(body: FsWriteIn):
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
+    rag.push_paths([p])  # FILES saves re-index (fire-and-forget)
     return {"path": shown, "version": _version(data), "size": len(data)}
 
 
@@ -1039,6 +1043,78 @@ async def notify_events(since: int = -1):
     if since < 0:
         return {"last": notify.since(0)["last"], "events": []}
     return notify.since(since)
+
+
+class RagSearchIn(BaseModel):
+    query: str = ""
+    image_path: str = ""
+    category: str = ""
+    source: str = ""
+    scope: str = ""
+    path_prefix: str = ""
+    top_k: int = 40
+
+
+def _rag_file(p: str) -> str:
+    return "/api/rag/file?p=" + urllib.parse.quote(p, safe="")
+
+
+@app.post("/api/rag/search")
+async def rag_search(body: RagSearchIn):
+    """✎ FILES ≈ search. Server-side like /api/rag/status (the node's port is
+    plain http and LAN-only). Hits gain `local` (openable in the editor) and
+    browser-safe `thumb`/`url` through /api/rag/file."""
+    if not (body.query.strip() or body.image_path):
+        raise HTTPException(400, "query or image_path required")
+    try:
+        d = await asyncio.to_thread(
+            rag.search, body.query.strip(), category=body.category, source=body.source, scope=body.scope,
+            top_k=max(1, min(body.top_k, 100)), image_path=body.image_path,
+            path_prefix=body.path_prefix, timeout=30)
+    except urllib.error.HTTPError as e:
+        raise HTTPException(e.code if e.code < 500 else 502, e.read().decode("utf-8", "replace")[:300])
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"RAG node unreachable: {type(e).__name__}: {e}")
+    me = d.get("node")
+    out = []
+    for r in d.get("results", []):
+        path = r.get("path") or ""
+        r["local"] = r.get("node") == me and path.startswith("/") and os.path.isfile(path)
+        if r["local"] and r.get("category") in ("image", "video"):
+            r["thumb"] = _rag_file("/thumbnail?" + urllib.parse.urlencode(
+                {"path": path, "position": r.get("position") or 0}))
+        elif r.get("thumb"):
+            r["thumb"] = _rag_file(r["thumb"])
+        if r.get("url") and not r["local"]:
+            r["url"] = _rag_file(r["url"])
+        out.append(r)
+    return {"results": out, "node": me, "indexed": d.get("indexed"), "peers": d.get("peers", {})}
+
+
+@app.get("/api/rag/file")
+async def rag_file(p: str, request: Request):
+    """Stream a node thumbnail / media / peer-proxy response to the browser.
+    Only those three node routes; Range passes through (video seeking)."""
+    if not p.startswith(("/thumbnail?", "/media?", "/proxy?")):
+        raise HTTPException(400, "only /thumbnail, /media and /proxy")
+    headers = {"Range": request.headers["range"]} if request.headers.get("range") else {}
+    client = httpx.AsyncClient(timeout=60)
+    try:
+        r = await client.send(client.build_request("GET", rag.settings()["url"].rstrip("/") + p,
+                                                   headers=headers), stream=True)
+    except httpx.HTTPError as e:
+        await client.aclose()
+        raise HTTPException(502, f"{type(e).__name__}: {e}")
+
+    async def close():
+        await r.aclose()
+        await client.aclose()
+    return StreamingResponse(r.aiter_raw(), status_code=r.status_code,
+                             media_type=r.headers.get("content-type", "application/octet-stream"),
+                             headers={h: r.headers[h] for h in ("content-length", "content-range",
+                                                                "accept-ranges", "cache-control")
+                                      if h in r.headers},
+                             background=BackgroundTask(close))
 
 
 @app.get("/api/rag/status")

@@ -20,7 +20,8 @@ pictures, and an image finds similar images and video frames.
 | `thread` | each finished chat exchange (`USER: … LANGBANG: …`) | pushed by `runs._produce`; the thread delete removes it |
 | `skill` / `memory` | `~/.langbang/skills`, `~/.langbang/memory` | pushed on write; tombstoned on delete |
 
-Files the agent writes with `write_file` / `edit_file` are pushed when the run finishes.
+Files the agent writes with `write_file` / `edit_file` are pushed when the run finishes, and
+FILES saves are pushed on save.
 Pushes are fire-and-forget (`server/rag.py`): a dead node never delays a run.
 
 ## Agent tools
@@ -31,6 +32,21 @@ Pushes are fire-and-forget (`server/rag.py`): a dead node never delays a run.
 
 Both return score, kind, absolute path (cited media paths render inline) and snippets.
 They can be toggled in CONFIG → tools; client settings are in CONFIG → RAG.
+
+## FILES panel (≈ RAG)
+
+The ✎ FILES path box doubles as a semantic search:
+- **Turning it on:** press **≈ RAG** (remembered per browser), or start the query with `?`. `/…` and `~/…` still autocomplete.
+- **Searching:** typing searches this box live (~0.15 s); **Enter** adds the fleet (Atlas and peers, up to their timeouts).
+- **Results:** hits replace the tree, with thumbnails, score, node and snippet. Chips filter by kind (text/img/video/audio) or limit hits to the current folder (`path_prefix`); `↰ back` returns to the folder.
+- **Opening a hit:**
+  - local text opens in the editor, scrolled to and selecting the matching chunk;
+  - local media opens in the viewer and seeks video/audio to the hit;
+  - fleet media streams view-only through `/api/rag/file`;
+  - thread hits open the chat.
+- **≈ RELATED** (editor bar) searches by the open image itself, or by the selection or the start of the text.
+
+LangBang serves these through `POST /api/rag/search` and `GET /api/rag/file?p=` (node `/thumbnail`, `/media`, `/proxy` only), so an https tab never touches the node's plain-http port.
 
 ## Node API (`rag/server.py`)
 
