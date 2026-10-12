@@ -8,6 +8,7 @@ own node name.
 """
 import base64
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -250,8 +251,27 @@ class Store:
                WHERE deleted=0 GROUP BY 1,2,3""").fetchall()
         return [dict(zip(("node", "category", "source", "files", "vectors"), r)) for r in rows]
 
-    def search(self, qvec, k=10, **filters):
-        return self.cache.search(qvec, k, **filters)
+    def search(self, qvec, k=10, terms=None, **filters):
+        return self.cache.search(qvec, k, terms=terms, **filters)
+
+
+_SEP = re.compile(r"[\W_]+")
+_STOP = {"the", "and", "for", "with", "from", "that", "this", "file", "files", "find", "show", "about",
+         "where", "what", "are", "was", "you", "your", "mine", "any", "all", "some", "please"}
+NAME_BOOST = 0.15   # every query word in the file name
+DIR_BOOST = 0.04    # ... or only in its folder's name
+
+
+def name_terms(query):
+    """Words worth matching against file names: 3+ chars, not filler."""
+    return [t for t in dict.fromkeys(_SEP.sub(" ", (query or "").lower()).split())
+            if len(t) >= 3 and t not in _STOP][:8]
+
+
+def _name_key(path):
+    """'resume/Tyrel_Barstow_Resume.md' -> ('tyrel barstow resume md', 'resume')"""
+    head, _, base = path.rstrip("/").rpartition("/")
+    return _SEP.sub(" ", base.lower()), _SEP.sub(" ", head.rpartition("/")[2].lower())
 
 
 class MatrixCache:
@@ -274,6 +294,8 @@ class MatrixCache:
         self.cats = []
         self.sources = []
         self.positions = []
+        self.names = []     # _name_key per slot, for the lexical boost
+        self._blobs = None
         self.last_refresh = 0.0
 
     def _grow(self, need):
@@ -314,9 +336,11 @@ class MatrixCache:
                         self.slot_of[rid] = slot
                         self.ids.append(rid); self.paths.append(path); self.nodes.append(node)
                         self.cats.append(cat); self.sources.append(src); self.positions.append(pos or 0)
+                        self.names.append(_name_key(path))
                     else:
                         self.paths[slot] = path; self.nodes[slot] = node; self.cats[slot] = cat
                         self.sources[slot] = src; self.positions[slot] = pos or 0
+                        self.names[slot] = _name_key(path)
                     self.mat[slot] = np.frombuffer(emb, dtype=np.float16)
                     self.alive[slot] = True
                     changed += 1
@@ -342,14 +366,54 @@ class MatrixCache:
             m &= np.fromiter((p.startswith(path_prefix) for p in self.paths), dtype=bool, count=self.n)
         return m
 
-    def search(self, qvec, k=10, **filters):
-        """Best chunk per (node, path), top-k by cosine (vectors are unit)."""
+    def _boost(self, terms):
+        """Hybrid: a dense-only ranking puts `Resume.md` below VS Code history
+        junk for the query "resume" (one word carries little meaning). Files
+        whose NAME carries the query words get a lift proportional to the
+        fraction of words matched (folder-name matches count less)."""
+        # one "\n"-joined string per field: str.find scans it at C speed (a
+        # per-slot Python loop cost 130-200 ms/query at 254k rows). Slots are
+        # append-only and a row id never changes path, so the blobs only grow.
+        if self._blobs is None:
+            self._blobs = [0, ["", ""], [np.zeros(0, dtype=np.int64)] * 2]
+        built = self._blobs[0]
+        if built < self.n:
+            for f in (0, 1):
+                parts = [nm[f] for nm in self.names[built: self.n]]
+                blob = self._blobs[1][f]
+                base = len(blob) + (1 if built else 0)
+                new = np.cumsum([base] + [len(x) + 1 for x in parts[:-1]]) if parts else []
+                self._blobs[2][f] = np.concatenate([self._blobs[2][f], np.asarray(new, dtype=np.int64)])
+                self._blobs[1][f] = (blob + "\n" if built else "") + "\n".join(parts)
+            self._blobs[0] = self.n
+
+        def hits(f, t):
+            blob, starts = self._blobs[1][f], self._blobs[2][f]
+            pos, at = [], blob.find(t)
+            while at >= 0:
+                pos.append(at)
+                at = blob.find(t, at + 1)
+            if not pos:
+                return np.zeros(0, dtype=np.int64)
+            return np.unique(np.searchsorted(starts, np.asarray(pos), side="right") - 1)
+        nb = np.zeros(self.n, dtype=np.float32)
+        nf = np.zeros(self.n, dtype=np.float32)
+        for t in terms:
+            nb[hits(0, t)] += 1
+            nf[hits(1, t)] += 1
+        return np.where(nb > 0, NAME_BOOST * nb, DIR_BOOST * nf) / len(terms)
+
+    def search(self, qvec, k=10, terms=None, **filters):
+        """Best chunk per (node, path), top-k by cosine (vectors are unit),
+        plus the file-name boost when `terms` (see name_terms) are given."""
         self.refresh()
         with self.lock:
             if self.n == 0:
                 return []
             q = np.asarray(qvec, dtype=np.float32)
             sims = self.mat[: self.n] @ q
+            if terms:
+                sims += self._boost(terms)
             if any(filters.values()):
                 sims[~self._mask(**filters)] = -2
             else:

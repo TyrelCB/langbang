@@ -28,7 +28,7 @@ from . import config
 from .embedder import STBackend, RemoteBackend, Embedder, load_image
 from .federation import Federation, auth_header, merge, vec_from_b64
 from .indexer import Indexer, add_excluded
-from .store import Store
+from .store import Store, name_terms
 
 S = config.load()
 os.makedirs(config.DATA_DIR, exist_ok=True)
@@ -146,9 +146,10 @@ def _shape_local(r):
 
 
 async def _run_search(qvec, *, k, category=None, source=None, path_prefix=None, scope="fleet",
-                      query=None, image_bytes=None, image_ctype="image/jpeg"):
+                      query=None, image_bytes=None, image_ctype="image/jpeg", terms=None):
     filters = dict(category=category or None, source=source or None, path_prefix=path_prefix or None)
-    local_task = anyio.to_thread.run_sync(lambda: store.search(qvec, k, **filters))
+    tl = terms if terms is not None else name_terms(query)
+    local_task = anyio.to_thread.run_sync(lambda: store.search(qvec, k, terms=tl, **filters))
     if scope == "fleet" and fed.peers():
         local, remote = await asyncio.gather(local_task, fed.search(
             qvec=qvec, query=query, image_bytes=image_bytes, image_ctype=image_ctype,
@@ -229,6 +230,7 @@ class SearchRequest(BaseModel):
     scope: str | None = None  # local | fleet
     atlas: bool | None = None  # legacy :8900 UI flag: false == scope local
     model_fp: str | None = None
+    terms: list[str] | None = None  # a federating peer's name_terms(query)
 
 
 @app.post("/search")
@@ -251,7 +253,7 @@ async def search(req: SearchRequest):
         raise HTTPException(400, "query, vector or image_path required")
     results = await _run_search(q, k=k, category=req.category, source=req.source,
                                 path_prefix=req.path_prefix, scope=scope, query=req.query,
-                                image_bytes=image_bytes)
+                                image_bytes=image_bytes, terms=req.terms[:8] if req.terms else None)
     return {"results": results, "indexed": store.cache.n, "node": S["node"], "model_fp": S["model_fp"],
             "peers": {n: {"ok": s.get("ok"), "ms": s.get("ms")} for n, s in fed.status.items()}
             if scope == "fleet" else {}}
@@ -383,11 +385,14 @@ def unindex(request: Request, path: str | None = None, source: str | None = None
 
 
 @app.post("/api/rescan")
-def rescan(request: Request, categories: str = "text,image,audio,video", limit: int = 0):
+def rescan(request: Request, categories: str = "text,image,audio,video", limit: int = 0,
+           windowed: bool = False):
+    """windowed=1 (the nightly timer): index only inside node.json
+    `rescan_window`, pausing at its end. Manual calls run until done."""
     _require_auth(request)
     if indexer.state["running"]:
         return {"started": False, "state": indexer.state}
-    threading.Thread(target=indexer.rescan, args=(tuple(categories.split(",")), limit),
+    threading.Thread(target=indexer.rescan, args=(tuple(categories.split(",")), limit, windowed),
                      daemon=True, name="rag-rescan").start()
     return {"started": True}
 

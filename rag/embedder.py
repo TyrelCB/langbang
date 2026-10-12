@@ -15,6 +15,7 @@ prefix (Atlas's /v1/embeddings defaults mode="query") silently degrades
 retrieval — the pre-LangBang rag.db was built exactly that way.
 """
 import base64
+import contextlib
 import io
 import json
 import math
@@ -22,6 +23,8 @@ import os
 import subprocess
 import tempfile
 import threading
+import time
+import urllib.error
 import urllib.request
 
 import numpy as np
@@ -73,6 +76,67 @@ def load_image(data_or_path):
         return im.convert("RGB")
 
 
+WAV16K_BYTES_PER_S = 32_000  # 16 kHz mono s16le
+MIN_CLIP_S = 0.5
+
+
+class PriorityLock:
+    """The model lock, with queries first: indexing workers (4 threads that
+    re-take the lock back to back) must not starve a waiting search — a plain
+    Lock isn't fair and searches measured 17-20 s during a rescan."""
+
+    def __init__(self):
+        self._c = threading.Condition()
+        self._busy = False
+        self._urgent = 0
+
+    def acquire(self, urgent):
+        with self._c:
+            if urgent:
+                self._urgent += 1
+            try:
+                while self._busy or (not urgent and self._urgent):
+                    self._c.wait()
+            finally:
+                if urgent:
+                    self._urgent -= 1
+            self._busy = True
+
+    def release(self):
+        with self._c:
+            self._busy = False
+            self._c.notify_all()
+
+
+class QuietGate:
+    """While a search is waiting on a peer (federation holds the gate), index
+    calls to that peer hold off: Atlas runs one model, so a search queued
+    behind 4 workers' embed batches took 8 s+ (2026-10-12). Capped so a
+    stuck search can't stall indexing for long."""
+
+    def __init__(self):
+        self._c = threading.Condition()
+        self._n = 0
+
+    @contextlib.contextmanager
+    def hold(self):
+        with self._c:
+            self._n += 1
+        try:
+            yield
+        finally:
+            with self._c:
+                self._n -= 1
+                self._c.notify_all()
+
+    def wait(self, cap=20.0):
+        with self._c:
+            self._c.wait_for(lambda: self._n == 0, timeout=cap)
+
+
+quiet = QuietGate()
+
+
 def _norm(v):
     v = np.asarray(v, dtype=np.float32)
     n = np.linalg.norm(v, axis=-1, keepdims=True)
@@ -86,11 +150,25 @@ class STBackend:
         self.model_id = model
         self.threads = threads
         self._m = None
-        self._lock = threading.Lock()
+        self._load_lock = threading.Lock()
+        self._lock = PriorityLock()
+        self._urgent = threading.local()
+
+    def urgent(self):
+        """Context: encodes on this thread jump the queue (search queries)."""
+        backend = self
+
+        class _U:
+            def __enter__(self):
+                backend._urgent.on = True
+
+            def __exit__(self, *a):
+                backend._urgent.on = False
+        return _U()
 
     def model(self):
         if self._m is None:
-            with self._lock:
+            with self._load_lock:
                 if self._m is None:
                     import torch
                     from sentence_transformers import SentenceTransformer
@@ -101,13 +179,20 @@ class STBackend:
 
     def _enc(self, inputs, batch_size=8):
         m = self.model()
-        with self._lock:  # encodes are not re-entrant-safe on one model
+        self._lock.acquire(getattr(self._urgent, "on", False))  # one encode at a time per model
+        try:
             return _norm(m.encode(inputs, batch_size=batch_size, normalize_embeddings=True,
                                   convert_to_numpy=True))
+        finally:
+            self._lock.release()
 
     def embed_text(self, texts, mode):
-        texts = [(t or "")[:MAX_TEXT_CHARS] for t in texts]
-        return self._enc(prefixed(texts, mode), batch_size=16)
+        texts = prefixed([(t or "")[:MAX_TEXT_CHARS] for t in texts], mode)
+        if getattr(self._urgent, "on", False) or len(texts) <= 4:
+            return self._enc(texts, batch_size=16)
+        # bulk (index fallback): small encodes, so a waiting search gets the
+        # model between slices instead of after a minutes-long batch
+        return np.concatenate([self._enc(texts[i:i + 4], batch_size=4) for i in range(0, len(texts), 4)])
 
     def embed_image(self, image):
         """image: PIL image (see load_image) -> (768,)"""
@@ -125,6 +210,8 @@ class STBackend:
                                    capture_output=True, timeout=120)
                 if r.returncode or not os.path.exists(clip):
                     continue
+                if os.path.getsize(clip) < MIN_CLIP_S * WAV16K_BYTES_PER_S:
+                    break  # past the real end: ffprobe over-reports some AAC/VBR durations
                 out.append((self._enc([{"audio": clip}], batch_size=1)[0], float(pos)))
         return out
 
@@ -137,12 +224,17 @@ class RemoteBackend:
         self.url = url.rstrip("/")
         self.auth = auth_header
         self.timeout = timeout
+        # One AUDIO call in flight: the peer's own searches share its model,
+        # and 4 index workers each posting audio made Atlas searches take
+        # 15-30 s (2026-10-12). Text/image calls are short; they stay parallel.
+        self._audio_one = threading.Lock()
 
     def _post(self, path, body, ctype):
         h = {"Content-Type": ctype}
         if self.auth:
             h["Authorization"] = self.auth
         req = urllib.request.Request(self.url + path, data=body, method="POST", headers=h)
+        quiet.wait()
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
             return json.load(r)
 
@@ -174,11 +266,12 @@ class RemoteBackend:
         return _norm(d["data"][0]["embedding"])
 
     def embed_audio(self, path):
-        """Converted to 16 kHz mono WAV and sent in <=10-minute segments (Atlas
-        caps uploads at 25 MB); window positions are re-offset per segment."""
+        """Converted to 16 kHz mono WAV and sent in 2-minute segments (short
+        calls let the peer's searches interleave; Atlas caps uploads at 25 MB);
+        window positions are re-offset per segment (a multiple of 8 s)."""
         length = ffprobe_duration(path)
         out = []
-        seg = 600.0
+        seg = 120.0
         with tempfile.TemporaryDirectory(prefix="lbrag-aud-") as td:
             start = 0.0
             while start < length:
@@ -187,8 +280,15 @@ class RemoteBackend:
                                 "-t", f"{seg}", "-ac", "1", "-ar", "16000", wav],
                                capture_output=True, timeout=300, check=True)
                 with open(wav, "rb") as f:
-                    d = self._post("/api/embed/audio", f.read(), "audio/wav")
+                    data = f.read()
+                got = max(0, len(data) - 44) / WAV16K_BYTES_PER_S  # decoded seconds
+                if got < MIN_CLIP_S:
+                    break  # ffprobe over-reported the length (AAC/VBR): the audio ended
+                with self._audio_one:
+                    d = self._post("/api/embed/audio", data, "audio/wav")
                 out += [(_norm(w["embedding"]), start + float(w.get("position") or 0)) for w in d["data"]]
+                if got < seg - 1:
+                    break
                 start += seg
         return out
 
@@ -231,20 +331,40 @@ class Embedder:
         self.index = index or query
         self.log = log
 
+    RETRY_DELAYS = (3, 10, 30)
+
     def _with_fallback(self, fn, *a):
+        """Retry the index backend before falling back: a peer restart lasts
+        seconds, while this box's CPU embeds ~10x slower than Atlas's GPU
+        (a 4 s Atlas restart once sent 17 files to the CPU, 2026-10-12)."""
         if self.index is self.query:
             return getattr(self.query, fn)(*a)
-        try:
-            return getattr(self.index, fn)(*a)
-        except Exception as e:  # noqa: BLE001
-            self.log(f"index backend {self.index.name} failed ({type(e).__name__}: {e}); local fallback")
-            return getattr(self.query, fn)(*a)
+        err = None
+        for delay in (0,) + tuple(self.RETRY_DELAYS):
+            if delay:
+                time.sleep(delay)
+            try:
+                return getattr(self.index, fn)(*a)
+            except urllib.error.HTTPError as e:
+                err = e
+                if e.code < 500:
+                    break  # the peer rejects this input: retrying won't help
+            except Exception as e:  # noqa: BLE001
+                err = e
+        self.log(f"index backend {self.index.name} failed ({type(err).__name__}: {err}); local fallback")
+        return getattr(self.query, fn)(*a)
+
+    def _urgent(self):
+        u = getattr(self.query, "urgent", None)
+        return u() if u else contextlib.nullcontext()
 
     def query_text(self, text):
-        return self.query.embed_text([text], "query")[0]
+        with self._urgent():
+            return self.query.embed_text([text], "query")[0]
 
     def query_image(self, image):
-        return self.query.embed_image(image)
+        with self._urgent():
+            return self.query.embed_image(image)
 
     def docs(self, texts):
         return self._with_fallback("embed_text", texts, "document")

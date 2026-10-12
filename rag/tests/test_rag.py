@@ -111,6 +111,96 @@ class StoreTests(TmpStore):
         self.assertEqual(self.store.search(unit(5), 1)[0]["snippet"], "m")
 
 
+class NameBoostTests(TmpStore):
+    def test_name_match_lifts_file_over_closer_vector(self):
+        """Regression: "resume" ranked VS Code history junk above Resume.md."""
+        from rag.store import name_terms
+        q = unit(20)
+        self.store.put_file("/x/junk.html", [(0, "junk", q, 0)], category="text", source="home")
+        near = q * 0.9 + unit(21) * 0.436
+        self.store.put_file("/d/resume/Tyrel_Barstow_Resume.md", [(0, "cv", near / np.linalg.norm(near), 0)],
+                            category="text", source="home")
+        self.assertEqual(self.store.search(q, 2)[0]["path"], "/x/junk.html")  # dense alone
+        terms = name_terms("my resume")
+        self.assertEqual(terms, ["resume"])
+        self.assertEqual(self.store.search(q, 2, terms=terms)[0]["path"], "/d/resume/Tyrel_Barstow_Resume.md")
+        # the incremental name index picks up files added after the first boosted search
+        self.store.put_file("/y/other_resume_v2.txt", [(0, "v2", q, 0)], category="text", source="home")
+        self.assertEqual(self.store.search(q, 1, terms=terms)[0]["path"], "/y/other_resume_v2.txt")
+
+
+class LockAndAudioTests(unittest.TestCase):
+    def test_priority_lock_lets_queries_jump_indexing(self):
+        import threading
+        lk, order = embedder.PriorityLock(), []
+        lk.acquire(False)  # an index encode in flight
+
+        def worker(name, urgent):
+            lk.acquire(urgent)
+            order.append(name)
+            lk.release()
+        ts = [threading.Thread(target=worker, args=(f"idx{i}", False)) for i in range(3)]
+        for t in ts:
+            t.start()
+        time.sleep(0.1)
+        q = threading.Thread(target=worker, args=("query", True))
+        q.start()
+        time.sleep(0.1)
+        lk.release()
+        for t in ts + [q]:
+            t.join(2)
+        self.assertEqual(order[0], "query")
+
+    def test_remote_audio_stops_at_real_end(self):
+        """ffprobe over-reports some AAC lengths (8000 s for a 4-min song);
+        segments past the real end must not be sent (Atlas 422 -> CPU fallback)."""
+        rb = embedder.RemoteBackend("http://atlas")
+        sent = []
+        rb._post = lambda path, body, ctype: sent.append(len(body)) or {"data": [{"embedding": unit(1).tolist(),
+                                                                                    "position": 0}]}
+        with tempfile.TemporaryDirectory() as td:
+            wav = os.path.join(td, "a.wav")
+            os.system(f"ffmpeg -v error -f lavfi -i sine=d=20 -ac 1 -ar 16000 {wav}")
+            with mock.patch.object(embedder, "ffprobe_duration", return_value=8000.0):
+                out = rb.embed_audio(wav)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(len(out), 1)
+
+
+class FallbackTests(unittest.TestCase):
+    def test_retries_peer_before_cpu_fallback(self):
+        local, calls = FakeBackend(), []
+
+        class Flaky:
+            name = "remote"
+
+            def embed_text(self, texts, mode):
+                calls.append(1)
+                if len(calls) < 3:
+                    raise ConnectionRefusedError("restarting")
+                return np.stack([unit(9)] * len(texts))
+        e = embedder.Embedder(local, Flaky(), log=lambda m: None)
+        e.RETRY_DELAYS = (0.01, 0.01, 0.01)
+        e.docs(["a"])
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(local.calls, [])  # never touched the CPU
+
+
+class RescanWindowTests(unittest.TestCase):
+    def test_window_wraps_midnight(self):
+        from rag.indexer import Indexer
+        ix = Indexer.__new__(Indexer)
+        at = lambda h, m: time.mktime((2026, 10, 12, h, m, 0, 0, 0, -1))
+        ix.s = {"rescan_window": "01:00-08:00"}
+        self.assertTrue(ix.in_window(at(3, 30)))
+        self.assertFalse(ix.in_window(at(8, 0)))
+        ix.s = {"rescan_window": "22:00-06:00"}
+        self.assertTrue(ix.in_window(at(23, 0)) and ix.in_window(at(5, 59)))
+        self.assertFalse(ix.in_window(at(12, 0)))
+        ix.s = {"rescan_window": ""}
+        self.assertTrue(ix.in_window(at(12, 0)))
+
+
 class PrefixTests(unittest.TestCase):
     def test_prefixes(self):
         self.assertEqual(embedder.prefixed(["x"], "query"), ["task: search result | query: x"])

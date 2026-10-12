@@ -2,7 +2,7 @@
 Description=Nightly LangBang RAG rescan
 
 [Timer]
-OnCalendar=*-*-* 03:30:00
+OnCalendar=*-*-* 01:05:00
 Persistent=true
 RandomizedDelaySec=10m
 

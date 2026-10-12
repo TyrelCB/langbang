@@ -44,6 +44,7 @@ DEFAULTS = {
         HOME + "/.langbang/memory": "memory",
     },
     "workers": 4,
+    "rescan_window": "01:00-08:00",  # timer rescans index only then; "" = any time
     "video_keyframes": 8,
     "peers": [],
     # fan-out budget per peer, seconds

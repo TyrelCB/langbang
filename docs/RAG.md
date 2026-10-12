@@ -14,7 +14,7 @@ pictures, and an image finds similar images and video frames.
 
 | source | what | how it gets in |
 |---|---|---|
-| `home` | the home dir: code/docs/PDF/docx, images, audio (8 s windows), video (keyframes) | nightly rescan (`langbang-rag-scan.timer`, 03:30), mtime-incremental |
+| `home` | the home dir: code/docs/PDF/docx, images, audio (8 s windows), video (keyframes) | nightly rescan (`langbang-rag-scan.timer`, 01:05, runs only inside `rescan_window`), mtime-incremental |
 | `output` | `~/Pictures/langbang` generated images; the sidecar prompt is indexed as a caption | pushed by `comfy.generate` |
 | `upload` | chat attachments and pasted images (`data/uploads`) | pushed on upload |
 | `thread` | each finished chat exchange (`USER: … LANGBANG: …`) | pushed by `runs._produce`; the thread delete removes it |
@@ -38,7 +38,7 @@ They can be toggled in CONFIG → tools; client settings are in CONFIG → RAG.
 The ✎ FILES path box doubles as a semantic search:
 - **Turning it on:** press **≈ RAG** (remembered per browser), or start the query with `?`. `/…` and `~/…` still autocomplete.
 - **Searching:** typing searches this box live (~0.15 s); **Enter** adds the fleet (Atlas and peers, up to their timeouts).
-- **Results:** hits replace the tree, with thumbnails, score, node and snippet. Chips filter by kind (text/img/video/audio) or limit hits to the current folder (`path_prefix`); `↰ back` returns to the folder.
+- **Results:** hits replace the tree, with thumbnails, score, node and snippet. On Enter, the local hits stay up while the fleet answers. Chips filter by kind (text/img/video/audio) or limit hits to the current folder (`path_prefix`); `↰ back` returns to the folder.
 - **Opening a hit:**
   - local text opens in the editor, scrolled to and selecting the matching chunk;
   - local media opens in the viewer and seeks video/audio to the hit;
@@ -65,6 +65,27 @@ Write routes need loopback or `Authorization: Bearer $(cat data/keys/rag_token)`
 - `DELETE /index?path=|tid=|source=|path_prefix=`
 - `POST /api/rescan`
 - `GET /replicate/export?since=<seq>`
+
+## Ranking and latency
+
+- **Hybrid name boost:**
+  - Rule: a file whose *name* contains the query words gains up to +0.15, scaled by the fraction of words matched. A match only in its folder's name gains +0.04.
+  - Why: dense-only ranking put VS Code history junk above `Resume.md` for the one-word query "resume".
+  - Cost: the names are held as one joined string scanned with `str.find`, about 10–20 ms over 254k rows.
+  - Fleet peers get the query words as `terms`, so they apply the same boost.
+- **Searches never queue behind indexing:**
+  - The local model lock is a priority lock: query encodes jump the queue, and bulk CPU encodes run in slices of 4.
+  - Searches stay at 0.1–0.25 s during a rescan. Before this they measured 17–20 s.
+- **Atlas is a shared GPU.** While we index through it, its own searches slow from ~0.1 s to 3–39 s. So:
+  - Our index calls pause while a fleet search waits on Atlas (`embedder.quiet`).
+  - Only one audio call is in flight at a time, in 2-minute segments.
+  - A peer error is retried (3/10/30 s) before falling back to the CPU, which is about 10x slower.
+  - The bulk rescan runs only inside `rescan_window` (default `01:00-08:00`, set in node.json). The timer passes `windowed=1`, a run pauses at the end of the window, and the next night resumes it.
+  - Order is text → images → video → audio, with audio last because it costs hours of GPU.
+- **Atlas fan-out:**
+  - A search across all kinds is one parallel call per media kind (~0.1 s).
+  - Atlas's 1.3M-chunk document search (~10 s) is queried only for `category=text`, or for every search if the peer sets `"docs_in_all": true`.
+- **Audio length:** ffprobe over-reports some AAC lengths (a 4-minute song reads as 2.2 h). Audio embedding therefore stops at the real decoded end. Before this fix, empty tail segments got HTTP 422 from Atlas and then about 1,000 empty CPU windows per song.
 
 ## Federation
 
@@ -133,7 +154,8 @@ doubly-prefixed strings. `python -m rag.migrate reembed` rebuilt them as documen
 ```sh
 sudo systemctl restart langbang-rag          # ~15 s: index load 2 s + model warm 10 s
 curl -s localhost:8900/api/stats | jq        # counts per node/category/source, rescan state
-curl -s -X POST localhost:8900/api/rescan    # walk now (loopback = authorized)
+curl -s -X POST localhost:8900/api/rescan    # walk now, ignoring rescan_window (loopback = authorized)
+curl -s -X POST 'localhost:8900/api/rescan?windowed=1'   # as the timer does: pauses outside the window
 .venv/bin/python -m unittest -v rag.tests.test_rag
 ```
 

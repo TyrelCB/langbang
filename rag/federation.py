@@ -23,7 +23,8 @@ import urllib.parse
 import httpx
 import numpy as np
 
-from . import config
+from . import config, embedder
+from .store import name_terms
 
 
 def auth_header(peer):
@@ -98,9 +99,11 @@ class Federation:
         t0 = time.time()
         h = auth_header(p)
         if p.get("kind") == "atlas":
-            hits = await self._atlas(c, p, h, query, image_bytes, ctype, k, category)
+            with embedder.quiet.hold():  # our indexer stops feeding Atlas meanwhile
+                hits = await self._atlas_kinds(c, p, h, query, image_bytes, ctype, k, category)
         else:
-            body = {"vector": _vec_b64(qvec), "top_k": k, "scope": "local",
+            # `terms`: the query words, for the peer's file-name boost
+            body = {"vector": _vec_b64(qvec), "terms": name_terms(query), "top_k": k, "scope": "local",
                     "category": category, "source": source, "model_fp": self.s["model_fp"]}
             r = await c.post(p["url"].rstrip("/") + "/search", json=body, headers=h)
             r.raise_for_status()
@@ -119,6 +122,27 @@ class Federation:
         self.status[p["name"]] = {"ok": True, "ms": int((time.time() - t0) * 1000), "at": time.time(),
                                   "n": len(hits)}
         return hits
+
+    async def _atlas_kinds(self, c, p, h, query, image_bytes, ctype, k, category):
+        """"all" = one call per media kind, in parallel (~0.1 s each)."""
+        if category:
+            return await self._atlas(c, p, h, query, image_bytes, ctype, k, category)
+        budget = float(p.get("timeout", self.s.get("peer_timeout", 3.0))) - 0.3
+        # Atlas's document search (1.3M chunks) takes ~10 s and nearly always
+        # missed the budget, holding every "all" search for the full timeout;
+        # its documents are searched when the caller asks for category=text
+        # (or the peer sets "docs_in_all": true)
+        kinds = ["image", "video", "audio"] + (["text"] if image_bytes is None and p.get("docs_in_all") else [])
+        res = await asyncio.gather(*(asyncio.wait_for(
+            self._atlas(c, p, h, query, image_bytes, ctype, k, kd), budget) for kd in kinds),
+            return_exceptions=True)
+        ok = [r for r in res if not isinstance(r, BaseException)]
+        if not ok:
+            raise res[0]
+        late = [kd for kd, r in zip(kinds, res) if isinstance(r, BaseException)]
+        if late:
+            self.log(f"atlas: {','.join(late)} search missed the {budget:.1f}s budget")
+        return [x for r in ok for x in r]
 
     async def _atlas(self, c, p, h, query, image_bytes, ctype, k, category):
         if p.get("model_fp") and p["model_fp"] != self.s["model_fp"]:
