@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import agent, comfy, config, fileassist, ivr, learning, mcp, notify, runs, schedule, sfxgen, ttsjobs, voice
+from . import agent, comfy, config, fileassist, ivr, learning, mcp, notify, rag, runs, schedule, sfxgen, ttsjobs, voice
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -165,6 +165,7 @@ async def new_thread(body: ThreadIn):
 async def del_thread(tid: str):
     runs.cancel(tid)  # a detached run must not outlive its thread's row
     await agent.delete_thread(tid)
+    rag.drop_thread(tid)  # its exchanges leave the RAG index too
     return {"ok": True}
 
 
@@ -516,6 +517,7 @@ async def upload(files: list[UploadFile] = File(...)):
     except HTTPException:
         shutil.rmtree(out_dir, ignore_errors=True)  # leave no half-written batch
         raise
+    rag.push_paths([f["path"] for f in out])
     return {"files": out}
 
 
@@ -907,6 +909,7 @@ async def chat(body: ChatIn):
             with open(path, "wb") as fh:
                 fh.write(base64.b64decode(re.sub(r"\s", "", m.group(2))))
             lines.append(f"[attached image {n}: {path}]")
+        rag.push_paths([ln.split(": ", 1)[1].rstrip("]") for ln in lines])
         text = "\n".join([text, *lines]).strip() if text else "\n".join(lines)
 
     # A message typed while the agent waits at a gate IS the answer: resume

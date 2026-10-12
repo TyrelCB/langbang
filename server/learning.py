@@ -187,6 +187,8 @@ def write_memory(name: str, description: str, content: str, type_: str = "projec
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(text)
     os.replace(tmp, p)
+    from . import rag  # cycle-safe
+    rag.push_paths([p])
     return {"name": slug, "path": p, "updated": existed}
 
 
@@ -194,6 +196,8 @@ def delete_memory(name: str, s: dict | None = None) -> bool:
     p = os.path.join(memory_dir(s), _slug(name) + ".md")
     if os.path.isfile(p):
         os.remove(p)
+        from . import rag  # cycle-safe
+        rag.drop(path=p)
         return True
     return False
 
@@ -459,6 +463,8 @@ def apply_actions(acts: list[dict], s: dict, catalog: list[dict], shown: set[str
             with open(path + ".tmp", "w", encoding="utf-8") as fh:
                 fh.write(new)
             os.replace(path + ".tmp", path)
+            from . import rag  # cycle-safe
+            rag.push_paths([path])
             results.append({"kind": "skill", "name": name, "path": path,
                             "op": "created" if act == "create" else "patched",
                             **({"backup": backup} if backup else {})})

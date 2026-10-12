@@ -12,7 +12,7 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
-from . import comfy, schedule  # cycle-safe: only used at call time
+from . import comfy, rag, schedule  # cycle-safe: only used at call time
 
 HOME = Path.home()
 MAX_OUT = 12_000  # chars — keep tool output off Spark's prefill budget
@@ -262,7 +262,62 @@ async def generate_image(prompt: str, input_images: list[str] | None = None,
             f"{r['steps']} steps, {r['seconds']} s")
 
 
+def _fmt_hits(d: dict) -> str:
+    rows = d.get("results") or []
+    if not rows:
+        return "no matches"
+    out = []
+    for r in rows:
+        where = "" if r.get("origin") in (None, "local") else f" @{r['origin']}"
+        pos = f" t={r['position']:.0f}s" if r.get("position") else ""
+        tag = r.get("source") if r.get("source") not in (None, "home") else ""
+        head = f"{r.get('score', 0):.3f} [{r.get('category')}{'/' + tag if tag else ''}{where}]{pos} {r.get('path')}"
+        snip = " ".join((r.get("snippet") or "").split())[:240]
+        if r.get("category") == "text" and snip:
+            head += f"\n    {snip}"
+        if (r.get("meta") or {}).get("tid"):
+            head += f"\n    (chat thread {r['meta']['tid']}: {r['meta'].get('title') or ''})"
+        out.append(head)
+    down = [n for n, st in (d.get("peers") or {}).items() if not st.get("ok")]
+    if down:
+        out.append(f"(unreachable peers: {', '.join(down)})")
+    return _trim("\n".join(out))
+
+
+@tool
+def semantic_search(query: str, category: str = "", source: str = "", scope: str = "",
+                    top_k: int = 8) -> str:
+    """Semantic (meaning-based) search over everything indexed by LangBang's
+    RAG node and its fleet peers: the user's home dir (code, docs, PDFs,
+    images, audio, video), LangBang outputs (generated images, uploads), past
+    chat threads, skills and memories. One shared multimodal vector space, so
+    a text query finds matching pictures/videos/audio too.
+    category: text | image | video | audio ('' = all).
+    source: home | output | upload | thread | skill | memory ('' = all).
+    scope: fleet (default; also spark-ee93/Atlas and other peers) | local.
+    Returns score, kind, absolute path (cite media paths to show them inline;
+    remote '@node' files live on that machine), and text snippets."""
+    try:
+        return _fmt_hits(rag.search(query, category=category, source=source, scope=scope,
+                                    top_k=max(1, min(int(top_k), 30))))
+    except Exception as e:  # noqa: BLE001
+        return f"ERROR: RAG node unreachable ({type(e).__name__}: {e})"
+
+
+@tool
+def semantic_search_image(path: str, category: str = "", scope: str = "", top_k: int = 8) -> str:
+    """Find files similar to a local IMAGE (reverse image search across the
+    same index as semantic_search: similar images, matching video frames,
+    related docs). path: absolute image path (e.g. an attached image)."""
+    try:
+        return _fmt_hits(rag.search("", image_path=path, category=category, scope=scope,
+                                    top_k=max(1, min(int(top_k), 30))))
+    except Exception as e:  # noqa: BLE001
+        return f"ERROR: RAG node unreachable ({type(e).__name__}: {e})"
+
+
 LOCAL_TOOLS = [run_bash, read_file, write_file, list_dir, crawl_url, generate_image,
+               semantic_search, semantic_search_image,
                create_scheduled_task, list_scheduled_tasks, update_scheduled_task,
                set_scheduled_task_enabled, run_scheduled_task_now, delete_scheduled_task]
 
@@ -285,5 +340,9 @@ TOOLS_NOTE = (
     ".mp3/.wav/.ogg/.m4a) written in your reply text — to show the user a "
     "file, just cite its full path in the answer (plain or `inline code`, "
     "not inside a fenced block). read_file on media only lets YOU look at it "
-    "(images when vision is on); it never displays anything to the user."
+    "(images when vision is on); it never displays anything to the user. "
+    "Finding things: semantic_search searches the user's files, media, past "
+    "chats, skills and memories by meaning across the whole fleet — use it "
+    "before grepping the disk when the user asks 'where is / find / that "
+    "thing we did'. semantic_search_image = reverse image search."
 )

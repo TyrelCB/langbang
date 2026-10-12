@@ -31,6 +31,7 @@ DOC_PREFIX = "title: none | text: "
 DIM = 768
 AUDIO_WINDOW = 8.0  # seconds; Atlas's audio_positions
 MAX_IMAGE_SIDE = 2048
+MAX_TEXT_CHARS = 32_000  # ~8192 tokens: the model truncates there anyway
 
 
 def prefixed(texts, mode):
@@ -105,6 +106,7 @@ class STBackend:
                                   convert_to_numpy=True))
 
     def embed_text(self, texts, mode):
+        texts = [(t or "")[:MAX_TEXT_CHARS] for t in texts]
         return self._enc(prefixed(texts, mode), batch_size=16)
 
     def embed_image(self, image):
@@ -145,13 +147,24 @@ class RemoteBackend:
             return json.load(r)
 
     def embed_text(self, texts, mode):
-        out = []
-        for i in range(0, len(texts), 32):  # Atlas caps 32 inputs / 128k chars
-            batch = texts[i:i + 32]
+        # Atlas 400s on any blank input and on >32 inputs / >131072 chars per
+        # call. The model reads at most 8192 tokens, so 32k chars loses nothing.
+        texts = [(t or "").strip()[:MAX_TEXT_CHARS] or "(empty)" for t in texts]
+        out, batch, size = [], [], 0
+
+        def flush():
             # The API adds the prefix itself from `mode` — never pre-prefix here.
             d = self._post("/v1/embeddings", json.dumps({"input": batch, "mode": mode}).encode(),
                            "application/json")
-            out += [r["embedding"] for r in sorted(d["data"], key=lambda r: r["index"])]
+            out.extend(r["embedding"] for r in sorted(d["data"], key=lambda r: r["index"]))
+        for t in texts:
+            if batch and (len(batch) == 32 or size + len(t) > 120_000):
+                flush()
+                batch, size = [], 0
+            batch.append(t)
+            size += len(t)
+        if batch:
+            flush()
         return _norm(out)
 
     def embed_image(self, image):
