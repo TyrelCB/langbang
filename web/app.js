@@ -2521,6 +2521,7 @@ async function openSettings() {
   loadedVoice = { ...DEFAULT_VOICE, ...(s.voice || {}) };
   await pvLoad(loadedVoice.pocket_voice); // options must exist before .value is set
   notifyLoadForm(s.notify || {});
+  ragLoadForm(s.rag || {});
   const ig = s.image_gen || {};
   $("#set-img-comfy_url").value = ig.comfy_url || "http://spark-ee93:8188";
   $("#set-img-out_dir").value = ig.out_dir || "~/Pictures/langbang";
@@ -2598,6 +2599,7 @@ async function saveSettings() {
       speak_reasoning: $("#set-voice-speak_reasoning").value || "off",
     },
     notify: notifyForm(),
+    rag: ragForm(),
     image_gen: {
       comfy_url: $("#set-img-comfy_url").value.trim() || "http://spark-ee93:8188",
       out_dir: $("#set-img-out_dir").value.trim() || "~/Pictures/langbang",
@@ -3408,6 +3410,53 @@ $("#btn-desk-notify").onclick = async () => {
   }
   deskSync();
 };
+
+// CONFIG → RAG form (server/rag.py client settings; the node has its own node.json)
+function ragLoadForm(r) {
+  $("#set-rag-enabled").checked = r.enabled !== false;
+  $("#set-rag-auto_ingest").checked = r.auto_ingest !== false;
+  $("#set-rag-index_threads").checked = r.index_threads !== false;
+  $("#set-rag-url").value = r.url || "http://127.0.0.1:8900";
+  $("#set-rag-scope").value = r.scope === "local" ? "local" : "fleet";
+  ragStatus();
+}
+function ragForm() {
+  return {
+    enabled: $("#set-rag-enabled").checked,
+    auto_ingest: $("#set-rag-auto_ingest").checked,
+    index_threads: $("#set-rag-index_threads").checked,
+    url: $("#set-rag-url").value.trim() || "http://127.0.0.1:8900",
+    scope: $("#set-rag-scope").value,
+  };
+}
+async function ragStatus() {
+  const st = $("#rag-status"), det = $("#rag-detail");
+  st.textContent = "checking…";
+  det.textContent = "";
+  // the node UI is plain http on the node's own port, as this browser reaches the box
+  let u;
+  try { u = new URL($("#set-rag-url").value.trim() || "http://127.0.0.1:8900"); } catch { u = new URL("http://127.0.0.1:8900"); }
+  if (["127.0.0.1", "localhost", "::1"].includes(u.hostname)) u.hostname = location.hostname;
+  $("#rag-open").href = `http://${u.host}/`;
+  try {
+    const d = await J(await fetch("/api/rag/status"));
+    if (!d.ok) { st.textContent = "✕ node unreachable"; det.textContent = d.error || ""; return; }
+    const h = d.health, s = d.stats || {};
+    st.textContent = `✓ ${h.node} · ${(h.vectors || 0).toLocaleString()} vectors${h.model_loaded ? "" : " · model loading"}`;
+    const files = Object.entries(s.files || {}).map(([k, v]) => `${v.toLocaleString()} ${k}`).join(", ");
+    const rs = s.rescan || {};
+    const scan = rs.running ? ` · rescan ${rs.done}/${rs.todo}` : (rs.finished ? ` · last rescan ${new Date(rs.finished * 1000).toLocaleString()}` : "");
+    const peers = (d.peers || []).map((p) => {
+      const ps = p.status;
+      const mark = p.disabled ? "off" : !ps ? "–" : ps.ok ? `✓ ${ps.ms} ms` : "✕";
+      return `${p.name} (${p.kind}${p.replicate ? ", replicated" : ""}) ${mark}`;
+    }).join(" · ") || "none";
+    det.textContent = `files: ${files || "—"}${scan}${s.pending_jobs ? ` · ${s.pending_jobs} queued` : ""} — peers: ${peers}`;
+  } catch (e) {
+    st.textContent = "✕ " + e.message;
+  }
+}
+$("#btn-rag-status").onclick = () => { SFX.play("click"); ragStatus(); };
 
 // CONFIG → NOTIFICATIONS form
 function notifyLoadForm(n) {

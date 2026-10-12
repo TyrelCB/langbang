@@ -317,6 +317,27 @@
           <span id="desk-status" class="pv-status"></span>
         </div>
       </section>
+      <section class="cfg-card wide" id="cfg-rag">
+        <h3>RAG — SEMANTIC SEARCH</h3>
+        <div class="hint">The RAG node (<code>langbang-rag.service</code>, EmbeddingGemma 2) indexes your home dir, LangBang outputs, uploads, chats, skills and memories in one multimodal vector space, and federates searches across fleet peers (set in the node's <code>data/rag/node.json</code>). The agent searches it with <code>semantic_search</code>.</div>
+        <div class="tools-box col">
+          <label class="chk"><input type="checkbox" id="set-rag-enabled"> enabled (search tools + indexing pushes)</label>
+          <label class="chk"><input type="checkbox" id="set-rag-auto_ingest"> index new files as they're written (generated images, uploads, file-tool writes, memories, skills)</label>
+          <label class="chk"><input type="checkbox" id="set-rag-index_threads"> index each finished chat exchange (searchable as source “thread”)</label>
+        </div>
+        <div class="row">
+          <label>Node URL <input id="set-rag-url" type="text" autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:8900"></label>
+          <label>Default search scope
+            <select id="set-rag-scope"><option value="fleet">fleet — this node + peers</option><option value="local">this node only</option></select>
+          </label>
+        </div>
+        <div class="row">
+          <button id="btn-rag-status" class="btn ghost sm" type="button">↻ STATUS</button>
+          <a id="rag-open" class="btn ghost sm" target="_blank" rel="noopener">OPEN NODE UI ↗</a>
+          <span id="rag-status" class="pv-status"></span>
+        </div>
+        <div class="hint" id="rag-detail"></div>
+      </section>
       <section class="cfg-card wide">
         <h3>MCP SERVERS</h3>
         <div id="mcp-list"></div>

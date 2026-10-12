@@ -69,6 +69,7 @@ blowups, mangled tool calls, stuck scheduled runs — is documented in the
 
 **Workspace**
 - **Scheduled tasks** — cron or one-off; runs are server-owned, so they keep going with no tab open
+- **Semantic search (RAG node)** — built-in multimodal [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) index of your files, media, generated outputs, chats, skills and memories; text finds images/video/audio too; federates across a fleet of nodes (fan-out + replication) — [docs/RAG.md](docs/RAG.md)
 - **Notifications** — in-app toasts, desktop popups, and phone push via [ntfy](https://ntfy.sh) (self-hostable)
 - **✎ FILES** — browse and edit any file with syntax highlighting, Markdown preview, media viewer, and an AI edit bar scoped to that file
 - **Image generation & editing** — Qwen-Image via ComfyUI; results render inline
@@ -136,6 +137,8 @@ flowchart LR
     AGENT --> DB[("SQLite<br/>threads · checkpoints · trajectory")]
     API --> VOICE["Voice<br/>Pocket TTS · gTTS · normalizer"]
     TOOLS --> COMFY[("ComfyUI")]
+    TOOLS <-->|"HTTP"| RAG["RAG node :8900<br/>rag/ · EmbeddingGemma 2"]
+    RAG <-->|"fan-out · replication"| PEERS[("fleet peers")]
 ```
 
 Runs belong to the server, not the browser tab: a dropped connection, a reload
@@ -155,6 +158,8 @@ live run and replay what they missed.
 | `server/voice.py`, `server/ttsjobs.py`, `server/ttsnorm.py` | TTS providers, streaming jobs, text normalization |
 | `server/comfy.py` | ComfyUI workflow builder (Qwen-Image text-to-image + edit) |
 | `server/notify.py` | toasts / desktop / ntfy push |
+| `server/rag.py` | RAG node client: search tools backend + fire-and-forget ingest pushes |
+| `rag/` | the RAG node (own service): embedder backends, vector store, indexer, federation, search UI |
 | `server/fileassist.py`, `server/sfxgen.py` | FILES AI edit bar; UI sound-effect regeneration |
 | `web/` | `index.html`, `app.js`, `style.css`, `game.js` (X-SIM), `sfx.js`, vendored JS, sounds |
 | `tools/` | A/B harness, sglang parser patch, TTS normalizer checks, demo MCP server |
@@ -170,12 +175,16 @@ prompt and no login — by design, this is a personal LAN tool.
 - Anyone who can reach `/api/chat` or `/api/shell` (the `!cmd` route) can run
   commands as you. `GET /api/media?path=` serves any absolute path for the
   inline players — the same read access the shell already grants.
+- The RAG node (`:8900`) serves search results, snippets and indexed files
+  (`/media`) to the LAN without auth, as the standalone search UI did; its
+  write/export routes need loopback or its bearer token.
 - MCP servers you add run with your privileges too (stdio servers are spawned
   as local processes).
 
 ## Docs
 
 - [docs/FEATURES.md](docs/FEATURES.md) — full feature reference and design notes
+- [docs/RAG.md](docs/RAG.md) — the RAG node: indexing, search tools, federation, adding fleet nodes
 - [SOUND_DESIGN.md](SOUND_DESIGN.md) — the UI sound pack and how it's generated
 - [tools/sglang-patches/](tools/sglang-patches/) — a parser fix for tag-less single-parameter tool calls
 - [tools/ab/](tools/ab/) — A/B harness (keep-reasoning-in-context experiment)
