@@ -168,4 +168,6 @@ async def generate(prompt: str, input_images: list[str] | None = None, *,
     for p in paths:  # sidecar: how this image was made (re-run / tweak later)
         with open(os.path.splitext(p)[0] + ".json", "w") as fh:
             json.dump(meta, fh, indent=1)
+    from . import rag  # cycle-safe; the node reads the sidecar prompt as a caption
+    rag.push_paths(paths)
     return {"paths": paths, **meta}

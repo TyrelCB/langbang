@@ -23,7 +23,7 @@ import json
 import time
 from typing import AsyncIterator
 
-from . import agent, learning, notify
+from . import agent, learning, notify, rag
 
 MAX_ACTIVE = 4       # concurrent runs across ALL threads (shared Spark)
 GRACE = 300.0        # seconds a finished hub lingers for late reopen/replay
@@ -136,6 +136,8 @@ async def _produce(hub: Hub, events: AsyncIterator[dict]) -> None:
     agent._spawn(notify.run_finished(hub.tid, list(hub.events)))
     # substantial turn finished cleanly → background skill/memory review
     agent._spawn(learning.after_run(hub.tid, list(hub.events)))
+    # files the run wrote + the exchange itself → RAG node (fire-and-forget)
+    agent._spawn(rag.after_run(hub.tid, list(hub.events)))
     await hub.finish()
     # run's generator is exhausted → every checkpoint put has committed, and
     # this thread just left the active set → cheap moment to bound the tables

@@ -132,6 +132,24 @@ class PrefixTests(unittest.TestCase):
         self.assertEqual(sent[0]["mode"], "document")
         self.assertEqual(sent[0]["input"], ["chunk one", "chunk two"])
 
+    def test_remote_batches_by_char_budget_and_fills_blanks(self):
+        rb = embedder.RemoteBackend("http://atlas")
+        sent = []
+
+        def fake_post(path, body, ctype):
+            d = json.loads(body)
+            assert len(d["input"]) <= 32 and sum(map(len, d["input"])) <= 131072
+            assert all(t.strip() for t in d["input"])
+            sent.append(len(d["input"]))
+            return {"data": [{"index": i, "embedding": unit(i).tolist()} for i in range(len(d["input"]))]}
+        rb._post = fake_post
+        out = rb.embed_text(["x" * 130_000, "", "  ", "ok"] + ["y"] * 40, "document")
+        self.assertEqual(len(out), 44)
+        self.assertEqual(sent, [32, 12])  # count cap
+        sent.clear()
+        rb.embed_text(["z" * 130_000] * 5, "document")  # each capped to 32k chars
+        self.assertEqual(sent, [3, 2])  # char budget
+
     def test_indexer_docs_use_document_mode(self):
         from rag.indexer import Indexer
         with tempfile.TemporaryDirectory() as td:

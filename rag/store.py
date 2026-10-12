@@ -6,6 +6,7 @@ catch up incrementally from a cursor instead of rescanning. Rows are keyed by
 (node, path, chunk_idx): replicated peers' rows live beside ours under their
 own node name.
 """
+import base64
 import json
 import sqlite3
 import threading
@@ -183,7 +184,11 @@ class Store:
                 for i, r in enumerate(rows):
                     if r["node"] == self.node:
                         continue  # never let a peer overwrite our own rows
-                    emb = None if r.get("deleted") else np.asarray(r["emb"], dtype=np.float16).tobytes()
+                    emb = None if r.get("deleted") or r.get("emb") is None else (
+                        base64.b64decode(r["emb"]) if isinstance(r["emb"], str)
+                        else np.asarray(r["emb"], dtype=np.float16).tobytes())
+                    if emb is not None and len(emb) != DIM * 2:
+                        raise ValueError(f"bad vector size {len(emb)} for {r['path']}")
                     self.con.execute(
                         """INSERT INTO chunks(node,path,chunk_idx,mtime,size,category,source,text,emb,
                                position,meta,model_fp,seq,deleted) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -212,7 +217,8 @@ class Store:
         out = []
         for r in cur:
             d = dict(zip(("seq",) + COLS, r))
-            d["emb"] = None if d["emb"] is None else np.frombuffer(d["emb"], dtype=np.float16).astype(float).round(5).tolist()
+            # base64 of the stored fp16 bytes: ~2 KB/row on the wire vs ~8 KB as JSON floats
+            d["emb"] = None if d["emb"] is None else base64.b64encode(d["emb"]).decode()
             d["meta"] = json.loads(d["meta"]) if d["meta"] else None
             out.append(d)
         return out

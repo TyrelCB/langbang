@@ -96,6 +96,9 @@ DEFAULTS = {
         "list_dir": True,
         "crawl_url": True,
         "generate_image": True,  # Qwen-Image 2.1 on ComfyUI (server/comfy.py)
+        # RAG node (rag/ package, langbang-rag.service :8900)
+        "semantic_search": True,
+        "semantic_search_image": True,
         # LangBang's own scheduler, agent-facing (server/schedule.py)
         "create_scheduled_task": True,
         "list_scheduled_tasks": True,
@@ -198,6 +201,14 @@ DEFAULTS = {
         ),
     },
     # Image generation / editing: Qwen-Image 2.1 GGUF on ComfyUI (server/comfy.py)
+    # RAG node client (the node's own settings: data/rag/node.json)
+    "rag": {
+        "enabled": True,
+        "url": "http://127.0.0.1:8900",
+        "auto_ingest": True,  # push outputs/uploads/memories/skills as they're written
+        "index_threads": True,  # each finished exchange becomes a searchable doc
+        "scope": "fleet",  # semantic_search default: fleet | local
+    },
     "image_gen": {
         "comfy_url": "http://spark-ee93:8188",
         "out_dir": "~/Pictures/langbang",
@@ -280,6 +291,7 @@ def _backfill(merged: dict) -> dict:
     merged["voice"] = {**DEFAULTS["voice"], **(merged.get("voice") or {})}
     merged["notify"] = {**DEFAULTS["notify"], **(merged.get("notify") or {})}
     merged["image_gen"] = {**DEFAULTS["image_gen"], **(merged.get("image_gen") or {})}
+    merged["rag"] = {**DEFAULTS["rag"], **(merged.get("rag") or {})}
     merged["ivr"] = {**DEFAULTS["ivr"], **(merged.get("ivr") or {})}
     merged["skill_review"] = {**DEFAULTS["skill_review"], **(merged.get("skill_review") or {})}
     merged["providers"] = _providers(merged)
