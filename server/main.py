@@ -1041,6 +1041,20 @@ async def notify_events(since: int = -1):
     return notify.since(since)
 
 
+@app.get("/api/rag/status")
+async def rag_status():
+    """CONFIG → RAG card. Server-side so an https tab never fetches the node's
+    plain-http port itself."""
+    def get():
+        return {"ok": True, "health": rag._req("GET", "/healthz", timeout=4),
+                "stats": rag._req("GET", "/api/stats", timeout=8),
+                "peers": rag._req("GET", "/api/peers", timeout=4).get("peers", [])}
+    try:
+        return await asyncio.to_thread(get)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
 @app.post("/api/notify/test")
 async def notify_test(request: Request):
     """CONFIG → NOTIFICATIONS ▶ SEND TEST: one push with the form's current
