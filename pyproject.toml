@@ -22,6 +22,7 @@ dependencies = [
     "croniter>=6.2.4",
     "torch>=2.5",
     "pocket-tts>=3.3",
+    "faster-whisper>=1.2.1",
 ]
 
 [project.optional-dependencies]
