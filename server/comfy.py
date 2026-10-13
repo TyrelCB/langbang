@@ -84,7 +84,8 @@ def _snap(v: int) -> int:
 
 async def generate(prompt: str, input_images: list[str] | None = None, *,
                    width: int = 1024, height: int = 1024, seed: int = -1,
-                   steps: int | None = None, negative: str = "", progress=None) -> dict:
+                   steps: int | None = None, negative: str = "", progress=None,
+                   extra_meta: dict | None = None) -> dict:
     """Run one generation; returns {paths, seed, seconds, mode}. Raises
     ValueError (bad input) / RuntimeError (ComfyUI trouble) with readable text."""
     s = settings()
@@ -165,6 +166,7 @@ async def generate(prompt: str, input_images: list[str] | None = None, *,
         raise RuntimeError("ComfyUI finished but produced no image")
     meta = {"prompt": prompt, "inputs": refs, "seed": seed, "steps": steps,
             "mode": "edit" if refs else "t2i", "seconds": round(time.time() - t0, 1)}
+    meta.update(extra_meta or {})  # e.g. FILES audio art: which track/section it illustrates
     for p in paths:  # sidecar: how this image was made (re-run / tweak later)
         with open(os.path.splitext(p)[0] + ".json", "w") as fh:
             json.dump(meta, fh, indent=1)

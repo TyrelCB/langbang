@@ -71,7 +71,7 @@ blowups, mangled tool calls, stuck scheduled runs — is documented in the
 - **Scheduled tasks** — cron or one-off; runs are server-owned, so they keep going with no tab open
 - **Semantic search (RAG node)** — built-in multimodal [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) index of your files, media, generated outputs, chats, skills and memories; text finds images/video/audio too; federates across a fleet of nodes (fan-out + replication) — [docs/RAG.md](docs/RAG.md)
 - **Notifications** — in-app toasts, desktop popups, and phone push via [ntfy](https://ntfy.sh) (self-hostable)
-- **✎ FILES** — browse and edit any file with syntax highlighting, Markdown preview, media viewer, and an AI edit bar scoped to that file
+- **✎ FILES** — browse and edit any file with syntax highlighting, Markdown preview, media viewer, and an AI edit bar scoped to that file; audio opens in a visualizer (six music-sync modes) with its tags/lyrics, and ✨ IMAGES FROM AUDIO illustrates the track from its metadata plus measured tempo, key and energy
 - **Image generation & editing** — Qwen-Image via ComfyUI; results render inline
 - **Voice** — read-aloud with local streaming [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) (CPU, voice cloning) or gTTS / Google Cloud, with a text normalizer so dates, times, money and tables are spoken correctly
 - **Per-thread prompts**, chat search, recap, inline media for any cited file path, and a hidden X-SIM platformer for waiting on slow models

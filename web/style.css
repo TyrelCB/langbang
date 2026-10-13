@@ -810,7 +810,46 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
   border: 1px solid var(--line); background: repeating-conic-gradient(#0d1626 0 25%, #111d31 0 50%) 0 0 / 16px 16px; }
 #ed-viewer audio { width: min(100%, 560px); }
 #ed-viewer .ed-pdf { width: 100%; flex: 1; min-height: 0; border: 1px solid var(--line); background: #fff; }
-.ed-viewer-bar { display: flex; gap: 8px; }
+.ed-viewer-bar { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+/* audio viewer: visualizer stage (web/viz.js) + metadata + images from the track */
+#ed-viewer.audio { justify-content: flex-start; }
+#ed-viewer.audio > audio { flex: none; }
+.aviz { position: relative; width: 100%; flex: 1 0 240px; min-height: 240px; overflow: hidden;
+  border: 1px solid var(--line); background: #05040a; }
+.aviz:fullscreen { border: 0; }
+.aviz-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; z-index: 1; }
+.aviz-canvas.blend { mix-blend-mode: screen; }
+/* #ed-viewer img (contain, border, checkerboard) would otherwise win on specificity */
+#ed-viewer .aviz-back { position: absolute; inset: 0; width: 100%; height: 100%; max-width: none; max-height: none;
+  object-fit: cover; opacity: 0; transition: opacity 1.2s ease; border: 0; background: none; z-index: 0; }
+#ed-viewer .aviz-back.on { opacity: 0.6; }
+.aviz-over { position: absolute; left: 10px; top: 10px; right: 10px; display: flex; gap: 10px; align-items: center;
+  pointer-events: none; text-shadow: 0 1px 3px #000; z-index: 2; }
+#ed-viewer .aviz-cover { width: 56px; height: 56px; object-fit: cover; flex: none; max-height: none; }
+.aviz-titles { min-width: 0; }
+.aviz-title { font-size: 15px; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aviz-sub { font-size: 11px; color: #cfd6e6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aviz-modes { position: absolute; left: 8px; right: 8px; bottom: 8px; display: flex; flex-wrap: wrap; gap: 4px;
+  justify-content: center; z-index: 2; }
+.aviz-modes .rag-chip { background: rgba(5, 4, 10, 0.6); color: #cfd6e6; border-color: #3a4a66; }
+.aviz-modes .rag-chip.on { color: var(--orange); border-color: var(--orange); }
+.aviz-meta { width: min(100%, 760px); font-size: 12px; }
+.aviz-dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0; }
+.aviz-dl dt { color: var(--muted); }
+.aviz-dl dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; max-height: 7.5em; overflow: auto; }
+.aviz-lyrics pre { white-space: pre-wrap; max-height: 30vh; overflow: auto; font-size: 12px; margin: 4px 0; }
+.aviz-art { width: min(100%, 760px); font-size: 11px; color: var(--muted); }
+.aviz-art:empty { display: none; }
+.aviz-art-row { display: flex; gap: 6px; overflow-x: auto; padding: 4px 0; }
+#ed-viewer .aviz-art-row img { width: 84px; height: 84px; object-fit: cover; cursor: pointer; flex: none;
+  max-height: none; }
+.aviz-gen { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; width: min(100%, 760px); }
+.panel-inner .aviz-gen input[type=text] { flex: 1 1 260px; min-width: 0; margin: 0; }
+.panel-inner .aviz-gen select { width: auto; margin: 0; }
+.aviz-cov { display: flex; gap: 4px; align-items: center; font-size: 12px; }
+.aviz-cov.hidden { display: none; }
+.aviz-gen .pv-status { flex-basis: 100%; }
+@media (max-width: 700px) { .aviz { flex-basis: 42vh; min-height: 200px; } }
 .ed-viewer-bar a.btn { text-decoration: none; }
 
 /* ✎ FILES: assist bar (ask about / edit this file) */

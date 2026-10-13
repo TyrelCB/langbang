@@ -38,12 +38,14 @@ They can be toggled in CONFIG → tools; client settings are in CONFIG → RAG.
 The ✎ FILES path box doubles as a semantic search:
 - **Turning it on:** press **≈ RAG** (remembered per browser), or start the query with `?`. `/…` and `~/…` still autocomplete.
 - **Searching:** typing searches this box live (~0.15 s); **Enter** adds the fleet (Atlas and peers, up to their timeouts).
-- **Results:** hits replace the tree, with thumbnails, score, node and snippet. On Enter, the local hits stay up while the fleet answers. Chips filter by kind (text/img/video/audio) or limit hits to the current folder (`path_prefix`); `↰ back` returns to the folder.
+- **Results:** hits replace the tree, with thumbnails, score, node and snippet. On Enter, the local hits stay up while the fleet answers. Kind chips multi-select (e.g. img + audio; none = all; sent as `category: "image,audio"`), and 📁 limits hits to the current folder (`path_prefix`); `↰ back` returns to the folder.
+- **The box keeps the query** while hits are up: opening a hit doesn't overwrite it, so re-searching is an edit plus Enter.
 - **Opening a hit:**
   - local text opens in the editor, scrolled to and selecting the matching chunk;
   - local media opens in the viewer and seeks video/audio to the hit;
   - fleet media streams view-only through `/api/rag/file`;
   - thread hits open the chat.
+- **Audio** opens in a visualizer stage (`web/viz.js`, a port of music-sync's orb/bars/radial/particles/plasma/kaleidoscope) with the track's tags, ComfyUI caption/lyrics (from the `prompt` tag), or an "Artist - Title" guess from the file name (`/api/media/info`, `/api/media/cover`; fleet hits are probed through the node). **✨ IMAGES FROM AUDIO** (`/api/media/imagine`, `server/audioart.py`) measures tempo, key, energy and brightness per section with librosa, has the chat model write one prompt per section, and renders them with Qwen-Image (the cover art as image_1 when there is one). The images are recorded in `data/audio-art.json` and play as the stage's backdrop for their section.
 - **≈ RELATED** (editor bar) searches by the open image itself, or by the selection or the start of the text.
 
 LangBang serves these through `POST /api/rag/search` and `GET /api/rag/file?p=` (node `/thumbnail`, `/media`, `/proxy` only), so an https tab never touches the node's plain-http port.

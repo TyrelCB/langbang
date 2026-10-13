@@ -145,9 +145,19 @@ def _shape_local(r):
     return r
 
 
+def categories(category):
+    """"image,audio" (or a list) -> ["image", "audio"]; ""/None -> None (all)."""
+    if not category:
+        return None
+    vals = category.split(",") if isinstance(category, str) else list(category)
+    vals = [c.strip() for c in vals if c and c.strip()]
+    return vals or None
+
+
 async def _run_search(qvec, *, k, category=None, source=None, path_prefix=None, scope="fleet",
                       query=None, image_bytes=None, image_ctype="image/jpeg", terms=None):
-    filters = dict(category=category or None, source=source or None, path_prefix=path_prefix or None)
+    category = categories(category)
+    filters = dict(category=category, source=source or None, path_prefix=path_prefix or None)
     tl = terms if terms is not None else name_terms(query)
     local_task = anyio.to_thread.run_sync(lambda: store.search(qvec, k, terms=tl, **filters))
     if scope == "fleet" and fed.peers():

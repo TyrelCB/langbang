@@ -104,7 +104,8 @@ class Federation:
         else:
             # `terms`: the query words, for the peer's file-name boost
             body = {"vector": _vec_b64(qvec), "terms": name_terms(query), "top_k": k, "scope": "local",
-                    "category": category, "source": source, "model_fp": self.s["model_fp"]}
+                    "category": ",".join(category) if isinstance(category, list) else category,
+                    "source": source, "model_fp": self.s["model_fp"]}
             r = await c.post(p["url"].rstrip("/") + "/search", json=body, headers=h)
             r.raise_for_status()
             d = r.json()
@@ -124,15 +125,20 @@ class Federation:
         return hits
 
     async def _atlas_kinds(self, c, p, h, query, image_bytes, ctype, k, category):
-        """"all" = one call per media kind, in parallel (~0.1 s each)."""
-        if category:
-            return await self._atlas(c, p, h, query, image_bytes, ctype, k, category)
+        """"all" (or several kinds) = one call per kind, in parallel (~0.1 s each)."""
+        if isinstance(category, str):
+            category = [category]
+        if category and len(category) == 1:
+            return await self._atlas(c, p, h, query, image_bytes, ctype, k, category[0])
         budget = float(p.get("timeout", self.s.get("peer_timeout", 3.0))) - 0.3
         # Atlas's document search (1.3M chunks) takes ~10 s and nearly always
         # missed the budget, holding every "all" search for the full timeout;
         # its documents are searched when the caller asks for category=text
         # (or the peer sets "docs_in_all": true)
-        kinds = ["image", "video", "audio"] + (["text"] if image_bytes is None and p.get("docs_in_all") else [])
+        kinds = list(category) if category else (
+            ["image", "video", "audio"] + (["text"] if image_bytes is None and p.get("docs_in_all") else []))
+        if image_bytes is not None:
+            kinds = [kd for kd in kinds if kd != "text"]
         res = await asyncio.gather(*(asyncio.wait_for(
             self._atlas(c, p, h, query, image_bytes, ctype, k, kd), budget) for kd in kinds),
             return_exceptions=True)
