@@ -4729,7 +4729,7 @@ function edSetBuffer(path, content, ver, eol, note) {
   ta.scrollTop = 0;
   ta.scrollLeft = 0;
   $("#ed-file").textContent = path;
-  $("#ed-path").value = path;
+  if (!RAG.shown) $("#ed-path").value = path; // ≈ hits up: the box keeps the query
   $("#ed-confirm").classList.add("hidden");
   edGutter();
   edApplyMode();
@@ -4751,6 +4751,8 @@ const edMediaKind = (p) => Object.keys(ED_MEDIA).find((k) => ED_MEDIA[k].test(p)
 function edViewerOff() {
   if (!ED.viewer) return;
   ED.viewer = false;
+  if (ED.viz) { ED.viz.destroy(); ED.viz = null; }
+  $("#ed-viewer").classList.remove("audio");
   for (const m of $("#ed-viewer").querySelectorAll("audio,video")) m.pause();
   $("#ed-viewer").replaceChildren();
   $("#ed-viewer").classList.add("hidden");
@@ -4772,7 +4774,7 @@ async function edShowMedia(path, kind, remote) {
   $("#ed-assist").classList.add("hidden");
   $("#ed-confirm").classList.add("hidden");
   $("#ed-file").textContent = remote ? remote.label : path;
-  $("#ed-path").value = remote ? remote.label : path;
+  if (!RAG.shown) $("#ed-path").value = path;
   $("#ed-lang").textContent = kind === "img" ? "IMAGE" : kind.toUpperCase();
   const v = $("#ed-viewer");
   v.classList.remove("hidden");
@@ -4811,6 +4813,7 @@ async function edShowMedia(path, kind, remote) {
     bar.appendChild(ai);
   }
   v.appendChild(bar);
+  if (kind === "audio") edAudio(v, node, bar, path, remote);
   // ✨ edit form: the result is a NEW file (~/Pictures/langbang/), never an overwrite
   const form = el("div", "ed-imgedit hidden");
   const pr = el("input");
@@ -4850,6 +4853,158 @@ async function edShowMedia(path, kind, remote) {
   const dir = path.slice(0, path.lastIndexOf("/")) || "/";
   if (dir !== ED.dir && !remote && !RAG.shown) await edBrowse(dir);
   return node;
+}
+
+// ---- audio viewer: music-sync visualizers + metadata + images FROM the track
+// (web/viz.js, server/audioart.py). The stage shows the visualizer; images
+// made for this track become its backdrop for the section they illustrate.
+const AV_MODE_KEY = "lb-viz-mode";
+function edAudio(v, node, bar, path, remote) {
+  v.classList.add("audio");
+  const ragP = remote ? new URLSearchParams(remote.src.split("?")[1] || "").get("p") || "" : "";
+  const q = remote ? "rag_p=" + encodeURIComponent(ragP) : "path=" + encodeURIComponent(path);
+  const stage = el("div", "aviz");
+  const over = el("div", "aviz-over");
+  const cover = el("img", "aviz-cover hidden");
+  cover.alt = "";
+  const titles = el("div", "aviz-titles");
+  const t1 = el("div", "aviz-title", path.split("/").pop());
+  const t2 = el("div", "aviz-sub", "");
+  titles.append(t1, t2);
+  over.append(cover, titles);
+  stage.appendChild(over);
+  const modes = el("div", "aviz-modes");
+  let mode = "orb";
+  try { mode = localStorage.getItem(AV_MODE_KEY) || "orb"; } catch {}
+  for (const m of AudioViz.MODES) {
+    const b = el("button", "rag-chip" + (m === mode ? " on" : ""), m);
+    b.type = "button";
+    b.dataset.mode = m;
+    b.onclick = () => {
+      const got = ED.viz.setMode(m);
+      for (const x of modes.children) x.classList.toggle("on", x.dataset.mode === got);
+      try { localStorage.setItem(AV_MODE_KEY, got); } catch {}
+    };
+    modes.appendChild(b);
+  }
+  const fs = el("button", "rag-chip", "⛶");
+  fs.type = "button";
+  fs.title = "full screen";
+  fs.onclick = () => (document.fullscreenElement ? document.exitFullscreen() : stage.requestFullscreen()).catch(() => {});
+  modes.appendChild(fs);
+  stage.appendChild(modes);
+  v.insertBefore(stage, node);
+  ED.viz = AudioViz.attach(node, stage, { seed: path, mode });
+  const metaBox = el("div", "aviz-meta");
+  const artBox = el("div", "aviz-art");
+  v.append(metaBox, artBox);
+
+  // ✨ images from the audio
+  const gen = el("div", "aviz-gen hidden");
+  const cnt = el("select");
+  for (const n of [1, 2, 3, 4]) { const o = el("option", "", n + (n > 1 ? " images (one per section)" : " image")); o.value = n; cnt.appendChild(o); }
+  const dir = el("input");
+  dir.type = "text";
+  dir.placeholder = "Optional direction — e.g. “watercolor”, “neon city at night”";
+  const useCov = el("label", "aviz-cov hidden");
+  const cb = el("input");
+  cb.type = "checkbox";
+  cb.checked = true;
+  useCov.append(cb, " keep the cover art's look");
+  const go = el("button", "btn accent sm", "GENERATE ▶");
+  const st = el("div", "pv-status");
+  gen.append(cnt, dir, useCov, go, st);
+  v.appendChild(gen);
+  const ai = el("button", "btn ghost sm", "✨ IMAGES FROM AUDIO");
+  ai.title = "Qwen-Image pictures from this track's metadata + its measured tempo, key and energy";
+  ai.onclick = () => { gen.classList.toggle("hidden"); if (!gen.classList.contains("hidden")) dir.focus(); };
+  bar.appendChild(ai);
+
+  const showArt = (items) => {
+    artBox.replaceChildren();
+    if (!items.length) return;
+    artBox.appendChild(el("div", "aviz-art-h", `🖼 made for this track (${items.length}) — plays as the backdrop; click to seek`));
+    const row = el("div", "aviz-art-row");
+    for (const a of items) {
+      const im = el("img");
+      im.src = "/api/media?path=" + encodeURIComponent(a.path);
+      im.loading = "lazy";
+      im.title = `${fmtMS(a.start)}–${fmtMS(a.end)} · ${a.prompt || ""}\n${a.path}`;
+      im.onclick = () => { node.currentTime = a.start; };
+      row.appendChild(im);
+    }
+    artBox.appendChild(row);
+    ED.viz.setBackdrop(items.map((a) => ({ url: "/api/media?path=" + encodeURIComponent(a.path), start: a.start, end: a.end })));
+  };
+  let art = [];
+
+  fetch("/api/media/info?" + q).then((r) => r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status))).then((m) => {
+    if (ED.path !== path) return;
+    const tg = m.tags || {}, gs = m.guess || {}, gr = m.graph || {}, sc = m.sidecar || {};
+    t1.textContent = tg.title || gs.title || path.split("/").pop();
+    t2.textContent = [tg.artist || gs.artist, tg.album, tg.date || tg.year].filter(Boolean).join(" · ")
+      + (!tg.title && gs.title ? "  (from the file name)" : "");
+    if (m.cover) {
+      cover.src = "/api/media/cover?" + q;
+      cover.classList.remove("hidden");
+      cover.onerror = () => cover.classList.add("hidden");
+      useCov.classList.remove("hidden");
+    }
+    const rows = [];
+    for (const [k, val] of Object.entries(tg)) if (!["title", "artist"].includes(k)) rows.push([k, val]);
+    if (gr.caption) rows.push(["caption", gr.caption]);
+    for (const k of ["bpm", "keyscale", "language"]) if (gr[k]) rows.push([k, gr[k]]);
+    for (const [k, val] of Object.entries(sc)) rows.push([k, val]);
+    const tech = [m.codec && m.codec.toUpperCase(), m.sample_rate && (m.sample_rate / 1000) + " kHz",
+                  m.channels && (m.channels === 2 ? "stereo" : m.channels === 1 ? "mono" : m.channels + " ch"),
+                  m.bit_rate && Math.round(m.bit_rate / 1000) + " kbps"].filter(Boolean).join(" · ");
+    if (tech) rows.push(["format", tech]);
+    const dl = el("dl", "aviz-dl");
+    for (const [k, val] of rows) dl.append(el("dt", "", k), el("dd", "", String(val)));
+    metaBox.appendChild(dl);
+    if (m.lyrics) {
+      const d = el("details", "aviz-lyrics");
+      d.append(el("summary", "", "lyrics"), el("pre", "", m.lyrics));
+      metaBox.appendChild(d);
+    }
+    art = m.art || [];
+    showArt(art);
+  }).catch((e) => { metaBox.appendChild(el("div", "ed-note", "metadata unavailable: " + e.message)); });
+
+  const run = async () => {
+    if (go.disabled) return;
+    go.disabled = true;
+    st.className = "pv-status";
+    st.textContent = "⏳ starting …";
+    const n = +cnt.value;
+    let prompts = [];
+    try {
+      const r = await fetch("/api/media/imagine", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: remote ? "" : path, rag_p: ragP, count: n, direction: dir.value, use_cover: cb.checked }) });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "HTTP " + r.status);
+      let failed = null;
+      await pipeSSE(r, (ev) => {
+        if (ev.stage === "analyzing" || (ev.stage === "prompts" && ev.text)) st.textContent = "⏳ " + ev.text;
+        else if (ev.stage === "features") {
+          const f = ev.features;
+          st.textContent = `⏳ heard: ${f.tempo_bpm} BPM · ${f.key} · ${f.dynamics} dynamics — writing prompts …`;
+        } else if (ev.stage === "prompts" && ev.prompts) prompts = ev.prompts;
+        else if (ev.stage === "image") st.textContent = `⏳ image ${ev.i + 1}/${ev.n} on ComfyUI … ${ev.seconds} s (≈ 1 min each)`
+          + (prompts[ev.i] ? " — " + prompts[ev.i].slice(0, 120) + "…" : "");
+        else if (ev.stage === "done_one") { art = art.concat([ev.item]); if (ED.path === path) showArt(art); }
+        else if (ev.stage === "error") failed = ev.message;
+      });
+      if (failed) throw new Error(failed);
+      SFX.play("message_received");
+      st.textContent = `✓ ${n} image${n > 1 ? "s" : ""} — saved in ~/Pictures/langbang (prompt in each .json sidecar)`;
+    } catch (e) {
+      st.textContent = "✕ " + e.message;
+      st.className = "pv-status warn";
+    }
+    go.disabled = false;
+  };
+  go.onclick = run;
+  dir.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); run(); } });
 }
 
 async function edLoad(path, asText = false) {
@@ -4986,9 +5141,15 @@ $("#ed-hidden").onchange = () => {
 // the fleet (Atlas & peers, up to their timeouts). Hits replace the tree;
 // "↰ back" returns to the folder. Local hits open in the editor/viewer (text
 // scrolls to the matching chunk, video/audio seek to the hit); fleet media
-// streams through /api/rag/file; threads open in chat.
-const RAG = { on: false, shown: false, timer: null, seq: 0, last: null, cat: "", here: false };
-try { RAG.on = localStorage.getItem("lb-ed-rag") === "1"; } catch {}
+// streams through /api/rag/file; threads open in chat. While hits are up
+// the box keeps the query (opening a hit doesn't overwrite it), so a
+// re-search is an edit, not a retype. Kind chips multi-select (none = all).
+const RAG = { on: false, shown: false, timer: null, seq: 0, last: null, cats: new Set(), here: false };
+try {
+  RAG.on = localStorage.getItem("lb-ed-rag") === "1";
+  RAG.cats = new Set(JSON.parse(localStorage.getItem("lb-ed-rag-cats") || "[]"));
+} catch {}
+const ragCat = () => ["text", "image", "video", "audio"].filter((c) => RAG.cats.has(c)).join(",");
 
 function ragQuery(raw) {
   if (raw.startsWith("?")) return raw.slice(1).trim();
@@ -5013,11 +5174,11 @@ const RAG_ICON = { image: "▣", video: "▶", audio: "♪", text: "≡" };
 async function ragSearch(q) {
   const seq = ++RAG.seq;
   RAG.last = q;
-  const body = { ...q, category: RAG.cat };
+  const body = { ...q, category: ragCat() };
   if (RAG.here && ED.dir && !q.image_path) body.path_prefix = ED.dir.replace(/\/?$/, "/");
   // Enter on a query already showing local hits: keep them up while the
   // fleet (Atlas: seconds) answers, then swap in the merged list
-  const same = RAG.out && RAG.out.query === q.query && RAG.out.cat === RAG.cat && !q.image_path;
+  const same = RAG.out && RAG.out.query === q.query && RAG.out.cat === body.category && !q.image_path;
   if (same && q.scope === "fleet") ragRender(RAG.out, "≈ adding the fleet … (Atlas takes a few seconds)");
   else ragRender(null, q.scope === "fleet" ? "≈ searching the fleet …" : "≈ searching …");
   let out;
@@ -5047,18 +5208,28 @@ function ragRender(out, note) {
   const back = el("div", "ed-row dir", "↰ back to " + (ED.dir || "~"));
   back.onclick = () => edBrowse(ED.dir || "~");
   tree.appendChild(back);
-  // filters: kind + this-folder-only; re-run the last query on change
+  // filters: kinds (multi-select; none = all) + this-folder-only; re-run
+  // the last query (same scope) on change
   const bar = el("div", "rag-filters");
   for (const [c, label] of [["", "all"], ["text", "≡ text"], ["image", "▣ img"], ["video", "▶ video"], ["audio", "♪ audio"]]) {
-    const b = el("button", "rag-chip" + (RAG.cat === c ? " on" : ""), label);
+    const b = el("button", "rag-chip" + ((c ? RAG.cats.has(c) : !RAG.cats.size) ? " on" : ""), label);
     b.type = "button";
-    b.onclick = () => { RAG.cat = c; if (RAG.last) ragSearch(RAG.last); };
+    b.dataset.cat = c;
+    b.title = c ? "toggle " + c + " (combine kinds)" : "every kind";
+    b.onclick = () => {
+      if (!c) RAG.cats.clear();
+      else if (RAG.cats.has(c)) RAG.cats.delete(c);
+      else RAG.cats.add(c);
+      if (RAG.cats.size === 4) RAG.cats.clear(); // all four == all
+      try { localStorage.setItem("lb-ed-rag-cats", JSON.stringify([...RAG.cats])); } catch {}
+      if (RAG.last) ragSearch(RAG.out && RAG.out.scope ? { ...RAG.last, scope: RAG.out.scope } : RAG.last);
+    };
     bar.appendChild(b);
   }
   const here = el("button", "rag-chip" + (RAG.here ? " on" : ""), "📁 this folder");
   here.type = "button";
   here.title = "only under " + (ED.dir || "~");
-  here.onclick = () => { RAG.here = !RAG.here; if (RAG.last) ragSearch(RAG.last); };
+  here.onclick = () => { RAG.here = !RAG.here; if (RAG.last) ragSearch(RAG.out && RAG.out.scope ? { ...RAG.last, scope: RAG.out.scope } : RAG.last); };
   bar.appendChild(here);
   tree.appendChild(bar);
   const q = out && out.scope ? { ...RAG.last, scope: out.scope } : RAG.last || {};
@@ -5336,7 +5507,11 @@ function sugTab() {
 }
 
 $("#ed-path").addEventListener("input", sugUpdate);
-$("#ed-path").addEventListener("focus", () => { if ($("#ed-path").value.trim()) sugUpdate(); });
+// focus re-opens path suggestions, but never re-runs a ≈ query (the hits are already up)
+$("#ed-path").addEventListener("focus", () => {
+  const raw = $("#ed-path").value.trim();
+  if (raw && ragQuery(raw) === null) sugUpdate();
+});
 $("#ed-path").addEventListener("blur", () => setTimeout(sugClose, 120));
 $("#ed-path").addEventListener("keydown", (e) => {
   const open = !$("#ed-suggest").classList.contains("hidden");

@@ -293,6 +293,25 @@ class FederationTests(TmpStore):
         self.assertEqual(res[0]["origin"], "b")
         self.assertTrue(res[0]["url"].startswith("/proxy?node=b&p=%2Fmedia"))
 
+    def test_multi_category_filters_and_atlas_kinds(self):
+        from rag.server import categories
+        self.assertEqual(categories("image, audio"), ["image", "audio"])
+        self.assertIsNone(categories(""))
+        v = unit(3)
+        for i, cat in enumerate(("text", "image", "audio", "video")):
+            self.store.put_file(f"/x/{cat}", [(0, cat, v, 0)], category=cat, source="home")
+        got = {r["path"] for r in self.store.search(v, 10, category=["image", "audio"])}
+        self.assertEqual(got, {"/x/image", "/x/audio"})
+        fed = self._fed([{"name": "atlas", "url": "http://a", "kind": "atlas"}])
+        asked = []
+
+        async def fake_atlas(c, p, h, query, image_bytes, ctype, k, kind):
+            asked.append(kind)
+            return []
+        with mock.patch.object(fed, "_atlas", fake_atlas):
+            asyncio.run(fed.search(qvec=unit(1), query="boots", k=5, category=["image", "audio"]))
+        self.assertEqual(sorted(asked), ["audio", "image"])
+
     def test_fresh_replica_skips_network(self):
         fed = self._fed([{"name": "b", "url": "http://10.255.255.1:9", "kind": "langbang", "replicate": True}])
         self.store.kv_set("last_sync:b", time.time())

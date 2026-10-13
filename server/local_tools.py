@@ -292,7 +292,7 @@ def semantic_search(query: str, category: str = "", source: str = "", scope: str
     images, audio, video), LangBang outputs (generated images, uploads), past
     chat threads, skills and memories. One shared multimodal vector space, so
     a text query finds matching pictures/videos/audio too.
-    category: text | image | video | audio ('' = all).
+    category: text | image | video | audio, or several comma-separated (e.g. 'image,video'); '' = all.
     source: home | output | upload | thread | skill | memory ('' = all).
     scope: fleet (default; also spark-ee93/Atlas and other peers) | local.
     Returns score, kind, absolute path (cite media paths to show them inline;

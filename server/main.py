@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from . import agent, comfy, config, fileassist, ivr, learning, mcp, notify, rag, runs, schedule, sfxgen, ttsjobs, voice
+from . import agent, audioart, comfy, config, fileassist, ivr, learning, mcp, notify, rag, runs, schedule, sfxgen, ttsjobs, voice
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -546,6 +546,78 @@ async def media(path: str):
     if not os.path.isfile(path):
         raise HTTPException(404, "not a file")
     return FileResponse(path, headers={"Cache-Control": "private, no-cache"})
+
+
+@app.get("/api/media/info")
+async def media_info(path: str = "", rag_p: str = ""):
+    """✎ FILES audio viewer: tags, ComfyUI caption/lyrics, sidecar, a file-name
+    guess and images already made for this track (server/audioart.py).
+    `rag_p` = a fleet hit's node route (/media?… or /proxy?…)."""
+    try:
+        return await asyncio.to_thread(audioart.info, path, rag_p)
+    except FileNotFoundError:
+        raise HTTPException(404, "not a file")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except (RuntimeError, subprocess.TimeoutExpired) as e:
+        raise HTTPException(502, str(e))
+
+
+@app.get("/api/media/cover")
+async def media_cover(path: str = "", rag_p: str = ""):
+    try:
+        img = await asyncio.to_thread(audioart.cover, path, rag_p)
+    except FileNotFoundError:
+        raise HTTPException(404, "no cover art")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, "cover extraction timed out")
+    return Response(img, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=300"})
+
+
+class AudioImagineIn(BaseModel):
+    path: str = ""
+    rag_p: str = ""
+    count: int = 1
+    direction: str = ""
+    use_cover: bool = True
+
+
+@app.post("/api/media/imagine")
+async def media_imagine(body: AudioImagineIn):
+    """Images FROM a track: metadata + measured tempo/key/energy per section
+    → LLM prompts → Qwen-Image (server/audioart.py). SSE progress. The job
+    keeps running if the tab closes; results land in data/audio-art.json."""
+    try:
+        audioart.resolve(body.path, body.rag_p)
+    except FileNotFoundError:
+        raise HTTPException(404, "not a file")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    q: asyncio.Queue = asyncio.Queue()
+
+    async def job():
+        try:
+            items = await audioart.imagine(body.path, body.rag_p, body.count, body.direction,
+                                           body.use_cover, q.put)
+            await q.put({"stage": "done", "items": items})
+        except Exception as e:  # noqa: BLE001 - surfaced in the viewer
+            await q.put({"stage": "error", "message": f"{type(e).__name__}: {str(e)[:400]}"})
+    task = asyncio.create_task(job())
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+
+    async def gen():
+        while True:
+            ev = await q.get()
+            yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+            if ev.get("stage") in ("done", "error"):
+                return
+    return _sse(gen())
+
+
+_BG_TASKS: set = set()
 
 
 # ---- file editor (✎ FILES) ----
