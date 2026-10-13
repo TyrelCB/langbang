@@ -497,12 +497,26 @@ def prewarm(cfg: dict) -> None:
 def transcribe(data: bytes, cfg: dict) -> str:
     """WAV (16 kHz mono PCM16) or bare PCM16 @16 kHz -> text. '' on silence.
     ValueError = bad audio body (400); RuntimeError = provider/config trouble (502)."""
+    return transcribe_detail(data, cfg)["text"]
+
+
+def transcribe_detail(data: bytes, cfg: dict) -> dict:
+    """Like transcribe() but returns {text, words, provider}; words are
+    [{w, s, e}] second-offsets when the provider gives them (whisper)."""
     v = _voice_cfg(cfg)
     pcm = _pcm16_mono_16k(data)
     provider = v.get("stt_provider") or "sr"
     if provider == "gcloud":
-        return _transcribe_gcloud(pcm, v)
-    return _transcribe_sr(pcm, v)
+        return {"text": _transcribe_gcloud(pcm, v), "words": [], "provider": "gcloud"}
+    if provider == "whisper":
+        try:
+            text, words = _transcribe_whisper(pcm, v)
+            return {"text": text, "words": words, "provider": "whisper"}
+        except Exception as e:  # noqa: BLE001 — free Google STT still answers
+            import logging
+            logging.getLogger("langbang").warning(
+                "whisper STT failed (%s: %s); falling back to sr", type(e).__name__, e)
+    return {"text": _transcribe_sr(pcm, v), "words": [], "provider": "sr"}
 
 
 def _pcm16_mono_16k(data: bytes) -> bytes:
@@ -537,6 +551,45 @@ def _transcribe_sr(pcm: bytes, v: dict) -> str:
         return ""  # silence / unintelligible — not an error
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"Google STT failed ({type(e).__name__}: {e}) — {_KEYLESS_HINT}") from e
+
+
+_WHISPER = None
+_WHISPER_LOCK = __import__("threading").Lock()
+
+
+def _whisper_model(v: dict):
+    global _WHISPER
+    if _WHISPER is None:
+        with _WHISPER_LOCK:
+            if _WHISPER is None:
+                from faster_whisper import WhisperModel
+                _WHISPER = WhisperModel(
+                    v.get("whisper_model") or "small",
+                    device="cpu", compute_type="int8", cpu_threads=8)
+    return _WHISPER
+
+
+def _transcribe_whisper(pcm: bytes, v: dict) -> tuple[str, list]:
+    """int8 Whisper on CPU: 3-8 s utterances run well under real time on
+    20 cores, and unlike the free Google API it does not silently return
+    nothing for clear speech."""
+    import numpy as np
+    audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+    segs, _ = _whisper_model(v).transcribe(
+        audio,
+        language=((v.get("stt_lang") or "en-US").split("-")[0]),
+        beam_size=1, vad_filter=True, word_timestamps=True,
+        condition_on_previous_text=False)
+    out, words = [], []
+    for s in segs:
+        for w in s.words:
+            t = w.word.strip()
+            if not t:
+                continue
+            out.append(t)
+            words.append({"w": t, "s": round(float(w.start), 2),
+                          "e": round(float(w.end), 2)})
+    return " ".join(out).strip(), words
 
 
 def _transcribe_gcloud(pcm: bytes, v: dict) -> str:

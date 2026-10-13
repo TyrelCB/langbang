@@ -1546,23 +1546,24 @@ async def _ivr_say(text: str, s: dict, cfg: dict, out: str, rate: int) -> dict:
             "sample_rate": rate, "tts_s": round(time.time() - t, 2)}
 
 
-async def _ivr_hear(request: Request, fmt: str, s: dict) -> tuple[str, bool]:
-    """(the caller's words, whether STT ran). Body: JSON {"text": ...} to
-    skip STT (DTMF menus, testing), or audio in `fmt`."""
+async def _ivr_hear(request: Request, fmt: str, s: dict) -> tuple[str, bool, list]:
+    """(the caller's words, whether STT ran, word timings). Body: JSON
+    {"text": ...} to skip STT (DTMF menus, testing), or audio in `fmt`."""
     body = await request.body()
     if (request.headers.get("content-type") or "").startswith("application/json"):
         try:
             text = str(json.loads(body or b"{}").get("text") or "").strip()
         except ValueError:
             raise HTTPException(400, "bad JSON body")
-        return text, False
+        return text, False, []
     if not body:
         raise HTTPException(400, "empty audio body")
     if len(body) > ivr.MAX_AUDIO_BYTES:
         raise HTTPException(413, "audio too large (max 10 MB)")
     try:
         pcm = await run_in_threadpool(ivr.to_pcm16k, body, fmt)
-        return (await run_in_threadpool(voice.transcribe, pcm, s)).strip(), True
+        d = await run_in_threadpool(voice.transcribe_detail, pcm, s)
+        return d["text"].strip(), True, d.get("words") or []
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:  # noqa: BLE001
@@ -1585,7 +1586,12 @@ async def ivr_start(request: Request, call_id: str = "", out: str = "wav", rate:
     cid, _ = ivr.call(call_id, cfg, caller)
     greet = cfg.get("greeting") or ""
     ivr.audit({"call_id": cid, "event": "start", "ip": request.client.host if request.client else None})
-    return {"call_id": cid, "reply": greet, **(await _ivr_say(greet, s, cfg, out, rate) if greet else {})}
+    greeting_audio = await _ivr_say(greet, s, cfg, out, rate) if greet else {}
+    # the greeting bought us a few seconds: re-warm voice+model in the
+    # background so the caller's FIRST spoken turn isn't the cold one
+    # (14 s observed on 2026-10-12/13 first turns despite boot prewarm)
+    asyncio.create_task(ivr.prewarm(s))
+    return {"call_id": cid, "reply": greet, **greeting_audio}
 
 
 @app.post("/api/ivr/turn")
@@ -1600,7 +1606,7 @@ async def ivr_turn(request: Request, call_id: str = "", fmt: str = "auto",
     cid, c = ivr.call(call_id, cfg, caller)
     timing = {}
     t0 = time.time()
-    said, stt = await _ivr_hear(request, fmt, s)
+    said, stt, words = await _ivr_hear(request, fmt, s)
     if stt:
         timing["stt_s"] = round(time.time() - t0, 2)
     if not said:
@@ -1620,7 +1626,8 @@ async def ivr_turn(request: Request, call_id: str = "", fmt: str = "auto",
     timing["tts_s"] = spoken.pop("tts_s")
     timing["total_s"] = round(time.time() - t0, 2)
     ivr.audit({"call_id": cid, "event": "turn", "transcript": said, "reply": r["reply"],
-               "tools": r["tools"], "error": r.get("error"), **timing})
+               "tools": r["tools"], "error": r.get("error"),
+               **({"words": words[:80]} if words else {}), **timing})
     return {"call_id": cid, "transcript": said, **r, **spoken, "timings": timing}
 
 
@@ -1640,7 +1647,7 @@ async def ivr_turn_stream(request: Request, call_id: str = "", fmt: str = "auto"
     s, cfg = _ivr_gate(request)
     cid, c = ivr.call(call_id, cfg, caller)
     t0 = time.time()
-    said, stt = await _ivr_hear(request, fmt, s)
+    said, stt, words = await _ivr_hear(request, fmt, s)
     stt_s = round(time.time() - t0, 2) if stt else None
     if said and reply and ivr._slot(cfg).locked():
         raise HTTPException(503, "all IVR lines busy")
@@ -1666,7 +1673,7 @@ async def ivr_turn_stream(request: Request, call_id: str = "", fmt: str = "auto"
                 ev["timings"]["stt_s"] = stt_s
                 ivr.audit({"call_id": cid, "event": "turn", "stream": True, "transcript": said,
                            "reply": ev["reply"], "tools": ev["tools"], "error": ev.get("error"),
-                           **ev["timings"]})
+                           **({"words": words[:80]} if words else {}), **ev["timings"]})
             yield line(ev)
 
     return StreamingResponse(events(), media_type="application/x-ndjson",
