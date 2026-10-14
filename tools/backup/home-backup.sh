@@ -41,16 +41,24 @@ STAGE=$HOME/$STAGE_REL
 
 log() { printf '%s %s\n' "$(date '+%F %T')" "$*"; }
 
-notify_fail() {  # phone push on failure only, via LangBang's ntfy settings
+ntfy() {  # ntfy TITLE PRIORITY TAG MESSAGE — phone push via LangBang's ntfy settings
   [[ -n $NTFY_SETTINGS && -r $NTFY_SETTINGS ]] || return 0
-  python3 - "$NTFY_SETTINGS" "$1" <<'PY' || true
+  python3 - "$NTFY_SETTINGS" "$@" <<'PY' || true
 import json, sys, urllib.request
 n = json.load(open(sys.argv[1])).get("notify", {})
+title, prio, tag, msg = sys.argv[2:6]
 if n.get("ntfy_enabled") and n.get("ntfy_topic"):
     req = urllib.request.Request(f'{n["ntfy_server"].rstrip("/")}/{n["ntfy_topic"]}',
-        data=sys.argv[2].encode(), headers={"Title": "Backup FAILED", "Priority": "high", "Tags": "warning"})
+        data=msg.encode(), headers={"Title": title, "Priority": prio, "Tags": tag})
     urllib.request.urlopen(req, timeout=10)
 PY
+}
+# Pushes only on failure, plus one "OK again" on the first success after a
+# failure, so a stale FAILED alert on the phone is visibly superseded.
+notify_fail() { touch "$ARCHIVE_DIR/.last_failed"; ntfy "Backup FAILED" high warning "$1"; }
+notify_recovered() {
+  [[ -f $ARCHIVE_DIR/.last_failed ]] || return 0
+  rm -f "$ARCHIVE_DIR/.last_failed"; ntfy "Backup OK again" default white_check_mark "$1"
 }
 
 remote_host() { echo "${REMOTE%%:*}"; }
@@ -151,6 +159,7 @@ do_run() {
     ssh -o BatchMode=yes "$rh" "cd '$rp/cycles' && ls -1d */ | sort | head -n -$KEEP_REMOTE | xargs -r rm -rf --"
     log "synced → $rh (verified)"
   fi
+  notify_recovered "$(basename "$out") written$([[ -n $REMOTE ]] && echo " and synced to $(remote_host)")"
   log "done"
 }
 
