@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from . import agent, audioart, comfy, config, fileassist, ivr, learning, mcp, notify, rag, runs, schedule, sfxgen, term, ttsjobs, voice
+from . import agent, audioart, comfy, config, decide, fileassist, ivr, learning, mcp, notify, rag, runs, schedule, sfxgen, term, ttsjobs, voice
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -1422,6 +1422,40 @@ async def rag_rescan(windowed: bool = False):
 @app.post("/api/rag/rescan/stop")
 async def rag_rescan_stop():
     return await _rag_call("POST", "/api/rescan/stop")
+
+
+# ---- decision endpoint (server/decide.py) ----
+
+@app.post("/v1/systemone")
+async def systemone(request: Request):
+    """Jev/Laya wire protocol, so any systemone client can point here: Laya
+    (or another System 1 backend) first, the chat model as fallback."""
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(400, "body must be JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "body must be an object with 'questions'")
+    try:
+        return await decide.decide(body)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except PermissionError as e:
+        raise HTTPException(403, str(e))
+    except ConnectionError as e:
+        raise HTTPException(503, str(e))
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"decision backend failed: {type(e).__name__}")
+
+
+@app.post("/api/decide")
+async def api_decide(request: Request):
+    return await systemone(request)
+
+
+@app.get("/api/decide/status")
+async def api_decide_status():
+    return await decide.status()
 
 
 @app.post("/api/notify/test")

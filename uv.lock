@@ -1197,6 +1197,9 @@ voice-gcloud = [
 ]
 
 [package.dev-dependencies]
+decide = [
+    { name = "laya", extra = ["serve"] },
+]
 rag = [
     { name = "fastapi" },
     { name = "httpx" },
@@ -1240,6 +1243,7 @@ requires-dist = [
 provides-extras = ["voice-gcloud"]
 
 [package.metadata.requires-dev]
+decide = [{ name = "laya", extras = ["serve"], specifier = ">=0.4.6" }]
 rag = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
@@ -1457,6 +1461,30 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/1c/92/d15b73c1550b4e005b31a22b746043a7ac154bfab7bc179da7348061feb0/langsmith-0.12.4.tar.gz", hash = "sha256:f486435323eeb0c525087cc694f0b7cd92e255f340db08db643204c789f4f1c4", size = 4886419, upload-time = "2026-09-09T21:19:57.002Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d1/b1/d0c6f84cde25b2443bcdca81f9b30732fc3af602c46f5114fcbe5246b978/langsmith-0.12.4-py3-none-any.whl", hash = "sha256:b2edaa49baeec0c7347a84ca0f755039dcff9e9e52f0b9dc26423ec2a98a4dab", size = 767513, upload-time = "2026-09-09T21:19:55.283Z" },
+]
+
+[[package]]
+name = "laya"
+version = "0.4.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "huggingface-hub" },
+    { name = "numpy" },
+    { name = "safetensors" },
+    { name = "torch", version = "2.14.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
+    { name = "torch", version = "2.14.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/60/dd/a66670c1327b0886b210c220337640d9a7aa2811a8db5746ed279e01f400/laya-0.4.6.tar.gz", hash = "sha256:64ec85c8650f2c6033898da6c9e7134ad4d06c48635b71e51f865970c9a1a901", size = 1163178, upload-time = "2026-10-12T09:35:00.991Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c4/48/b3908f48b566fe5379a36e39f38d4531db0081807e9bc56a10bfe4ba875f/laya-0.4.6-py3-none-any.whl", hash = "sha256:93fab7677aab9cb71cd4f9cb4477e334618f85ccdff684520a5dd144c3316a88", size = 391896, upload-time = "2026-10-12T09:34:58.977Z" },
+]
+
+[package.optional-dependencies]
+serve = [
+    { name = "fastapi" },
+    { name = "python-multipart" },
+    { name = "uvicorn" },
 ]
 
 [[package]]

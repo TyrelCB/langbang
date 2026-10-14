@@ -507,6 +507,58 @@ given a name and message, the agent sends it to Tyrel as an ntfy push
 `data/ivr/messages.jsonl`. Placeholder calls are rejected; 3 per call max. Empty speech gets a "didn't catch
 that" reply without a model call.
 
+## Decision endpoint (`/v1/systemone`)
+
+`server/decide.py`: fast typed judgments (routing, triage, guardrails, yes/no
+checks) without generating prose. It speaks the TypeSafe Jev wire protocol, which
+Laya's `laya-serve` also speaks, so any systemone client can use LangBang as its base URL.
+
+- **Request:** `{"state": text | object | [turns], "questions": {id: q}}`. Each `q` is
+  `{type, instructions, criteria}`:
+  - `choice`: pick one key of `criteria`, which is `{key: description}` or `[key, …]`.
+  - `score`: ordinal over `criteria` `[label0, label1, …]`. `score` is the expected index.
+  - `noul`: `noul` is P(yes).
+- **Answers** carry `probabilities`, `confidence` and `answer_confidence`.
+  `x_langbang` reports `{backend, ms, failed?, escalated?}`.
+- **Backends:**
+  - Settings `decide.backends` is a list of systemone servers `{name, url, key_file,
+    enabled}`, tried in order. `key_file` names a bearer-token file in `data/keys/`.
+  - The default is local **Laya** (`langbang-decide.service`: `laya-serve` on
+    127.0.0.1:8901, CPU, English checkpoint preloaded, multilingual built on first
+    non-English input). It takes ~0.5 s for a few questions.
+  - A hosted Jev or another fleet box can be added the same way.
+- **LLM fallback** (`llm_fallback`, default on): when every System 1 backend fails,
+  the chat model answers. `llm_provider` / `llm_model` pick a different one.
+  - It is constrained by a JSON schema whose enums are the option keys, so it can't
+    invent a label.
+  - Its probability is its own estimate, so answers carry `x_calibrated: false`, and
+    the remaining mass is spread evenly over the other options.
+  - Takes ~3 s.
+- **Escalation:** `escalate_below` (or per call `x_escalate_below`) re-asks the chat
+  model only for System 1 answers whose `confidence` is below it. The System 1 answer
+  is kept under `x_system1`.
+- **Per call:** `x_backend: "<name>"` picks one backend, and `"llm"` skips System 1.
+- **Routes:**
+  - `POST /v1/systemone`, with `POST /api/decide` as an alias.
+  - `GET /api/decide/status`: backend health and the fallback model.
+  - Errors: 422 for a malformed question, 503 when everything is down and the
+    fallback is off.
+- **Limits** (from Laya's model card):
+  - The base checkpoints are a fast *base*. On hard domain decisions they need
+    fine-tuning (`laya-typed-decisions`) or escalation.
+  - Choices with more than ~20 options degrade; ask hierarchically instead.
+  - English `noul` can follow its labels rather than the state. Check it, or use a
+    two-option `choice`.
+  - Probabilities ship over-confident until temperature-fitted on your own data.
+
+```bash
+curl -s localhost:8123/v1/systemone -H 'content-type: application/json' -d '{
+  "state": "Billed twice for March, refund it or we cancel.",
+  "questions": {"dept": {"type": "choice", "instructions": "Which team?",
+                         "criteria": {"billing": "payments, refunds", "technical": "bugs", "other": "else"}},
+                "churn": {"type": "noul", "instructions": "Does the user threaten to leave?"}}}'
+```
+
 ## ▮ TERM — terminals + fleet SSH (`server/term.py`, `web/term.js`)
 
 - **Sessions are tmux sessions** on a private server (`tmux -L langbang`, config

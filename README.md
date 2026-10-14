@@ -67,6 +67,7 @@ blowups, mangled tool calls, stuck scheduled runs — is documented in the
 - **Providers + per-thread override** — configure several backends, pick a global default, override provider/model per thread (or per scheduled task)
 - **Reasoning** — thinking on/off, reasoning effort, and optionally keep reasoning in context across tool steps
 - **Context auto-compaction** anchored on the backend's real token counts — long agentic runs fold their history instead of hitting the context wall
+- **Decision endpoint** — `POST /v1/systemone` answers typed questions (`choice` / `score` / `noul`) about any text or JSON with probabilities, on the TypeSafe Jev wire protocol. A local [Laya](https://huggingface.co/convaiinnovations/laya) System 1 model answers in ~0.5 s on CPU; when it's down (or a call asks for it) the chat model answers the same schema, and low-confidence answers can escalate to it — [docs/FEATURES.md](docs/FEATURES.md#decision-endpoint-v1systemone)
 - **Trajectory view** — every model call, tool call, compaction and error with timings and token counts, copyable as text
 
 **Workspace**
@@ -167,6 +168,7 @@ live run and replay what they missed.
 | `server/comfy.py` | ComfyUI workflow builder (Qwen-Image text-to-image + edit) |
 | `server/audioart.py` | audio metadata, tempo/key/energy analysis, images-from-audio prompts |
 | `server/term.py` | ▮ TERM: tmux-backed terminal sessions, fleet hosts, probes, run-on-many |
+| `server/decide.py` | `/v1/systemone` decision endpoint: System 1 backends (Laya) in order, chat-model fallback/escalation |
 | `server/ivr.py` | phone assistant: STT → restricted agent → TTS, call log |
 | `server/notify.py` | toasts / desktop / ntfy push |
 | `server/rag.py` | RAG node client: search tools backend + fire-and-forget ingest pushes |
@@ -192,6 +194,8 @@ prompt and no login — by design, this is a personal LAN tool.
 - The RAG node (`:8900`) serves search results, snippets and indexed files
   (`/media`) to the LAN without auth, as the standalone search UI did; its
   write/export routes need loopback or its bearer token.
+- `/v1/systemone` (and `/api/decide`) has no auth either: any LAN client can
+  spend Laya and chat-model time through it. Laya itself listens on loopback only.
 - MCP servers you add run with your privileges too (stdio servers are spawned
   as local processes).
 

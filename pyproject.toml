@@ -35,9 +35,9 @@ voice-gcloud = [
 
 [tool.uv]
 package = false
-# rag node (dependency group below) and the main app share one venv; plain
-# `uv sync`/`uv add` must keep the group installed or the node breaks.
-default-groups = ["rag"]
+# rag node + Laya decision server (dependency groups below) share the app venv; plain
+# `uv sync`/`uv add` must keep the groups installed or those services break.
+default-groups = ["rag", "decide"]
 # gtts pins click<8.2 only for its `gtts-cli` entry point (LangBang never
 # calls it); transformers>=5.19 -> huggingface-hub>=1.31 needs click>=8.4.2.
 override-dependencies = ["click>=8.4.2"]
@@ -55,6 +55,9 @@ torch = { index = "pytorch-cpu" }
 torchvision = { index = "pytorch-cpu" }
 
 [dependency-groups]
+decide = [
+    "laya[serve]>=0.4.6",
+]
 rag = [
     "fastapi>=0.115",
     "httpx>=0.27",
