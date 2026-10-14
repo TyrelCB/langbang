@@ -167,6 +167,10 @@ DEFAULTS = {
         # this the first two exchanges are kept plus the most recent. 160 ≈ a
         # 30+ minute call in ~4k tokens — size it to the IVR model's context.
         "max_history": 160,
+        # TTS for calls: "" = the chat provider (voice.tts_provider), else
+        # pocket | qwen | gtts | gcloud. pocket_voice is the voice NAME for
+        # whichever provider speaks (qwen_voice under qwen); "" = chat's.
+        "tts_provider": "",
         "pocket_voice": "alba",  # "" = the chat voice (voice.pocket_voice)
         "greeting": "Hi, this is LangBang, Tyrel's assistant. How can I help?",
         # What the IVR knows about Tyrel: a text/markdown file (relative paths

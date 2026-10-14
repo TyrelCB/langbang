@@ -378,10 +378,19 @@
           <label class="chk"><input type="checkbox" id="set-ivr-enabled"> enabled (off = the bridge gets 401 on every call)</label>
         </div>
         <div class="row">
-          <label>Provider <select id="set-ivr-provider"></select></label>
+          <label>Model provider <select id="set-ivr-provider"></select></label>
           <label>Model <input id="set-ivr-model" type="text" list="dl-ivr-models" autocomplete="off" spellcheck="false" placeholder="(provider default)"></label>
           <datalist id="dl-ivr-models"></datalist>
-          <label>Voice <select id="set-ivr-pocket_voice"></select></label>
+        </div>
+        <div class="row">
+          <label title="Which TTS speaks on calls. Pocket = local CPU; Qwen = the GPU service on spark-ee93. Blank follows CONFIG → VOICE.">Voice provider <select id="set-ivr-tts_provider"></select></label>
+          <label>Voice
+            <span class="pv-row">
+              <select id="set-ivr-pocket_voice"></select>
+              <button id="btn-ivr-voice-preview" class="btn ghost sm" type="button" title="hear the call voice (doesn't save)">▶</button>
+            </span>
+            <span id="ivr-voice-status" class="pv-status"></span>
+          </label>
         </div>
         <label>Greeting <textarea id="set-ivr-greeting" rows="2" spellcheck="true"></textarea></label>
         <label>System prompt <textarea id="set-ivr-system_prompt" rows="7" spellcheck="true"></textarea></label>

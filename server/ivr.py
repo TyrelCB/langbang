@@ -204,19 +204,27 @@ def to_pcm16k(data: bytes, fmt: str) -> bytes:
     return _ffmpeg(data, IN_FORMATS[fmt], ["-f", "s16le", "-ar", "16000", "-ac", "1"])
 
 
+def ivr_voice(s: dict, cfg: dict) -> dict:
+    """The chat voice settings with the IVR's own overrides: tts_provider
+    ("" = the chat provider) and a voice name, which means pocket_voice or
+    qwen_voice depending on the provider that ends up speaking."""
+    v = {**s["voice"]}
+    if cfg.get("tts_provider"):
+        v["tts_provider"] = cfg["tts_provider"]
+    if cfg.get("pocket_voice"):
+        if (v.get("tts_provider") or "gtts") == "qwen":
+            v["qwen_voice"] = cfg["pocket_voice"]
+        else:
+            v["pocket_voice"] = cfg["pocket_voice"]
+    return v
+
+
 def speak(text: str, s: dict, cfg: dict, out: str, rate: int) -> bytes:
     """Reply text → audio in the bridge's format. Same normalization as the
     chat read-aloud (markdown stripped, numbers/tech terms → words)."""
     if out not in OUT_FORMATS:
         raise ValueError(f"unknown output format {out!r} (one of: {', '.join(OUT_FORMATS)})")
-    v = {**s["voice"]}
-    if cfg.get("pocket_voice"):
-        # the IVR voice picker overrides the chat voice — the name means
-        # qwen_voice when the chat provider is the Qwen service
-        if (v.get("tts_provider") or "gtts") == "qwen":
-            v["qwen_voice"] = cfg["pocket_voice"]
-        else:
-            v["pocket_voice"] = cfg["pocket_voice"]
+    v = ivr_voice(s, cfg)
     clean = voice.prepare(text, {**s, "voice": v})
     if not clean:
         return b""
@@ -557,12 +565,7 @@ def speak_pcm(text: str, s: dict, cfg: dict, stop: threading.Event | None = None
     """Yield mono s16le @ STREAM_RATE for `text` as it is generated (Pocket,
     or the Qwen service), or in one piece for the non-streaming providers.
     Blocking: run in a thread."""
-    v = {**s["voice"]}
-    if cfg.get("pocket_voice"):
-        if (v.get("tts_provider") or "gtts") == "qwen":
-            v["qwen_voice"] = cfg["pocket_voice"]
-        else:
-            v["pocket_voice"] = cfg["pocket_voice"]
+    v = ivr_voice(s, cfg)
     clean = voice.prepare(text, {**s, "voice": v})
     if not clean:
         return
