@@ -6,6 +6,8 @@ packages listed in `pyproject.toml` / `uv.lock` (LangChain, LangGraph,
 deepagents, FastAPI, PyTorch, pocket-tts, …) are installed by the user from
 PyPI, not redistributed here; their licenses are permissive (MIT / BSD /
 Apache-2.0 / PSF, plus MPL-2.0 for certifi, orjson and tqdm, none modified).
+Model weights (EmbeddingGemma 2, Laya — Apache-2.0, Convai Innovations — Pocket
+TTS, faster-whisper) are downloaded from Hugging Face at first use, not shipped.
 
 ## Bundled JavaScript — `web/vendor/`
 

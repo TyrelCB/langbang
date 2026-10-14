@@ -209,6 +209,20 @@ DEFAULTS = {
         "index_threads": True,  # each finished exchange becomes a searchable doc
         "scope": "fleet",  # semantic_search default: fleet | local
     },
+    # Decision endpoint POST /v1/systemone (server/decide.py). backends speak
+    # the Jev/Laya systemone protocol and are tried in order; key_file names a
+    # file in data/keys/. When all fail (or a call asks x_backend: "llm") the
+    # chat model — or llm_provider/llm_model — answers through a JSON schema.
+    # escalate_below > 0 re-asks System 1 answers under that confidence.
+    "decide": {
+        "enabled": True,
+        "backends": [{"name": "laya", "url": "http://127.0.0.1:8901", "key_file": "", "enabled": True}],
+        "llm_fallback": True,
+        "llm_provider": "",
+        "llm_model": "",
+        "escalate_below": 0.0,
+        "timeout_s": 10,
+    },
     # ▮ TERM fleet (server/term.py): [{name, ssh: alias | user@host[:port], note}]
     "fleet": {"hosts": []},
     "image_gen": {
@@ -294,6 +308,7 @@ def _backfill(merged: dict) -> dict:
     merged["notify"] = {**DEFAULTS["notify"], **(merged.get("notify") or {})}
     merged["image_gen"] = {**DEFAULTS["image_gen"], **(merged.get("image_gen") or {})}
     merged["rag"] = {**DEFAULTS["rag"], **(merged.get("rag") or {})}
+    merged["decide"] = {**DEFAULTS["decide"], **(merged.get("decide") or {})}
     merged["ivr"] = {**DEFAULTS["ivr"], **(merged.get("ivr") or {})}
     merged["skill_review"] = {**DEFAULTS["skill_review"], **(merged.get("skill_review") or {})}
     merged["providers"] = _providers(merged)

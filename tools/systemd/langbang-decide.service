@@ -1,0 +1,37 @@
+# Laya System 1 decision model (laya-serve, Apache-2.0) on 127.0.0.1:8901 —
+# the first backend of LangBang's POST /v1/systemone (server/decide.py).
+# Loopback only: LAN clients go through LangBang, which falls back to the chat
+# model when this is down. English checkpoint preloaded (~1.7 GB); the
+# multilingual one builds on the first non-English state (~7 s) and stays.
+# Install: sudo cp tools/systemd/langbang-decide.service /etc/systemd/system/ &&
+#          sudo systemctl daemon-reload && sudo systemctl enable --now langbang-decide
+[Unit]
+Description=LangBang decision model (Laya, :8901)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tyrel
+Group=tyrel
+WorkingDirectory=/home/tyrel/projects/LangBang
+Environment=PATH=/home/tyrel/.local/bin:/usr/local/bin:/usr/bin:/usr/sbin
+Environment=PYTHONUNBUFFERED=1
+Environment=USE_TF=0
+Environment=LAYA_HOST=127.0.0.1
+Environment=LAYA_PORT=8901
+Environment=LAYA_MODELS=english
+Environment=LAYA_MAX_LOADED=2
+Environment=LAYA_THREADS=6
+Environment=LAYA_LOG_LEVEL=warning
+# via /usr/bin/bash so SELinux transitions to unconfined_service_t (see langbang.service)
+ExecStart=/usr/bin/bash -c 'exec .venv/bin/laya-serve'
+StandardOutput=append:/tmp/langbang-decide.log
+StandardError=append:/tmp/langbang-decide.log
+Restart=always
+RestartSec=5
+Nice=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
