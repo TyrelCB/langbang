@@ -209,6 +209,8 @@ DEFAULTS = {
         "index_threads": True,  # each finished exchange becomes a searchable doc
         "scope": "fleet",  # semantic_search default: fleet | local
     },
+    # ▮ TERM fleet (server/term.py): [{name, ssh: alias | user@host[:port], note}]
+    "fleet": {"hosts": []},
     "image_gen": {
         "comfy_url": "http://spark-ee93:8188",
         "out_dir": "~/Pictures/langbang",

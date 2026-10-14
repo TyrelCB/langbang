@@ -3118,8 +3118,96 @@ async function openSchedules() {
   schedShowEditor(false);
   await refreshSchedules();
   $("#sched-panel").classList.remove("hidden");
+  schedSystem(true);
   clearInterval(schedTimer);
-  schedTimer = setInterval(refreshSchedules, 5000);
+  schedTimer = setInterval(() => { refreshSchedules(); schedSystem(false); }, 5000);
+}
+
+// System job: the RAG node's nightly rescan. Not an agent task on purpose —
+// a crawl needs no model, so it lives in the node (rag/server.py _scheduler)
+// and this card just shows/edits it. Built once per open; polls touch text only.
+async function schedSystem(build) {
+  const box = $("#sched-system");
+  let d;
+  try { d = await J(await fetch("/api/rag/schedule")); }
+  catch (e) {
+    if (build) box.replaceChildren(el("div", "sched-sys-off", "≈ RAG nightly rescan — node unreachable (" + e.message.slice(0, 80) + ")"));
+    return;
+  }
+  if (build || !box.querySelector(".sched-card")) {
+    const card = el("div", "sched-card sys");
+    const head = el("div", "sched-head");
+    const title = el("div", "sched-title sys", "≈ RAG RESCAN — nightly index of new + changed files");
+    const en = el("label", "sched-en");
+    const cb = el("input"); cb.type = "checkbox"; cb.id = "sys-rag-on";
+    en.append(cb, document.createTextNode(" nightly"));
+    const run = el("button", "btn ghost sm", "▶ RUN NOW"); run.id = "sys-rag-run";
+    run.title = "rescan now, ignoring the window — Atlas searches slow down while it indexes";
+    const stop = el("button", "btn ghost sm", "■ STOP"); stop.id = "sys-rag-stop";
+    stop.title = "stop after the files in flight; the next run picks up where it left off";
+    head.append(el("span", "sched-badge sys", "SYSTEM"), title, en, run, stop);
+    const row = el("div", "row sched-sys-row");
+    const at = el("label", "", "at "); const ati = el("input"); ati.type = "time"; ati.id = "sys-rag-at"; at.appendChild(ati);
+    const w = el("label", "", "index only between ");
+    const wa = el("input"); wa.type = "time"; wa.id = "sys-rag-wa";
+    const wb = el("input"); wb.type = "time"; wb.id = "sys-rag-wb";
+    w.append(wa, document.createTextNode(" – "), wb);
+    const save = el("button", "btn accent sm", "SAVE"); save.id = "sys-rag-save";
+    row.append(at, w, save);
+    const hint = el("div", "hint", "Walks your home dir for new and changed files and embeds them on the index backend (Atlas's GPU). " +
+      "Run by the RAG node itself — no agent, no model tokens. It pauses at the end of the window and resumes the next night; " +
+      "LangBang outputs, uploads, chats, skills and memories are indexed the moment they're written, so they never wait for this.");
+    const st = el("div", "sched-sub dim"); st.id = "sys-rag-st";
+    card.append(head, row, st, hint);
+    box.replaceChildren(card);
+    const put = async (body) => {
+      try {
+        const r = await J(await fetch("/api/rag/schedule", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
+        schedSysFill(r, true);
+        SFX.play("click");
+      } catch (e) { st.textContent = "✕ " + e.message; }
+    };
+    cb.onchange = () => put({ at: cb.checked ? (ati.value || "01:05") : "" });
+    save.onclick = () => put({ at: cb.checked ? (ati.value || "01:05") : "", window: wa.value && wb.value ? `${wa.value}-${wb.value}` : "" });
+    run.onclick = async () => {
+      SFX.play("click");
+      try { await J(await fetch("/api/rag/rescan", { method: "POST" })); } catch (e) { st.textContent = "✕ " + e.message; }
+      setTimeout(() => schedSystem(false), 800);
+    };
+    stop.onclick = async () => {
+      SFX.play("click");
+      try { await J(await fetch("/api/rag/rescan/stop", { method: "POST" })); } catch (e) { st.textContent = "✕ " + e.message; }
+      setTimeout(() => schedSystem(false), 800);
+    };
+    schedSysFill(d, true);
+  } else schedSysFill(d, false);
+}
+
+function schedSysFill(d, inputs) {
+  const card = $("#sched-system .sched-card");
+  if (!card) return;
+  if (inputs) {
+    $("#sys-rag-on").checked = !!d.at;
+    $("#sys-rag-at").value = d.at || "01:05";
+    const [a, b] = (d.window || "").split("-");
+    $("#sys-rag-wa").value = a || ""; $("#sys-rag-wb").value = b || "";
+  }
+  const s = d.state || {};
+  card.classList.toggle("off", !d.at);
+  card.classList.toggle("running", !!s.running);
+  $("#sys-rag-stop").classList.toggle("hidden", !s.running);
+  $("#sys-rag-run").classList.toggle("hidden", !!s.running);
+  const bits = [];
+  if (s.running) bits.push(`RUNNING ${(s.done || 0).toLocaleString()} / ${(s.todo || 0).toLocaleString()} files` + (s.errors ? ` · ${s.errors} skipped` : ""));
+  bits.push(d.at ? "next " + schedWhen(d.next) : "nightly run OFF");
+  if (d.window) bits.push(`window ${d.window}${d.in_window ? " (open now)" : ""}`);
+  if (d.last) bits.push("last scheduled " + schedWhen(d.last));
+  if (!s.running && s.finished) {
+    const left = (s.todo || 0) - (s.done || 0);
+    bits.push(`last pass ${schedWhen(s.finished)}: ${(s.done || 0).toLocaleString()} indexed` +
+      (s.stopped ? ` — ${s.stopped}${left > 0 ? `, ${left.toLocaleString()} left for next time` : ""}` : ""));
+  }
+  $("#sys-rag-st").textContent = bits.join(" · ");
 }
 function closeSchedules() {
   $("#sched-panel").classList.add("hidden");
@@ -4136,6 +4224,7 @@ $("#btn-recap-close").onclick = () => { SFX.play("click"); closeRecap(); };
 $("#recap-panel").onclick = (e) => { if (e.target.id === "recap-panel") closeRecap(); };
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
+  if (!$("#term-panel").classList.contains("hidden")) return; // Esc belongs to the shell (vim…)
   // settings above recap: it can sit on top of it and is the top-most panel
   if (!$("#settings-panel").classList.contains("hidden")) closeSettings(false);
   else if (!$("#tprompt-panel").classList.contains("hidden")) closeTPrompt();
@@ -5538,7 +5627,7 @@ $("#ed-text").addEventListener("keydown", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s" &&
-      !$("#editor-panel").classList.contains("hidden")) {
+      !$("#editor-panel").classList.contains("hidden") && $("#term-panel").classList.contains("hidden")) {
     e.preventDefault();
     if (ED.path !== null) edSave();
   }

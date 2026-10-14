@@ -99,9 +99,52 @@ def _replicator():
             time.sleep(max(30, float(S.get("replicate_interval", 600)) - 30))
 
 
+HHMM = __import__("re").compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def _sched_next(now=None):
+    """Next scheduled start (epoch) for `rescan_at`, or None when off."""
+    at = (S.get("rescan_at") or "").strip()
+    if not HHMM.match(at):
+        return None
+    now = now or time.time()
+    lt = time.localtime(now)
+    h, m = map(int, at.split(":"))
+    t = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, h, m, 0, 0, 0, -1))
+    today = time.strftime("%Y-%m-%d", lt)
+    if t <= now and store.kv_get("rescan_auto_day") != today:
+        return t  # due now (or a catch-up after downtime)
+    return t if t > now else time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday + 1, h, m, 0, 0, 0, -1))
+
+
+def _scheduler():
+    """Nightly windowed rescan at node.json `rescan_at` — owned by the node
+    (it used to be a systemd timer nobody could see from LangBang). Missed
+    while down → runs on start if still inside `rescan_window` (the same
+    catch-up systemd's Persistent= gave); outside it, waits for tomorrow."""
+    while True:
+        time.sleep(30)
+        try:
+            nxt = _sched_next()
+            if nxt is None or nxt > time.time():
+                continue
+            store.kv_set("rescan_auto_day", time.strftime("%Y-%m-%d"))
+            if not indexer.in_window():
+                log("schedule: today's rescan window already closed — next run tomorrow")
+                continue
+            if indexer.state["running"]:
+                continue
+            log(f"schedule: nightly rescan (window {S.get('rescan_window') or 'any time'})")
+            store.kv_set("rescan_auto_last", str(time.time()))
+            indexer.rescan(windowed=True)
+        except Exception as e:  # noqa: BLE001 - never kill the scheduler thread
+            log(f"schedule: {type(e).__name__}: {e}")
+
+
 @app.on_event("startup")
 def _startup():
     threading.Thread(target=_worker, daemon=True, name="rag-index").start()
+    threading.Thread(target=_scheduler, daemon=True, name="rag-schedule").start()
     threading.Thread(target=_replicator, daemon=True, name="rag-replicate").start()
 
     def warm():
@@ -410,6 +453,53 @@ def rescan(request: Request, categories: str = "text,image,audio,video", limit: 
 @app.get("/api/rescan")
 def rescan_state():
     return {**indexer.state, "pending_jobs": jobs.qsize()}
+
+
+def _sched_view():
+    last = store.kv_get("rescan_auto_last")
+    return {"at": S.get("rescan_at") or "", "window": S.get("rescan_window") or "",
+            "next": _sched_next(), "last": float(last) if last else None,
+            "in_window": indexer.in_window(), "state": indexer.state}
+
+
+class SchedIn(BaseModel):
+    at: str | None = None      # "HH:MM", "" = off
+    window: str | None = None  # "HH:MM-HH:MM", "" = any time
+
+
+@app.get("/api/schedule")
+def schedule_get():
+    return _sched_view()
+
+
+@app.put("/api/schedule")
+def schedule_put(request: Request, body: SchedIn):
+    _require_auth(request)
+    patch = {}
+    if body.at is not None:
+        at = body.at.strip()
+        if at and not HHMM.match(at):
+            raise HTTPException(400, "at: HH:MM (24 h) or empty for off")
+        patch["rescan_at"] = at
+    if body.window is not None:
+        w = body.window.strip()
+        parts = w.split("-") if w else []
+        if w and (len(parts) != 2 or not all(HHMM.match(x) for x in parts)):
+            raise HTTPException(400, "window: HH:MM-HH:MM or empty for any time")
+        patch["rescan_window"] = w
+    if patch:
+        config.save(patch)
+        S.update(patch)
+    return _sched_view()
+
+
+@app.post("/api/rescan/stop")
+def rescan_stop(request: Request):
+    """Stops a running rescan after the files in flight (mtime-resumable)."""
+    _require_auth(request)
+    if indexer.state["running"]:
+        indexer.state["stopped"] = "stopped by user"
+    return {**indexer.state}
 
 
 @app.get("/replicate/export")

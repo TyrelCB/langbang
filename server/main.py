@@ -13,14 +13,14 @@ import urllib.parse
 import uuid
 
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from . import agent, audioart, comfy, config, fileassist, ivr, learning, mcp, notify, rag, runs, schedule, sfxgen, ttsjobs, voice
+from . import agent, audioart, comfy, config, fileassist, ivr, learning, mcp, notify, rag, runs, schedule, sfxgen, term, ttsjobs, voice
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -620,6 +620,184 @@ async def media_imagine(body: AudioImagineIn):
 _BG_TASKS: set = set()
 
 
+# ---- ▮ TERM: terminals (tmux-backed) + fleet SSH (server/term.py) ----
+
+
+class TermIn(BaseModel):
+    host: str = "local"
+    cols: int = 120
+    rows: int = 32
+    cwd: str = ""
+
+
+class TermPatch(BaseModel):
+    title: str
+
+
+@app.get("/api/term")
+async def term_list():
+    return {"available": term.available(), "sessions": await asyncio.to_thread(term.sessions),
+            "hosts": term.hosts()}
+
+
+@app.post("/api/term")
+async def term_new(body: TermIn):
+    try:
+        return await asyncio.to_thread(term.create, body.host, body.cols, body.rows, body.cwd)
+    except KeyError:
+        raise HTTPException(404, f"no fleet host {body.host!r}")
+    except (RuntimeError, subprocess.SubprocessError) as e:
+        raise HTTPException(500, str(e))
+
+
+@app.patch("/api/term/{sid}")
+async def term_rename(sid: str, body: TermPatch):
+    if not await asyncio.to_thread(term.rename, sid, body.title):
+        raise HTTPException(404, "no such terminal")
+    return {"ok": True}
+
+
+@app.delete("/api/term/{sid}")
+async def term_kill(sid: str):
+    if not await asyncio.to_thread(term.kill, sid):
+        raise HTTPException(404, "no such terminal")
+    return {"ok": True}
+
+
+def _same_origin(ws: WebSocket) -> bool:
+    """Browsers let any page open a WebSocket to the LAN (no CORS), so a
+    shell socket only answers pages served by this app itself."""
+    origin = ws.headers.get("origin")
+    if not origin:
+        return True  # not a browser (curl, a script on the box)
+    return urllib.parse.urlparse(origin).netloc.lower() == (ws.headers.get("host") or "").lower()
+
+
+@app.websocket("/api/term/{sid}/ws")
+async def term_ws(ws: WebSocket, sid: str, cols: int = 120, rows: int = 32):
+    """Binary frames out = terminal bytes. In: binary/text = keystrokes, or a
+    JSON text frame {"resize": [cols, rows]}."""
+    if not _same_origin(ws):
+        await ws.close(code=4403)
+        return
+    await ws.accept()
+    if not await asyncio.to_thread(term.exists, sid):
+        await ws.send_json({"exit": "no such terminal (ended)"})
+        await ws.close()
+        return
+    client = await asyncio.to_thread(term.Client, sid, cols, rows)
+    loop = asyncio.get_running_loop()
+    q: asyncio.Queue = asyncio.Queue()
+
+    def readable():
+        try:
+            data = os.read(client.master, 65536)
+        except BlockingIOError:
+            return
+        except OSError:
+            data = b""
+        if not data:
+            loop.remove_reader(client.master)
+        q.put_nowait(data)
+    loop.add_reader(client.master, readable)
+
+    async def pump_out():
+        while True:
+            data = await q.get()
+            if not data:  # the attach client exited: session ended or was killed
+                alive = await asyncio.to_thread(term.exists, sid)
+                await ws.send_json({"exit": "detached" if alive else "ended"})
+                await ws.close()
+                return
+            while not q.empty() and len(data) < 1 << 18:
+                more = q.get_nowait()
+                if not more:
+                    q.put_nowait(more)
+                    break
+                data += more
+            await ws.send_bytes(data)
+
+    out = asyncio.create_task(pump_out())
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg["type"] == "websocket.disconnect":
+                break
+            if msg.get("bytes"):
+                await asyncio.to_thread(client.write, msg["bytes"])
+            elif msg.get("text"):
+                t = msg["text"]
+                if t.startswith("{"):
+                    try:
+                        j = json.loads(t)
+                    except ValueError:
+                        j = None
+                    if isinstance(j, dict) and "resize" in j:
+                        client.resize(*j["resize"][:2])
+                        continue
+                await asyncio.to_thread(client.write, t.encode())
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
+        out.cancel()
+        try:
+            loop.remove_reader(client.master)
+        except (ValueError, OSError):
+            pass
+        await asyncio.to_thread(client.close)
+
+
+class FleetHostsIn(BaseModel):
+    hosts: list[dict]
+
+
+class FleetExecIn(BaseModel):
+    hosts: list[str]
+    command: str
+    timeout: float = 60
+
+
+@app.get("/api/fleet/hosts")
+async def fleet_hosts():
+    return {"hosts": term.hosts(), "ssh_config": term.ssh_config_hosts()}
+
+
+@app.put("/api/fleet/hosts")
+async def fleet_hosts_put(body: FleetHostsIn):
+    clean, seen = [], set()
+    for h in body.hosts:
+        name = str(h.get("name") or "").strip()[:60]
+        ssh = str(h.get("ssh") or "").strip()[:200]
+        if not name or not ssh or name in seen or name == "local":
+            continue
+        if not re.match(r"^[\w.@:\-\[\]]+$", ssh) or ssh.startswith("-"):
+            raise HTTPException(400, f"bad ssh target {ssh!r} (alias or user@host[:port])")
+        seen.add(name)
+        clean.append({"name": name, "ssh": ssh, "note": str(h.get("note") or "").strip()[:200]})
+    s = config.load()
+    s["fleet"] = {**(s.get("fleet") or {}), "hosts": clean}
+    config.save(s)
+    return {"hosts": clean}
+
+
+@app.post("/api/fleet/probe")
+async def fleet_probe(request: Request):
+    try:
+        names = (await request.json()).get("hosts")
+    except Exception:  # noqa: BLE001 - empty body = every host
+        names = None
+    return {"results": await term.probe_all(names), "at": time.time()}
+
+
+@app.post("/api/fleet/exec")
+async def fleet_exec(body: FleetExecIn):
+    if not body.command.strip():
+        raise HTTPException(400, "empty command")
+    if not body.hosts:
+        raise HTTPException(400, "no hosts selected")
+    return {"results": await term.run_many(body.hosts, body.command, body.timeout)}
+
+
 # ---- file editor (✎ FILES) ----
 # Same trust posture as /api/media and /api/shell: a LAN/tailnet-only personal
 # tool whose agent already has an unsandboxed shell (README ⚠ Security).
@@ -1201,6 +1379,49 @@ async def rag_status():
         return await asyncio.to_thread(get)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+class RagSchedIn(BaseModel):
+    at: str | None = None
+    window: str | None = None
+
+
+async def _rag_call(method, path, body=None, timeout=8):
+    """Server-side hop to the node (loopback = authorized there); its 4xx
+    detail comes back as ours."""
+    def go():
+        try:
+            return rag._req(method, path, body, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            try:
+                detail = json.load(e).get("detail")
+            except Exception:  # noqa: BLE001
+                detail = None
+            raise HTTPException(e.code, detail or f"node said {e.code}")
+        except OSError as e:
+            raise HTTPException(502, f"RAG node unreachable: {e}")
+    return await asyncio.to_thread(go)
+
+
+@app.get("/api/rag/schedule")
+async def rag_schedule():
+    """⏰ SCHEDULES system card: the node's own nightly rescan."""
+    return await _rag_call("GET", "/api/schedule", timeout=4)
+
+
+@app.put("/api/rag/schedule")
+async def rag_schedule_put(body: RagSchedIn):
+    return await _rag_call("PUT", "/api/schedule", body.model_dump(exclude_none=True))
+
+
+@app.post("/api/rag/rescan")
+async def rag_rescan(windowed: bool = False):
+    return await _rag_call("POST", "/api/rescan" + ("?windowed=1" if windowed else ""))
+
+
+@app.post("/api/rag/rescan/stop")
+async def rag_rescan_stop():
+    return await _rag_call("POST", "/api/rescan/stop")
 
 
 @app.post("/api/notify/test")

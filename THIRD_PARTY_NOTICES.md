@@ -13,9 +13,13 @@ Apache-2.0 / PSF, plus MPL-2.0 for certifi, orjson and tqdm, none modified).
 |---|---|---|---|---|
 | `highlight.min.js` | [highlight.js](https://github.com/highlightjs/highlight.js) | 11.11.1 | BSD-3-Clause | © 2006-2024 Josh Goebel and other contributors |
 | `marked.min.js` | [marked](https://github.com/markedjs/marked) | 15.0.12 | MIT | © 2011-2025 Christopher Jeffrey |
+| `xterm.js`, `xterm.css` | [xterm.js](https://github.com/xtermjs/xterm.js) | 5.5.0 | MIT | © 2017-2019 The xterm.js authors, © 2014-2016 SourceLair, © 2012-2013 Christopher Jeffrey |
+| `addon-fit.js`, `addon-web-links.js` | [xterm.js addons](https://github.com/xtermjs/xterm.js/tree/master/addons) | 0.10.0, 0.11.0 | MIT | © 2017-2019 The xterm.js authors |
 | `purify.min.js` | [DOMPurify](https://github.com/cure53/DOMPurify) | 3.2.7 | Apache-2.0 OR MPL-2.0 | © Cure53 and other contributors |
 
 The original license headers are kept at the top of each file, unmodified.
+The xterm.js builds ship without a header, so their license text is kept
+beside them in `web/vendor/xterm.LICENSE`.
 
 ## SGLang — `tools/sglang-patches/`
 

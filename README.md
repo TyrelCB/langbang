@@ -68,7 +68,8 @@ blowups, mangled tool calls, stuck scheduled runs — is documented in the
 - **Trajectory view** — every model call, tool call, compaction and error with timings and token counts, copyable as text
 
 **Workspace**
-- **Scheduled tasks** — cron or one-off; runs are server-owned, so they keep going with no tab open
+- **Scheduled tasks** — cron or one-off; runs are server-owned, so they keep going with no tab open. System jobs (the RAG node's nightly rescan) show on the same panel
+- **▮ TERM** — real terminals in the browser ([xterm.js](https://xtermjs.org)) on tmux sessions the server keeps: close the tab, switch devices or restart LangBang and the shell is still there. A fleet list imports hosts from `~/.ssh/config`, probes them (load, memory, disk, GPU), opens SSH tabs and runs one command on many hosts at once
 - **Semantic search (RAG node)** — built-in multimodal [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) index of your files, media, generated outputs, chats, skills and memories; text finds images/video/audio too; federates across a fleet of nodes (fan-out + replication) — [docs/RAG.md](docs/RAG.md)
 - **Notifications** — in-app toasts, desktop popups, and phone push via [ntfy](https://ntfy.sh) (self-hostable)
 - **✎ FILES** — browse and edit any file with syntax highlighting, Markdown preview, media viewer, and an AI edit bar scoped to that file; audio opens in a visualizer (six music-sync modes) with its tags/lyrics, and ✨ IMAGES FROM AUDIO illustrates the track from its metadata plus measured tempo, key and energy
@@ -172,8 +173,11 @@ prompt and no login — by design, this is a personal LAN tool.
 
 - **Never expose it to the internet.** Bind to `127.0.0.1`, or to a LAN/tailnet
   you fully trust. Don't put an auth-bypassing proxy in front of it.
-- Anyone who can reach `/api/chat` or `/api/shell` (the `!cmd` route) can run
-  commands as you. `GET /api/media?path=` serves any absolute path for the
+- Anyone who can reach `/api/chat`, `/api/shell` (the `!cmd` route) or ▮ TERM
+  (`/api/term`, `/api/fleet/exec`) can run commands as you — and, through
+  ▮ TERM, on every fleet host your SSH keys open. The terminal WebSocket only
+  accepts pages served by LangBang itself (Origin check), since browsers let
+  any site open a WebSocket to your LAN. `GET /api/media?path=` serves any absolute path for the
   inline players — the same read access the shell already grants.
 - The RAG node (`:8900`) serves search results, snippets and indexed files
   (`/media`) to the LAN without auth, as the standalone search UI did; its
