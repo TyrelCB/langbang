@@ -331,6 +331,50 @@ async def current_todos(thread_id: str):
     return (cv or {}).get("todos") or None
 
 
+# Chat-template control tokens written as TEXT (`<|im_start|>`, `<|im_end|>`,
+# Llama's `<|eot_id|>` …) are tokenized by sglang as the REAL special token, so
+# one in a tool result or a pasted log forges a message boundary mid-prompt.
+# Thread e93c1bb448e4 (2026-10-13/14): reviewing IVR transcripts that held a
+# leaked "<|im_start|>", every later turn ended after a few thinking tokens
+# with an empty answer. Outgoing messages get a word joiner after the "<"
+# (text unchanged to the eye, ordinary tokens to the model); tool-call args
+# coming back have it removed, so files the agent edits keep the real string.
+_CTRL_TOKEN = re.compile(r"<\|([A-Za-z0-9_]{1,40})\|>")
+_WJ = "\u2060"
+
+
+def defang(text: str) -> str:
+    return _CTRL_TOKEN.sub(lambda m: f"<{_WJ}|{m.group(1)}|>", text) if "<|" in text else text
+
+
+def undefang(v):
+    """Inverse of defang over a tool-call args structure."""
+    if isinstance(v, str):
+        return v.replace(f"<{_WJ}|", "<|") if _WJ in v else v
+    if isinstance(v, dict):
+        return {k: undefang(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [undefang(x) for x in v]
+    return v
+
+
+def defang_message(m: dict) -> None:
+    """In place, on one chat-completions message dict."""
+    c = m.get("content")
+    if isinstance(c, str):
+        m["content"] = defang(c)
+    elif isinstance(c, list):
+        for part in c:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                part["text"] = defang(part["text"])
+    if isinstance(m.get("reasoning_content"), str):
+        m["reasoning_content"] = defang(m["reasoning_content"])
+    for tc in m.get("tool_calls") or []:
+        fn = tc.get("function") if isinstance(tc, dict) else None
+        if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
+            fn["arguments"] = defang(fn["arguments"])
+
+
 class SGlangChatOpenAI(ChatOpenAI):
     """ChatOpenAI that recovers `reasoning_content` / `reasoning` from streamed deltas.
 
@@ -347,6 +391,12 @@ class SGlangChatOpenAI(ChatOpenAI):
     keep_reasoning: str = "off"
 
     def _get_request_payload(self, input_, *, stop=None, **kwargs):  # noqa: ANN001
+        payload = self._reasoning_payload(input_, stop=stop, **kwargs)
+        for m in payload.get("messages") or []:
+            defang_message(m)
+        return payload
+
+    def _reasoning_payload(self, input_, *, stop=None, **kwargs):  # noqa: ANN001
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
         if self.keep_reasoning not in ("turn", "all") or "messages" not in payload:
             return payload
@@ -1020,6 +1070,10 @@ class _FileArgAlias(AgentMiddleware):
     async def awrap_tool_call(self, request, handler):  # noqa: ANN001
         call = request.tool_call
         args = call.get("args")
+        clean = undefang(args)
+        if clean != args:  # model echoed defanged control tokens: real text for the tool
+            call, args = {**call, "args": clean}, clean
+            request = request.override(tool_call=call)
         coerced = self._coerce_json_strings(getattr(request, "tool", None), args)
         if coerced is not None:
             logger.warning("arg-repair: %s JSON-string args parsed (%s)", call.get("name"),
