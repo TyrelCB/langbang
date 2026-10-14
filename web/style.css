@@ -304,7 +304,31 @@ body.hide-reasoning .block.thinking { display: none; }
    .panel-inner itself scrolling is what buried CANCEL/SAVE below the fold.
    Scoped: sched/recap share .panel-inner and keep their own scroll. */
 #settings-panel .panel-inner { display: flex; flex-direction: column; overflow: hidden; }
-#settings-panel .cfg-grid { flex: 1; min-height: 0; overflow-y: auto; }
+#settings-panel .cfg-grid { flex: 1; min-height: 0; overflow-y: auto; margin-bottom: 0;
+  align-content: start; padding-right: 4px; }
+/* CONFIG sections: left nav shows one section's cards at a time; the filter
+   box searches every section at once (nav then marks which sections hit) */
+.cfg-head { display: flex; align-items: center; gap: 16px; margin-bottom: 14px; }
+.cfg-head h2 { margin: 0; white-space: nowrap; }
+.panel-inner .cfg-head input#cfg-filter { flex: 1; max-width: 360px; margin: 0 0 0 auto; }
+.cfg-body { flex: 1; min-height: 0; display: flex; gap: 14px; margin-bottom: 14px; }
+#cfg-nav { display: flex; flex-direction: column; gap: 4px; flex: 0 0 150px; overflow-y: auto; }
+#cfg-nav button { all: unset; box-sizing: border-box; cursor: pointer; padding: 9px 12px;
+  font-size: 12px; letter-spacing: 2px; color: var(--muted); border: 1px solid transparent;
+  border-left: 2px solid var(--line); display: flex; align-items: center; gap: 6px; }
+#cfg-nav button:hover { color: var(--text); border-left-color: var(--cyan-dim); }
+#cfg-nav button.on { color: var(--cyan); background: var(--panel); border-color: var(--line);
+  border-left-color: var(--cyan); }
+#cfg-nav button:focus-visible { outline: 1px solid var(--cyan); }
+#cfg-nav button .cnt { margin-left: auto; font-size: 10px; color: var(--muted); }
+#cfg-nav button.dirty::after { content: "●"; color: var(--orange); font-size: 10px; }
+#cfg-nav button.dirty .cnt { margin-left: 0; }
+#cfg-nav button.dirty { gap: 4px; }
+#cfg-nav button.nohit { opacity: .35; }
+#cfg-nav button.hit { color: var(--text); }
+.cfg-card.cfg-off { display: none; }
+#settings-panel .cfg-hit { color: var(--cyan); }
+#settings-panel .cfg-hit-card { border-color: var(--cyan-dim); }
 /* dirty-field highlight (orange ring + tinted label), unsaved counter,
    save/discard bar revealed by ESC / CANCEL / backdrop while edits are pending */
 #settings-panel .changed { border-color: var(--orange); }
@@ -576,6 +600,15 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
   #statusbar { padding: 4px 10px; }
 
   .panel-inner { max-height: 88dvh; padding: 14px; }
+  /* CONFIG nav turns into a horizontal strip above the cards */
+  .cfg-head { flex-wrap: wrap; gap: 8px; }
+  .panel-inner .cfg-head input#cfg-filter { max-width: none; flex: 1 1 100%; }
+  .cfg-body { flex-direction: column; gap: 8px; }
+  #cfg-nav { flex: 0 0 auto; flex-direction: row; overflow-x: auto; overflow-y: hidden; gap: 2px; }
+  #cfg-nav button { white-space: nowrap; padding: 7px 10px; border-left: 1px solid transparent;
+    border-bottom: 2px solid var(--line); }
+  #cfg-nav button.on { border-left-color: var(--line); border-bottom-color: var(--cyan); }
+  #cfg-nav button .cnt { display: none; }
   /* config label rows stack at this width (button-only .rows unaffected);
      inputs were overflowing the card to the right otherwise */
   .row { flex-wrap: wrap; }

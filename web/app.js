@@ -2527,9 +2527,11 @@ async function openSettings() {
   $("#set-img-comfy_url").value = ig.comfy_url || "http://spark-ee93:8188";
   $("#set-img-out_dir").value = ig.out_dir || "~/Pictures/langbang";
   $("#set-img-steps").value = ig.steps || 25;
-  for (const k of Object.keys(DEFAULT_VOICE))
-    $("#set-voice-" + k).value = loadedVoice[k];
+  for (const k of Object.keys(DEFAULT_VOICE)) cfgSetValue($("#set-voice-" + k), loadedVoice[k]);
   $("#cfg-confirm").classList.add("hidden");
+  cfgNavBuild();
+  $("#cfg-filter").value = "";
+  cfgShowTab(cfgTab);
   cfgSnapshot(); // after every field is populated: this is the unsaved-baseline
   $("#settings-panel").classList.remove("hidden");
   SFX.play("click");
@@ -2629,7 +2631,8 @@ let cfgBase = null;
 // every action — their inputs can't be identity-keyed snapshot members (the
 // MCP state rides the __mcp JSON instead; the soundboard saves per-cue)
 // #pv-clone is a one-shot form (clone saves itself) — not a setting
-const cfgMember = (el0) => !el0.closest("#mcp-list,#mcp-editor,#soundboard-list,#pv-clone,#prov-list");
+// .cfg-head = the section filter box, a view control rather than a setting
+const cfgMember = (el0) => !el0.closest("#mcp-list,#mcp-editor,#soundboard-list,#pv-clone,#prov-list,.cfg-head");
 function cfgDirtyCompute() {
   if (!cfgBase) return;
   let n = 0;
@@ -2643,8 +2646,11 @@ function cfgDirtyCompute() {
     host.classList.toggle("changed", diff);
     if (diff) n++;
   }
-  if (cfgBase.get("__mcp") !== JSON.stringify(mcpDraft)) n++;
-  if (cfgBase.get("__prov") !== JSON.stringify(provForm())) n++;
+  const mcpDirty = cfgBase.get("__mcp") !== JSON.stringify(mcpDraft);
+  const provDirty = cfgBase.get("__prov") !== JSON.stringify(provForm());
+  if (mcpDirty) n++;
+  if (provDirty) n++;
+  cfgNavDirty({ tools: mcpDirty, model: provDirty });
   const bar = $("#cfg-dirty");
   bar.classList.toggle("hidden", n === 0);
   if (n) bar.textContent = "● " + n + " UNSAVED";
@@ -2658,6 +2664,104 @@ function cfgSnapshot() {
   cfgBase.set("__prov", JSON.stringify(provForm()));
   cfgDirtyCompute();  // fresh baseline => clean; also clears a stale N-UNSAVED span
 }
+// A <select> whose stored value has no <option> shows blank and SAVE writes
+// "" back — that silently reverted voice.stt_provider "whisper" on 10-14.
+// Keep unknown stored values selectable instead of eating them.
+function cfgSetValue(node, v) {
+  if (node.tagName === "SELECT" && v != null && v !== "" &&
+      ![...node.options].some((o) => o.value === String(v))) {
+    const o = document.createElement("option");
+    o.value = String(v); o.textContent = `${v} — (stored value)`;
+    node.appendChild(o);
+  }
+  node.value = v ?? "";
+}
+// CONFIG sections. One section's cards at a time instead of one endless
+// scroll; cards carry data-tab in index.html. Hiding is display:none only —
+// every field stays in the DOM, so openSettings/saveSettings/dirty tracking
+// see all of them regardless of which section is showing. The filter box
+// searches all sections at once (card text incl. hints, option labels and
+// placeholders) and the nav dims sections with no hit.
+const CFG_TABS = [["model", "MODEL"], ["agent", "AGENT"], ["tools", "TOOLS"], ["voice", "VOICE"],
+                  ["phone", "PHONE"], ["alerts", "ALERTS"], ["look", "LOOK & SOUND"]];
+let cfgTab = "model";
+try { cfgTab = localStorage.getItem("lb.cfgTab") || "model"; } catch {}
+const cfgCards = () => [...document.querySelectorAll("#settings-panel .cfg-card[data-tab]")];
+function cfgNavBuild() {
+  const nav = $("#cfg-nav");
+  if (nav.childElementCount) return;
+  for (const [id, label] of CFG_TABS) {
+    const b = el("button");
+    b.type = "button"; b.dataset.tab = id;
+    b.append(document.createTextNode(label), el("span", "cnt"));
+    b.onclick = () => {
+      SFX.play("click");
+      $("#cfg-filter").value = "";
+      cfgShowTab(id);
+    };
+    nav.appendChild(b);
+  }
+}
+function cfgShowTab(id) {
+  if (!CFG_TABS.some(([t]) => t === id)) id = "model";
+  cfgTab = id;
+  try { localStorage.setItem("lb.cfgTab", id); } catch {}
+  cfgApplyFilter();
+  $("#settings-panel .cfg-grid").scrollTop = 0;
+}
+// data lists aren't settings: memories mentioning "voice" shouldn't hit
+const CFG_DATA_LISTS = "#mem-list,#learn-list,#ivr-messages,#soundboard-list";
+function cfgCardText(card) {
+  let t = card.textContent;
+  for (const n of card.querySelectorAll(CFG_DATA_LISTS)) t = t.replace(n.textContent, "");
+  for (const i of card.querySelectorAll("input[placeholder],textarea[placeholder]")) t += " " + i.placeholder;
+  for (const e of card.querySelectorAll("[title]")) if (!e.closest(CFG_DATA_LISTS)) t += " " + e.title;
+  return t.toLowerCase();
+}
+function cfgApplyFilter() {
+  const q = ($("#cfg-filter").value || "").trim().toLowerCase();
+  const hits = {};
+  for (const n of document.querySelectorAll("#settings-panel .cfg-hit")) n.classList.remove("cfg-hit");
+  for (const card of cfgCards()) {
+    const tab = card.dataset.tab;
+    const show = q ? cfgCardText(card).includes(q) : tab === cfgTab;
+    card.classList.toggle("cfg-off", !show);
+    card.classList.toggle("cfg-hit-card", !!q && show);
+    if (q && show) {
+      hits[tab] = (hits[tab] || 0) + 1;
+      // light up the specific rows that matched, not just the card
+      for (const n of card.querySelectorAll("label, h3, .group-label, .learn-head"))
+        if ((n.textContent + " " + (n.title || "")).toLowerCase().includes(q)) n.classList.add("cfg-hit");
+    }
+  }
+  for (const b of document.querySelectorAll("#cfg-nav button")) {
+    const t = b.dataset.tab;
+    b.classList.toggle("on", !q && t === cfgTab);
+    b.classList.toggle("hit", !!q && !!hits[t]);
+    b.classList.toggle("nohit", !!q && !hits[t]);
+    b.querySelector(".cnt").textContent = q && hits[t] ? hits[t] : "";
+  }
+  $("#cfg-nohit").classList.toggle("hidden", !q || Object.keys(hits).length > 0);
+}
+// orange dot on a section holding unsaved edits (MCP/provider edits have no
+// .changed field of their own, so cfgDirtyCompute passes them in)
+function cfgNavDirty(extra = {}) {
+  for (const b of document.querySelectorAll("#cfg-nav button")) {
+    const t = b.dataset.tab;
+    const d = !!extra[t] || !!document.querySelector(
+      `#settings-panel .cfg-card[data-tab="${t}"] .changed`);
+    b.classList.toggle("dirty", d);
+  }
+}
+$("#cfg-filter").addEventListener("input", cfgApplyFilter);
+$("#cfg-filter").addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && e.target.value) { e.stopPropagation(); e.target.value = ""; cfgApplyFilter(); }
+  if (e.key === "Enter") { // jump to the first hit's section
+    const c = cfgCards().find((x) => !x.classList.contains("cfg-off"));
+    if (c) { e.target.value = ""; cfgShowTab(c.dataset.tab); c.scrollIntoView({ block: "start" }); }
+  }
+});
+
 // ESC / CANCEL / backdrop all route here: clean closes are instant; dirty
 // ones reveal the save|discard bar instead of silently eating the edits
 // (no window.confirm — inline bar matches the app idiom).
