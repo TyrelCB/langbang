@@ -744,6 +744,80 @@ class _CompactionMiddleware(AgentMiddleware):
         return await self._hook(state)
 
 
+def _final_ai(resp):
+    """The AIMessage a model-call wrapper's handler produced (ModelResponse |
+    AIMessage | the factory's composed envelope), or None."""
+    mr = resp if getattr(resp, "result", None) is not None else getattr(
+        resp, "model_response", None
+    )
+    msgs = getattr(mr, "result", None)
+    if msgs is None and isinstance(resp, AIMessage):
+        msgs = [resp]
+    return next((m for m in reversed(msgs or []) if isinstance(m, AIMessage)), None)
+
+
+class _EmptyAnswerRetry(AgentMiddleware):
+    """Re-ask a model step that came back with neither text nor tool calls.
+
+    Qwen-family models write chat control tokens as the REAL token when they
+    talk about them: thinking "ChatML starts with <|im_start|>…<|im_end|>"
+    emits the end-of-message token mid-thought, sglang stops there, and the
+    unclosed reasoning yields an empty answer (thread e93c1bb448e4, an IVR
+    review about a leaked "<|im_start|>": three turns in a row died this
+    way; 2 of 3 bare repros returned nothing). logit_bias can't ban the token
+    — sglang refuses it under speculative decoding — so the step is retried
+    with a call-local USER note (never persisted), at most twice per run.
+    Innermost in the chain so the other middlewares see the good answer."""
+
+    MAX = 2
+    NOTE = ("[runtime] Your previous reply ended mid-thought with no answer and no "
+            "tool call. Cause: you typed a chat control token verbatim (the "
+            "message-start or message-end marker — angle bracket, pipe, im_start / "
+            "im_end, pipe, angle bracket), and the server treats that as the end of "
+            "your message. Never write those markers literally, in thinking or in "
+            "answers: call them im_start / im_end, or write them with spaces like "
+            "< |im_end| >. Now continue: answer the user or make your next tool call.")
+
+    # The retry alone loses (live 2026-10-14: 1 of 3 trial threads still died
+    # after both retries, 1 got an answer cut off at its own im_end). So while
+    # the conversation is ABOUT these markers, every step carries a shorter
+    # warning up front — after it the model spelled them with spaces.
+    TOPIC = re.compile(r"\bim_(?:start|end)\b|<\u2060?\|[A-Za-z_]{2,40}\|>|endoftext")
+    WARN = ("[runtime] This conversation mentions chat control tokens. Typing one "
+            "verbatim (angle bracket + pipe + im_start / im_end + pipe + angle "
+            "bracket) ends your message on the spot, mid-sentence. In thinking and "
+            "in answers write them with spaces, like < |im_end| >, or just say "
+            "im_start / im_end.")
+
+    def __init__(self):
+        super().__init__()
+        self._retries = 0
+
+    def _on_topic(self, messages) -> bool:
+        for m in messages:
+            c = m.content if isinstance(m.content, str) else _text_only(m.content or "")
+            if self.TOPIC.search(c) or self.TOPIC.search(
+                    str((m.additional_kwargs or {}).get("reasoning_content") or "")):
+                return True
+        return False
+
+    async def awrap_model_call(self, request, handler):  # noqa: ANN001
+        if self._on_topic(request.messages):
+            request = request.override(
+                messages=[*request.messages, HumanMessage(content=self.WARN)])
+        resp = await handler(request)
+        while self._retries < self.MAX:
+            ai = _final_ai(resp)
+            if ai is None or ai.tool_calls or _text_only(ai.content or "").strip():
+                return resp
+            self._retries += 1
+            logger.warning("empty-answer: model step returned nothing, retry %d/%d",
+                           self._retries, self.MAX)
+            resp = await handler(request.override(
+                messages=[*request.messages, HumanMessage(content=self.NOTE)]))
+        return resp
+
+
 class _TodoReconcile(AgentMiddleware):
     """Deterministic finish-line gate for the todo list.
 
@@ -1577,6 +1651,7 @@ async def build_agent(s: dict, checkpointer=None, thread_prompt: str = ""):
             hermes = os.path.expanduser(s.get("skills_hermes_dir") or "~/.hermes/skills")
             perms = [FilesystemPermission(
                 operations=["write"], paths=[hermes + "/**"], mode="deny")]
+        mw.append(_EmptyAnswerRetry())  # last = innermost, right around the model
         return create_deep_agent(
             model(s),
             tools,
