@@ -366,7 +366,7 @@ def _tech(t: str) -> str:
         return " slash ".join([host, *segs])
     t = re.sub(rf"(https?://)?\b((?:[a-z0-9-]+\.)+(?:{_TLDS}))((?:/[\w.~%-]*[\w~%-])+)/?(?=[\s),.;:]|$)",
                _url, t)
-    # hostnames: mohamed.local, fedora.<tailnet>.ts.net → dot-separated
+    # hostnames: mohamed.local, box.tailnet-name.ts.net → dot-separated
     t = re.sub(rf"\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:{_TLDS})\b(?![\w-]|\.\w)",
                lambda m: m[0].replace(".", " dot "), t)
     # HTTP status codes: 204/204, "201 Created", "returns 404", "all 404"
