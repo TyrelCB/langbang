@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly home backup
+
+[Timer]
+# after the RAG node's 01:05 rescan window
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -203,6 +203,7 @@ prompt and no login — by design, this is a personal LAN tool.
 
 - [docs/FEATURES.md](docs/FEATURES.md) — full feature reference and design notes
 - [docs/RAG.md](docs/RAG.md) — the RAG node: indexing, search tools, federation, adding fleet nodes
+- [docs/BACKUP.md](docs/BACKUP.md) — nightly tar incrementals + rsync off-box, restore
 - [SOUND_DESIGN.md](SOUND_DESIGN.md) — the UI sound pack and how it's generated
 - [tools/sglang-patches/](tools/sglang-patches/) — a parser fix for tag-less single-parameter tool calls
 - [tools/ab/](tools/ab/) — A/B harness (keep-reasoning-in-context experiment)

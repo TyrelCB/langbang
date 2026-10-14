@@ -1,0 +1,25 @@
+# Nightly home backup: tar incrementals (weekly full) + rsync off-box.
+# Script: tools/backup/home-backup.sh, config: ~/.config/home-backup/config
+# Install: sudo cp tools/systemd/home-backup.{service,timer} /etc/systemd/system/ &&
+#          sudo systemctl daemon-reload && sudo systemctl enable --now home-backup.timer
+# Logs:    journalctl -u home-backup   (failures also push via LangBang's ntfy topic)
+[Unit]
+Description=Home backup (tar incrementals + rsync off-box)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tyrel
+Group=tyrel
+WorkingDirectory=/home/tyrel/projects/LangBang
+Environment=PATH=/usr/local/bin:/usr/bin:/usr/sbin
+# Run unconfined like a login shell: from a service domain, exec'ing rsync
+# transitions to the confined rsync_t, which may not exec ssh or read ~.
+SELinuxContext=unconfined_u:unconfined_r:unconfined_t:s0
+ExecStart=/usr/bin/bash -c 'exec tools/backup/home-backup.sh run'
+# background work: never starve the chat app, TTS or the RAG rescan
+Nice=15
+IOSchedulingClass=idle
+CPUSchedulingPolicy=batch
+TimeoutStartSec=4h

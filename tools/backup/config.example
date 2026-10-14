@@ -1,0 +1,48 @@
+# home-backup config — copy to ~/.config/home-backup/config and edit.
+# Sourced by bash; paths in SOURCES / WEEKLY_ONLY are relative to $HOME.
+
+# What to archive. Data you can't re-download: code, app state, notes, keys.
+SOURCES=(
+  projects
+  .langbang            # LangBang skills + memory
+  .claude              # Claude Code memory + session transcripts
+  .hermes
+  .ssh
+  .config/home-backup
+  .config/systemd
+  Documents
+  Pictures
+)
+
+# tar --exclude patterns (unanchored: match any path component / suffix).
+# Reinstallable or regenerable stuff — venvs, package caches, model weights.
+EXCLUDES=(
+  .venv venv node_modules __pycache__ .mypy_cache .pytest_cache .ruff_cache
+  .cache .gradle .next '*.pyc'
+  '*.safetensors' '*.gguf' '*.ckpt'
+  .hermes/hermes-agent .hermes/tools .hermes/installs .hermes/cache .hermes/bin
+)
+
+# Live SQLite dbs (relative to $HOME) that are big and rebuildable: snapshot
+# on full (weekly) runs only, so nightly incrementals stay small.
+WEEKLY_ONLY=(
+  projects/LangBang/data/rag/rag.db
+)
+
+# Absolute paths outside $HOME, archived under _system/ (must be readable by
+# the backup user — /etc/systemd/system units are root-only 0640 on Fedora;
+# LangBang's own units are in git under tools/systemd anyway).
+SYSTEM_FILES=()
+
+# Local archive store. Pick a different disk/partition from $HOME if you can.
+ARCHIVE_DIR=/srv/backups/home
+# Off-box copy: rsync over ssh (key auth). Empty = local only.
+REMOTE=backup-host:backups/home
+
+KEEP_LOCAL=2     # cycles (weeks) kept locally
+KEEP_REMOTE=8    # cycles kept on REMOTE
+FULL_DOW=7       # ISO weekday a new full starts (7 = Sunday)
+ZSTD_LEVEL=10
+
+# Failure push: reads ntfy server/topic from LangBang's settings (optional).
+NTFY_SETTINGS=$HOME/projects/LangBang/data/settings.json
