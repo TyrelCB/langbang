@@ -3806,6 +3806,71 @@ function ivrToolBox(name, on) {
   return cb;
 }
 
+// IVR call voice: its own TTS provider (or the chat one) + a voice name
+// from that provider's library — Pocket's or Qwen's picker, minus "clone…".
+// gTTS/gcloud have no named voices here (gcloud's lives in CONFIG → VOICE).
+const IVR_TTS = [["pocket", "pocket — local CPU"], ["qwen", "qwen — Qwen3-TTS on spark-ee93 (GPU)"],
+                 ["gtts", "gtts — free, no key"], ["gcloud", "google cloud — key file"]];
+let ivrChatTts = "gtts";
+let ivrAudio = null;
+const ivrTtsNow = () => $("#set-ivr-tts_provider").value || ivrChatTts;
+function ivrVoiceOptions(selected) {
+  const prov = ivrTtsNow();
+  const vs = $("#set-ivr-pocket_voice");
+  const src = { pocket: "#set-voice-pocket_voice", qwen: "#set-voice-qwen_voice" }[prov];
+  vs.replaceChildren(new Option(src ? "(same as chat voice)" : "(provider's voice — set in VOICE)", ""));
+  if (src) {
+    for (const g of $(src).children) {
+      if (g.tagName !== "OPTGROUP") continue;
+      const og = el("optgroup"); og.label = g.label;
+      for (const o of g.children) if (o.value !== PV_CLONE) og.appendChild(new Option(o.textContent, o.value));
+      if (og.children.length) vs.appendChild(og);
+    }
+  }
+  // a stored name this provider doesn't list stays selectable (never silently blanked)
+  if (selected && ![...vs.options].some((o) => o.value === selected))
+    vs.appendChild(new Option(selected + (src ? ` (not in ${prov} library)` : " (unused by " + prov + ")"), selected));
+  vs.value = selected || "";
+  vs.disabled = !src && !selected;
+  $("#btn-ivr-voice-preview").disabled = !src;
+  $("#ivr-voice-status").textContent = "";
+}
+async function ivrVoicePreview() {
+  const prov = ivrTtsNow();
+  if (prov !== "pocket" && prov !== "qwen") return;
+  const b = $("#btn-ivr-voice-preview"), st = $("#ivr-voice-status");
+  if (ivrAudio && !ivrAudio.paused) { ivrAudio.pause(); b.textContent = "▶"; return; }
+  const voice = $("#set-ivr-pocket_voice").value || (prov === "qwen" ? qvValue() : pvValue());
+  b.textContent = "…"; st.textContent = ""; st.className = "pv-status";
+  try {
+    const greet = $("#set-ivr-greeting").value.trim() || "Hello, this is a test of the phone voice.";
+    const r = await fetch("/api/tts", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: greet, voice, provider: prov,
+        language: $(prov === "qwen" ? "#set-voice-qwen_language" : "#set-voice-pocket_language").value }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.stream) throw new Error(out.detail || "HTTP " + r.status);
+    ivrAudio = new Audio(out.stream);
+    ivrAudio.onended = () => { b.textContent = "▶"; };
+    await ivrAudio.play();
+    b.textContent = "■";
+  } catch (e) {
+    b.textContent = "▶";
+    st.textContent = "✕ preview failed: " + e.message;
+    st.className = "pv-status warn";
+    SFX.play("error");
+  }
+}
+$("#set-ivr-tts_provider").addEventListener("change", () => ivrVoiceOptions($("#set-ivr-pocket_voice").value));
+// IVR following the chat provider: re-list when CONFIG → VOICE's provider changes
+$("#set-voice-tts_provider").addEventListener("change", () => {
+  ivrChatTts = $("#set-voice-tts_provider").value || "gtts";
+  $("#set-ivr-tts_provider").options[0].textContent = `(same as chat: ${ivrChatTts})`;
+  if (!$("#set-ivr-tts_provider").value) ivrVoiceOptions($("#set-ivr-pocket_voice").value);
+});
+$("#btn-ivr-voice-preview").onclick = ivrVoicePreview;
+
 function ivrLoadForm(v, s) {
   loadedIvr = { ...v };
   $("#set-ivr-enabled").checked = v.enabled !== false;
@@ -3818,14 +3883,15 @@ function ivrLoadForm(v, s) {
   ps.value = v.provider || "";
   $("#set-ivr-model").value = v.model || "";
   ivrModels();
-  // voice: the chat voice picker's options (presets + cloned), minus "clone…"
-  const vs = $("#set-ivr-pocket_voice");
-  vs.replaceChildren(new Option("(same as chat voice)", ""));
-  for (const o of $("#set-voice-pocket_voice").querySelectorAll("option"))
-    if (o.value !== PV_CLONE) vs.appendChild(new Option(o.textContent, o.value));
-  if (v.pocket_voice && ![...vs.options].some((o) => o.value === v.pocket_voice))
-    vs.appendChild(new Option("custom: " + v.pocket_voice.split("/").pop(), v.pocket_voice));
-  vs.value = v.pocket_voice || "";
+  // voice provider: "" follows CONFIG → VOICE; the voice list follows the provider
+  ivrChatTts = (s.voice || {}).tts_provider || "gtts";
+  const ts = $("#set-ivr-tts_provider");
+  ts.replaceChildren(new Option(`(same as chat: ${ivrChatTts})`, ""));
+  for (const [val, label] of IVR_TTS) ts.appendChild(new Option(label, val));
+  if (v.tts_provider && ![...ts.options].some((o) => o.value === v.tts_provider))
+    ts.appendChild(new Option(v.tts_provider + " (unknown)", v.tts_provider));
+  ts.value = v.tts_provider || "";
+  ivrVoiceOptions(v.pocket_voice || "");
   $("#set-ivr-greeting").value = v.greeting || "";
   $("#set-ivr-system_prompt").value = v.system_prompt || "";
   $("#set-ivr-knowledge_file").value = v.knowledge_file || "";
@@ -3843,6 +3909,7 @@ function ivrForm() {
   out.enabled = $("#set-ivr-enabled").checked;
   out.provider = $("#set-ivr-provider").value;
   out.model = $("#set-ivr-model").value.trim();
+  out.tts_provider = $("#set-ivr-tts_provider").value;
   out.pocket_voice = $("#set-ivr-pocket_voice").value;
   out.greeting = $("#set-ivr-greeting").value.trim();
   out.system_prompt = $("#set-ivr-system_prompt").value.trim();
