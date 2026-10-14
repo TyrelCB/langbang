@@ -328,8 +328,16 @@ def load() -> dict:
 
 
 def save(settings: dict) -> dict:
+    """Write settings. Top-level keys not in `settings` keep their ON-DISK
+    value (2026-10-14: a one-key save used to fall back to DEFAULTS for every
+    other key and wiped providers, models, MCP servers and fleet hosts)."""
     with _lock:
-        merged = _backfill({**DEFAULTS, **settings})
+        try:
+            with open(SETTINGS_PATH) as f:
+                disk = json.load(f)
+        except (FileNotFoundError, ValueError):
+            disk = {}
+        merged = _backfill({**DEFAULTS, **disk, **settings})
         tmp = SETTINGS_PATH + ".tmp"
         with open(tmp, "w") as f:
             json.dump(merged, f, indent=2)
