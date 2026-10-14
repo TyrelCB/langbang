@@ -24,7 +24,7 @@ import time
 
 import httpx
 
-from . import config
+from . import agent, config
 
 logger = logging.getLogger("langbang.decide")
 
@@ -130,7 +130,7 @@ def _schema(questions: dict) -> dict:
 
 def _prompt(state, questions: dict) -> str:
     st = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False, indent=1)
-    lines = [f"STATE:\n{st[:STATE_CAP]}", "", "QUESTIONS:"]
+    lines = [f"STATE:\n{agent.defang(st[:STATE_CAP])}", "", "QUESTIONS:"]
     for qid, q in questions.items():
         lines.append(f"- {qid} ({q['type']}): {q.get('instructions') or ''}")
         if q["type"] == "noul":
