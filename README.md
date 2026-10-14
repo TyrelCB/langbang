@@ -4,7 +4,7 @@
 
 <p align="center">
   <b>A self-hosted agent workspace for your own LLM servers</b><br>
-  LangGraph deep agents · MCP tools · scheduled tasks · local voice · image generation — in a llama.cpp-style web UI
+  LangGraph deep agents · MCP tools · multimodal RAG · terminals + fleet SSH · scheduled tasks · local voice · image generation — in a llama.cpp-style web UI
 </p>
 
 <p align="center">
@@ -42,7 +42,9 @@ at any OpenAI-compatible server — **sglang, vLLM, llama-server, Ollama, OpenAI
 OpenRouter** — and you get a persistent, multi-thread chat where the model can
 plan with a todo list, run shell commands, read and edit files, call MCP tools,
 generate images, read its answers aloud, and keep working on a schedule while
-you're away.
+you're away. Around the chat sit the tools you'd otherwise open separately: a
+multimodal semantic index of your files and media, a file editor, browser
+terminals that SSH into the rest of your fleet, and a phone line.
 
 It's a single Python process (FastAPI + LangGraph) with a no-build vanilla-JS
 frontend in a dark "terminal HUD" theme. Everything stateful lives in SQLite and
@@ -74,7 +76,8 @@ blowups, mangled tool calls, stuck scheduled runs — is documented in the
 - **Notifications** — in-app toasts, desktop popups, and phone push via [ntfy](https://ntfy.sh) (self-hostable)
 - **✎ FILES** — browse and edit any file with syntax highlighting, Markdown preview, media viewer, and an AI edit bar scoped to that file; audio opens in a visualizer (six music-sync modes) with its tags/lyrics, and ✨ IMAGES FROM AUDIO illustrates the track from its metadata plus measured tempo, key and energy
 - **Image generation & editing** — Qwen-Image via ComfyUI; results render inline
-- **Voice** — read-aloud with local streaming [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) (CPU, voice cloning) or gTTS / Google Cloud, with a text normalizer so dates, times, money and tables are spoken correctly
+- **Voice** — read-aloud with local streaming [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) (CPU, voice cloning) or gTTS / Google Cloud, with a text normalizer so dates, times, money and tables are spoken correctly; 🎙 speak your messages, or go hands-free with TALK mode (listen → send on a pause → read the answer → listen again)
+- **Phone assistant (IVR)** — `/api/ivr/*` for a telephony bridge: speech in, speech out, backed by a separate, locked-down agent (its own model and tool allowlist, no shell or file writes) that can search your knowledge base and take messages
 - **Per-thread prompts**, chat search, recap, inline media for any cited file path, and a hidden X-SIM platformer for waiting on slow models
 
 See **[docs/FEATURES.md](docs/FEATURES.md)** for the full reference.
@@ -138,6 +141,10 @@ flowchart LR
     AGENT --> DB[("SQLite<br/>threads · checkpoints · trajectory")]
     API --> VOICE["Voice<br/>Pocket TTS · gTTS · normalizer"]
     TOOLS --> COMFY[("ComfyUI")]
+    API <-->|"WebSocket"| TERM["▮ TERM<br/>server/term.py · tmux"]
+    TERM -->|"ssh"| FLEET[("fleet hosts")]
+    PHONE["telephony bridge"] -->|"/api/ivr"| IVR["IVR agent<br/>server/ivr.py"]
+    IVR --> VOICE
     TOOLS <-->|"HTTP"| RAG["RAG node :8900<br/>rag/ · EmbeddingGemma 2"]
     RAG <-->|"fan-out · replication"| PEERS[("fleet peers")]
 ```
@@ -148,7 +155,7 @@ live run and replay what they missed.
 
 | Module | Role |
 |---|---|
-| `server/main.py` | FastAPI app: chat/stream, threads, files, voice, images, schedules, settings |
+| `server/main.py` | FastAPI app: chat/stream, threads, files, voice, images, schedules, terminals, settings |
 | `server/agent.py` | agent construction, middleware (gates, compaction, todo reconcile, tool-arg repair), streaming runner, thread storage |
 | `server/runs.py` | detached run hubs with replayable event streams |
 | `server/schedule.py` | cron + one-off scheduled tasks |
@@ -158,11 +165,14 @@ live run and replay what they missed.
 | `server/local_tools.py` | shell, files, crawl, image generation, scheduling tools |
 | `server/voice.py`, `server/ttsjobs.py`, `server/ttsnorm.py` | TTS providers, streaming jobs, text normalization |
 | `server/comfy.py` | ComfyUI workflow builder (Qwen-Image text-to-image + edit) |
+| `server/audioart.py` | audio metadata, tempo/key/energy analysis, images-from-audio prompts |
+| `server/term.py` | ▮ TERM: tmux-backed terminal sessions, fleet hosts, probes, run-on-many |
+| `server/ivr.py` | phone assistant: STT → restricted agent → TTS, call log |
 | `server/notify.py` | toasts / desktop / ntfy push |
 | `server/rag.py` | RAG node client: search tools backend + fire-and-forget ingest pushes |
 | `rag/` | the RAG node (own service): embedder backends, vector store, indexer, federation, search UI |
 | `server/fileassist.py`, `server/sfxgen.py` | FILES AI edit bar; UI sound-effect regeneration |
-| `web/` | `index.html`, `app.js`, `style.css`, `game.js` (X-SIM), `sfx.js`, vendored JS, sounds |
+| `web/` | `index.html`, `app.js`, `style.css`, `term.js` (▮ TERM), `viz.js` (audio visualizer), `game.js` (X-SIM), `sfx.js`, vendored JS, sounds |
 | `tools/` | A/B harness, sglang parser patch, TTS normalizer checks, demo MCP server |
 
 ## Security
