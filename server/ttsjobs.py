@@ -85,7 +85,9 @@ class Job:
             proc = subprocess.Popen(FFMPEG, stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0)
             reader = threading.Thread(target=self._read, args=(proc,), daemon=True)
             reader.start()
-            for pcm in voice.pocket_pcm(self.text, self.v, stop=self.stop, words=self.words):
+            gen = (voice.qwen_pcm if self.v.get("tts_provider") == "qwen"
+                   else voice.pocket_pcm)
+            for pcm in gen(self.text, self.v, stop=self.stop, words=self.words):
                 if self._abandoned():
                     self.stop.set()  # model stops generating new frames
                     self.cancelled = True

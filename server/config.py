@@ -126,6 +126,12 @@ DEFAULTS = {
         "pocket_voice": "alba",
         "pocket_language": "english",
         "pocket_threads": 2,
+        # Qwen3-TTS ("qwen" provider): qwen-tts-stream.service on spark-ee93.
+        # Cloned voices live in that service's library; "Tyrel" is registered
+        # there. Presets are the Qwen CustomVoice speakers (see GET /voices).
+        "qwen_tts_url": "http://spark-ee93:8098",
+        "qwen_voice": "Tyrel",
+        "qwen_language": "English",
         # numbers/dates/times → words before synthesis: pocket | all | off
         "tts_normalize": "pocket",  # benchmarked: 2 = 4 = 8 on this i9 (~4.5x realtime)
         # VOICE: SPEAK auto-read of ◈ THINKING cards (client-side): off | on.

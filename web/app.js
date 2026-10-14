@@ -2324,6 +2324,7 @@ const DEFAULT_VOICE = {
   stt_provider: "sr", stt_lang: "en-US",
   gcloud_key_file: "", gcloud_tts_lang: "en-US", gcloud_tts_voice: "en-US-Wavenet-J",
   pocket_voice: "alba", pocket_language: "english", pocket_threads: 2,
+  qwen_tts_url: "http://spark-ee93:8098", qwen_voice: "Tyrel", qwen_language: "English",
   tts_normalize: "pocket",
   speak_reasoning: "off",
 };
@@ -2370,10 +2371,26 @@ async function pvLoad(selected) {
 }
 let pvLib = { presets: [], saved: [] };
 
+// The CLONE A VOICE form is shared by the Pocket and Qwen pickers; pvMode
+// says which one opened it (where CLONE & SAVE posts, which hint shows).
+let pvMode = "pocket";
+function cloneFormMode(mode) {
+  pvMode = mode;
+  const q = mode === "qwen";
+  $("#pv-hint-qwen").classList.toggle("hidden", !q);
+  $("#pv-hint-pocket").classList.toggle("hidden", q);
+  $("#pv-ref-row").classList.toggle("hidden", !q);
+}
 function pvSync() {
   const v = $("#set-voice-pocket_voice").value;
   const cloning = v === PV_CLONE;
-  $("#pv-clone").classList.toggle("hidden", !cloning);
+  if (cloning) {
+    if (pvMode === "qwen" && $("#set-voice-qwen_voice").value === PV_CLONE) { // one form at a time
+      $("#set-voice-qwen_voice").value = qvPrev; qvSync();
+    }
+    cloneFormMode("pocket");
+  }
+  if (cloning || pvMode === "pocket") $("#pv-clone").classList.toggle("hidden", !cloning);
   $("#btn-pv-preview").disabled = cloning;
   $("#btn-pv-delete").classList.toggle("hidden", !pvLib.saved.some((x) => x.name === v));
   if (cloning) {
@@ -2383,6 +2400,108 @@ function pvSync() {
     $("#pv-name").focus();
   } else pvPrev = v;
 }
+
+// ---- Qwen voice picker: same shape as Pocket's; the library lives on the
+// Qwen service (spark-ee93), proxied by /api/voices/qwen ----
+let qvPrev = "Tyrel";
+let qvLib = { presets: [], saved: [] };
+let qvAudio = null;
+function qvValue() {
+  const v = $("#set-voice-qwen_voice").value;
+  return v === PV_CLONE ? qvPrev : v;
+}
+async function qvLoad(selected) {
+  try { qvLib = await (await fetch("/api/voices/qwen")).json(); } catch { qvLib = {}; }
+  const presets = qvLib.presets || [], saved = qvLib.saved || [];
+  const sel = $("#set-voice-qwen_voice");
+  sel.replaceChildren();
+  const group = (label, items) => {
+    const g = el("optgroup");
+    g.label = label;
+    for (const [value, text] of items) {
+      const o = el("option", null, text);
+      o.value = value;
+      g.appendChild(o);
+    }
+    sel.appendChild(g);
+  };
+  if (saved.length) group("MY VOICES", saved.map((n) => [n, n]));
+  if (presets.length) group("PRESETS", presets.map((n) => [n, n]));
+  // stored voice the service doesn't list (or the service is down): keep it
+  if (selected && ![...sel.options].some((o) => o.value === selected))
+    group(presets.length ? "NOT ON THE SERVICE" : "QWEN SERVICE UNREACHABLE", [[selected, selected]]);
+  const add = el("option", null, "＋ Clone a new voice…");
+  add.value = PV_CLONE;
+  sel.appendChild(add);
+  sel.value = selected || "Tyrel";
+  qvPrev = sel.value;
+  $("#qv-status").textContent = presets.length ? "" : "⚠ Qwen service unreachable — check the URL below";
+  $("#qv-status").className = "pv-status" + (presets.length ? "" : " warn");
+  qvSync();
+}
+function qvSync() {
+  const v = $("#set-voice-qwen_voice").value;
+  const cloning = v === PV_CLONE;
+  if (cloning) {
+    if (pvMode === "pocket" && $("#set-voice-pocket_voice").value === PV_CLONE) { // one form at a time
+      $("#set-voice-pocket_voice").value = pvPrev; pvSync();
+    }
+    cloneFormMode("qwen");
+    $("#pv-status").textContent = ""; $("#pv-status").className = "pv-status";
+    $("#pv-name").focus();
+  } else qvPrev = v;
+  if (cloning || pvMode === "qwen") $("#pv-clone").classList.toggle("hidden", !cloning);
+  $("#btn-qv-preview").disabled = cloning;
+  $("#btn-qv-delete").classList.toggle("hidden", !(qvLib.saved || []).includes(v));
+}
+async function qvPreview() {
+  const voice = qvValue();
+  const b = $("#btn-qv-preview"), st = $("#qv-status");
+  if (qvAudio) { qvAudio.pause(); qvAudio = null; }
+  b.textContent = "…";
+  st.textContent = ""; st.className = "pv-status";
+  try {
+    const r = await fetch("/api/tts", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: `Hi, I'm ${voice.replace(/_/g, " ")}. This is how I'd sound reading your LangBang replies.`,
+        voice, language: $("#set-voice-qwen_language").value, provider: "qwen",
+      }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.stream) throw new Error(out.detail || "HTTP " + r.status);
+    qvAudio = new Audio(out.stream);
+    qvAudio.onended = () => { b.textContent = "▶"; };
+    await qvAudio.play();
+    b.textContent = "■";
+  } catch (e) {
+    b.textContent = "▶";
+    st.textContent = "✕ preview failed: " + e.message;
+    st.className = "pv-status warn";
+    SFX.play("error");
+  }
+}
+async function qvDelete() {
+  const name = $("#set-voice-qwen_voice").value;
+  const b = $("#btn-qv-delete");
+  if (!b.classList.contains("arm")) { // two-click confirm (no confirm() in this app)
+    b.classList.add("arm"); b.textContent = "✕ sure?";
+    setTimeout(() => { b.classList.remove("arm"); b.textContent = "✕"; }, 3000);
+    return;
+  }
+  b.classList.remove("arm"); b.textContent = "✕";
+  const r = await fetch("/api/voices/qwen/" + encodeURIComponent(name), { method: "DELETE" });
+  if (!r.ok) { SFX.play("error"); return; }
+  if (loadedVoice.qwen_voice === name) loadedVoice.qwen_voice = "Ryan"; // server reset it too
+  await qvLoad(qvPrev === name ? "Ryan" : qvPrev);
+  cfgDirtyCompute();
+}
+$("#set-voice-qwen_voice").addEventListener("change", qvSync);
+$("#btn-qv-preview").onclick = () => {
+  if (qvAudio && !qvAudio.paused) { qvAudio.pause(); $("#btn-qv-preview").textContent = "▶"; return; }
+  qvPreview();
+};
+$("#btn-qv-delete").onclick = qvDelete;
 
 async function pvPreview() {
   const voice = pvValue();
@@ -2420,22 +2539,35 @@ async function pvClone() {
   if (PVREC.state !== "idle") return fail("stop the recording first");
   if (!file) return fail("pick an audio file or ● RECORD one");
   if (!$("#pv-consent").checked) return fail("confirm you have permission to clone this voice");
+  const qwen = pvMode === "qwen";
   const fd = new FormData();
   fd.append("name", name);
-  fd.append("language", $("#set-voice-pocket_language").value);
+  fd.append("language", $(qwen ? "#set-voice-qwen_language" : "#set-voice-pocket_language").value);
   fd.append("consent", "true");
+  if (qwen) fd.append("ref_text", $("#pv-ref_text").value.trim());
   fd.append("file", file);
   $("#btn-pv-clone").disabled = true;
-  st.textContent = "⏳ cloning… (loads the cloning model once, ~10 s)";
+  st.textContent = qwen
+    ? ($("#pv-ref_text").value.trim() ? "⏳ saving to the Qwen library…" : "⏳ transcribing with whisper, then saving to the Qwen library…")
+    : "⏳ cloning… (loads the cloning model once, ~10 s)";
   st.className = "pv-status";
   try {
-    const r = await fetch("/api/voices", { method: "POST", body: fd });
+    const r = await fetch(qwen ? "/api/voices/qwen" : "/api/voices", { method: "POST", body: fd });
     const out = await r.json().catch(() => ({}));
     if (!r.ok) return fail(out.detail || "HTTP " + r.status);
-    await pvLoad(out.name);        // selected — SAVE makes it the reading voice
+    if (qwen) await qvLoad(out.name); // selected — SAVE makes it the reading voice
+    else await pvLoad(out.name);
     cfgDirtyCompute();
     $("#pv-name").value = ""; $("#pv-file").value = ""; $("#pv-consent").checked = false;
+    $("#pv-ref_text").value = "";
     pvRecClear();
+    if (qwen) { // the form closed with the picker; report under the Qwen picker
+      const qs = $("#qv-status");
+      qs.textContent = `✓ saved “${out.name}” — heard: “${(out.ref_text || "").slice(0, 120)}” — ▶ to hear it, SAVE to use it`;
+      qs.className = "pv-status ok";
+      SFX.play("message_received");
+      return;
+    }
     st.textContent = `✓ saved “${out.name}” — ▶ to hear it, SAVE to use it`;
     st.className = "pv-status ok";
     SFX.play("message_received");
@@ -2471,7 +2603,8 @@ $("#btn-pv-clone").onclick = pvClone;
 $("#btn-pv-cancel").onclick = () => {
   pvRecStop(false);
   pvRecClear();
-  $("#set-voice-pocket_voice").value = pvPrev; pvSync(); cfgDirtyCompute();
+  if (pvMode === "qwen") { $("#set-voice-qwen_voice").value = qvPrev; qvSync(); cfgDirtyCompute(); }
+  else { $("#set-voice-pocket_voice").value = pvPrev; pvSync(); cfgDirtyCompute(); }
 };
 $("#btn-pv-delete").onclick = pvDelete;
 
@@ -2520,6 +2653,8 @@ async function openSettings() {
   refreshMemoryUI(true);
   loadedVoice = { ...DEFAULT_VOICE, ...(s.voice || {}) };
   await pvLoad(loadedVoice.pocket_voice); // options must exist before .value is set
+  cloneFormMode("pocket"); $("#pv-clone").classList.add("hidden");
+  await qvLoad(loadedVoice.qwen_voice);
   notifyLoadForm(s.notify || {});
   ragLoadForm(s.rag || {});
   ivrLoadForm(s.ivr || {}, s);
@@ -2598,6 +2733,9 @@ async function saveSettings() {
       pocket_voice: pvValue() || "alba",
       pocket_language: $("#set-voice-pocket_language").value || "english",
       pocket_threads: Math.max(1, Math.min(8, parseInt($("#set-voice-pocket_threads").value, 10) || 2)),
+      qwen_tts_url: $("#set-voice-qwen_tts_url").value.trim() || "http://spark-ee93:8098",
+      qwen_voice: qvValue() || "Tyrel",
+      qwen_language: $("#set-voice-qwen_language").value || "English",
       tts_normalize: $("#set-voice-tts_normalize").value || "pocket",
       speak_reasoning: $("#set-voice-speak_reasoning").value || "off",
     },

@@ -204,6 +204,7 @@
               <option value="gtts">gtts — free, no key</option>
               <option value="gcloud">google cloud — key file</option>
               <option value="pocket">pocket — local CPU (kyutai), streams</option>
+              <option value="qwen">qwen — Qwen3-TTS on spark-ee93 (GPU), streams</option>
             </select>
           </label>
           <label title="With VOICE: SPEAK on, also read each ◈ THINKING card as it finishes, before the answer. Long reasoning (xhigh) can run minutes and the answer waits behind it. Every thinking card gets its own 🔊 either way.">Read reasoning aloud
@@ -249,9 +250,30 @@
             </select></label>
           <label>Pocket CPU threads <input id="set-voice-pocket_threads" type="number" min="1" max="8" step="1" title="2 benchmarked as fast as 4 or 8 on this box (~4.5x realtime)"></label>
         </div>
+        <div class="row">
+          <label title="Voices live in the Qwen service's own library (clones registered there); Tyrel is your cloned voice there">Qwen voice
+            <span class="pv-row">
+              <select id="set-voice-qwen_voice"></select>
+              <button id="btn-qv-preview" class="btn ghost sm" type="button" title="hear this voice (doesn't save)">▶</button>
+              <button id="btn-qv-delete" class="btn ghost sm hidden" type="button" title="delete this cloned voice from the Qwen service">✕</button>
+            </span>
+            <span id="qv-status" class="pv-status"></span>
+          </label>
+          <label>Qwen language
+            <select id="set-voice-qwen_language">
+              <option value="English">English</option><option value="Chinese">Chinese</option>
+              <option value="Japanese">Japanese</option><option value="Korean">Korean</option>
+              <option value="German">German</option><option value="French">French</option>
+              <option value="Russian">Russian</option><option value="Portuguese">Portuguese</option>
+              <option value="Spanish">Spanish</option><option value="Italian">Italian</option>
+            </select>
+          </label>
+          <label title="qwen-tts-stream.service on spark-ee93">Qwen TTS URL <input id="set-voice-qwen_tts_url" type="text" size="28" placeholder="http://spark-ee93:8098" autocomplete="off" spellcheck="false"></label>
+        </div>
         <div id="pv-clone" class="pv-clone hidden">
           <div class="group-label">CLONE A VOICE</div>
-          <div class="hint">Upload ~15–30 s of one person speaking clearly (any audio or video file — a phone voice memo works), or ● RECORD it here. Talk the way you want it to sound: conversational pace, close to the mic, quiet room — the clone copies pace and room as well as the voice. Pauses are trimmed and the level evened out; about 15 s of speech is used. Saved voices run on the normal model; cloning itself needs kyutai's gated weights once (accept the terms at huggingface.co/kyutai/pocket-tts + <code>hf auth login</code> on this box).</div>
+          <div id="pv-hint-qwen" class="hint hidden">QWEN CLONE — saved into the Qwen service's voice library on spark-ee93 (usable by every app that talks to it). Upload or ● RECORD ~15–30 s of one person speaking clearly; pauses are trimmed, the level evened out and ~15 s used. Qwen clones from the clip <b>and what it says</b>: leave the transcript blank and whisper writes it, or type it exactly for the best match.</div>
+          <div id="pv-hint-pocket" class="hint">Upload ~15–30 s of one person speaking clearly (any audio or video file — a phone voice memo works), or ● RECORD it here. Talk the way you want it to sound: conversational pace, close to the mic, quiet room — the clone copies pace and room as well as the voice. Pauses are trimmed and the level evened out; about 15 s of speech is used. Saved voices run on the normal model; cloning itself needs kyutai's gated weights once (accept the terms at huggingface.co/kyutai/pocket-tts + <code>hf auth login</code> on this box).</div>
           <div class="row">
             <label>Name <input id="pv-name" type="text" maxlength="40" autocomplete="off" spellcheck="false" placeholder="tyrel_warm"></label>
             <label>Audio <input id="pv-file" type="file" accept="audio/*,video/*"></label>
@@ -264,6 +286,8 @@
             <button id="btn-pv-rec-clear" class="btn ghost sm hidden" type="button" title="discard this recording">✕</button>
           </div>
           <div id="pv-rec-script" class="pv-rec-script hidden">Read this aloud at your normal pace: “I'm recording a sample of my voice so LangBang can read its replies the way I sound. Some days are calm and quiet; others are loud, busy, and full of surprises. Numbers like three, seven and twelve sound different from words like whisper, thunder and jazz. Why does the bright yellow kite drift over the river? Thanks for listening — that should be plenty.”</div>
+          <label id="pv-ref-row" class="hidden">What the clip says <span class="hint">(optional — blank = whisper transcribes it)</span>
+            <textarea id="pv-ref_text" rows="2" spellcheck="false" placeholder="leave blank to auto-transcribe"></textarea></label>
           <label class="chk pv-consent"><input type="checkbox" id="pv-consent"> This is my voice, or I have the speaker's permission to clone it</label>
           <div class="row">
             <button id="btn-pv-clone" class="btn accent sm" type="button">CLONE &amp; SAVE</button>
