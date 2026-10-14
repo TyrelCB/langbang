@@ -211,7 +211,12 @@ def speak(text: str, s: dict, cfg: dict, out: str, rate: int) -> bytes:
         raise ValueError(f"unknown output format {out!r} (one of: {', '.join(OUT_FORMATS)})")
     v = {**s["voice"]}
     if cfg.get("pocket_voice"):
-        v["pocket_voice"] = cfg["pocket_voice"]
+        # the IVR voice picker overrides the chat voice — the name means
+        # qwen_voice when the chat provider is the Qwen service
+        if (v.get("tts_provider") or "gtts") == "qwen":
+            v["qwen_voice"] = cfg["pocket_voice"]
+        else:
+            v["pocket_voice"] = cfg["pocket_voice"]
     clean = voice.prepare(text, {**s, "voice": v})
     if not clean:
         return b""
@@ -219,6 +224,9 @@ def speak(text: str, s: dict, cfg: dict, out: str, rate: int) -> bytes:
     if (v.get("tts_provider") or "gtts") == "pocket":
         pcm = b"".join(voice.pocket_pcm(clean, v))
         audio = _ffmpeg(pcm, ["-f", "s16le", "-ar", str(voice.POCKET_RATE), "-ac", "1"], tail)
+    elif (v.get("tts_provider") or "gtts") == "qwen":
+        pcm = b"".join(voice.qwen_pcm(clean, v))
+        audio = _ffmpeg(pcm, ["-f", "s16le", "-ar", str(voice.QWEN_RATE), "-ac", "1"], tail)
     else:
         audio, _ = voice.synthesize(clean, {**s, "voice": v})
         audio = _ffmpeg(audio, [], tail)
@@ -546,16 +554,23 @@ ERROR_REPLY = "Sorry, something went wrong on my end. Please try again."
 
 
 def speak_pcm(text: str, s: dict, cfg: dict, stop: threading.Event | None = None):
-    """Yield mono s16le @ STREAM_RATE for `text` as it is generated (Pocket),
-    or in one piece for the non-streaming providers. Blocking: run in a thread."""
+    """Yield mono s16le @ STREAM_RATE for `text` as it is generated (Pocket,
+    or the Qwen service), or in one piece for the non-streaming providers.
+    Blocking: run in a thread."""
     v = {**s["voice"]}
     if cfg.get("pocket_voice"):
-        v["pocket_voice"] = cfg["pocket_voice"]
+        if (v.get("tts_provider") or "gtts") == "qwen":
+            v["qwen_voice"] = cfg["pocket_voice"]
+        else:
+            v["pocket_voice"] = cfg["pocket_voice"]
     clean = voice.prepare(text, {**s, "voice": v})
     if not clean:
         return
-    if (v.get("tts_provider") or "gtts") == "pocket":
+    provider = v.get("tts_provider") or "gtts"
+    if provider == "pocket":
         yield from voice.pocket_pcm(clean, v, stop)
+    elif provider == "qwen":
+        yield from voice.qwen_pcm(clean, v, stop)
     else:
         audio, _ = voice.synthesize(clean, {**s, "voice": v})
         yield _ffmpeg(audio, [], ["-f", "s16le", "-ar", str(STREAM_RATE), "-ac", "1"])

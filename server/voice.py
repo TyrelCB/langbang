@@ -90,7 +90,9 @@ def prepare(text: str, cfg: dict) -> str:
     v = _voice_cfg(cfg)
     mode = v.get("tts_normalize") or "pocket"
     provider = v.get("tts_provider") or "gtts"
-    if not clean or mode == "off" or (mode == "pocket" and provider != "pocket"):
+    # "pocket" mode = the neural local/LAN models, which garble digits and
+    # ISO timestamps when spoken raw; Qwen TTS rides the same gate.
+    if not clean or mode == "off" or (mode == "pocket" and provider not in ("pocket", "qwen")):
         return clean
     lang = (v.get("pocket_language") if provider == "pocket" else
             v.get("gcloud_tts_lang") if provider == "gcloud" else v.get("tts_lang")) or "en"
@@ -112,6 +114,8 @@ def synthesize(text: str, cfg: dict) -> tuple[bytes, str]:
         return _synthesize_gcloud(text, v)
     if provider == "pocket":
         return _synthesize_pocket_wav(text, v)
+    if provider == "qwen":
+        return _synthesize_qwen_wav(text, v)
     return _synthesize_gtts(text, v)
 
 
@@ -486,17 +490,155 @@ def _synthesize_pocket_wav(text: str, v: dict) -> tuple[bytes, str]:
     return buf.getvalue(), "audio/wav"
 
 
+# ---- Qwen3-TTS (spark-ee93 GPU service): remote, streams PCM16 @ 24 kHz ----
+# qwen-tts-stream.service on spark-ee93 (:8098) runs FasterQwen3TTS; cloned
+# voices live in its own library (~/projects/qwen-tts/voices/<name>). The
+# stream is raw s16le mono @ 24 kHz — the same shape Pocket emits, so
+# ttsjobs' ffmpeg pipeline and the IVR stream need no changes.
+QWEN_RATE = 24_000
+
+
+def _qwen_base(v: dict) -> str:
+    url = (v.get("qwen_tts_url") or "http://spark-ee93:8098").rstrip("/")
+    if not url.startswith("http"):
+        url = "http://" + url
+    return url
+
+
+def qwen_voices(v: dict) -> dict:
+    """{presets: [...], saved: [...]} from the service; {} if unreachable."""
+    import httpx
+    try:
+        r = httpx.get(_qwen_base(v) + "/voices", timeout=5)
+        r.raise_for_status()
+        return r.json()
+    except Exception:  # noqa: BLE001 - the picker degrades to free-text
+        return {}
+
+
+def qwen_clone(name: str, wav_path: str, ref_text: str, language: str, v: dict) -> dict:
+    """Register a cloned voice in the Qwen service's library. Qwen clones
+    from a reference clip AND its transcript (ref_text). ValueError -> 400
+    (bad name etc. from the service), RuntimeError -> 502 (unreachable)."""
+    import httpx
+    try:
+        with open(wav_path, "rb") as fh:
+            r = httpx.post(_qwen_base(v) + "/voices", timeout=30,
+                           data={"name": name, "language": language or "English", "ref_text": ref_text},
+                           files={"audio": ("ref.wav", fh, "audio/wav")})
+    except httpx.HTTPError as e:
+        raise RuntimeError(f"Qwen TTS service unreachable ({type(e).__name__})") from e
+    if r.status_code == 400:
+        raise ValueError(r.json().get("detail") or r.text[:200])
+    if r.status_code != 200:
+        raise RuntimeError(f"Qwen TTS clone failed ({r.status_code}: {r.text[:160].strip()})")
+    return r.json()
+
+
+def qwen_delete(name: str, v: dict) -> bool:
+    import httpx
+    r = httpx.delete(_qwen_base(v) + "/voices/" + name, timeout=10)
+    if r.status_code == 404:
+        return False
+    if r.status_code != 200:
+        raise RuntimeError(f"Qwen TTS delete failed ({r.status_code}: {r.text[:160].strip()})")
+    return True
+
+
+def transcribe_wav(path: str, v: dict) -> str:
+    """Whisper transcript of a clip on disk (16 kHz mono PCM16 WAV) — fills
+    a Qwen clone's ref_text when the user doesn't type one."""
+    with wave.open(path, "rb") as w:
+        pcm = w.readframes(w.getnframes())
+    text, _ = _transcribe_whisper(pcm, v)
+    return text.strip()
+
+
+def qwen_ready(v: dict) -> None:
+    """Check the service is up and knows the configured voice.
+    RuntimeError -> 502 with a readable message."""
+    import httpx
+    base = _qwen_base(v)
+    voice = (v.get("qwen_voice") or "Tyrel").strip()
+    try:
+        httpx.get(base + "/health", timeout=5).raise_for_status()
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"Qwen TTS service unreachable at {base} ({type(e).__name__})") from e
+    lib = qwen_voices(v)
+    known = set(lib.get("presets") or []) | set(lib.get("saved") or [])
+    if known and voice not in known:
+        raise RuntimeError(f"Qwen TTS voice {voice!r} not on {base} (known: {', '.join(sorted(known))[:200]})")
+
+
+def qwen_pcm(text: str, v: dict, stop: threading.Event | None = None,
+             words: list | None = None):
+    """Yield mono PCM16 LE @ 24 kHz as the service synthesizes. One request
+    per sentence (cut with the IVR's splitter): first audio arrives with the
+    first sentence instead of after the whole reply, and each sentence's
+    exact byte span gives word timings like Pocket's chunks. Holds no lock —
+    the service serializes internally, ttsjobs serializes jobs."""
+    import httpx
+    from .ivr import Sentences
+
+    base = _qwen_base(v)
+    payload = {"text": text, "voice": (v.get("qwen_voice") or "Tyrel").strip(),
+               "language": v.get("qwen_language") or "English"}
+    sen = Sentences()
+    pieces = sen.feed(text) + sen.flush()
+    pos = 0  # samples emitted so far
+    body = httpx.Client(timeout=httpx.Timeout(30.0, read=120.0))
+    try:
+        for piece in pieces:
+            if stop is not None and stop.is_set():
+                break
+            start = pos
+            with body.stream("POST", base + "/tts/stream", json=payload | {"text": piece}) as r:
+                if r.status_code != 200:
+                    r.read()
+                    raise RuntimeError(
+                        f"Qwen TTS stream failed ({r.status_code}: "
+                        f"{r.text[:160].strip()}) — check the service / voice in CONFIG → VOICE")
+                for b in r.iter_bytes(chunk_size=32768):
+                    if stop is not None and stop.is_set():
+                        break
+                    pos += len(b) // 2
+                    yield b
+            if words is not None:
+                words.extend(word_times(piece, start / QWEN_RATE, pos / QWEN_RATE))
+    except httpx.HTTPError as e:
+        raise RuntimeError(f"Qwen TTS stream error ({type(e).__name__}: {e})") from e
+    finally:
+        body.close()
+
+
+def _synthesize_qwen_wav(text: str, v: dict) -> tuple[bytes, str]:
+    """Whole-clip WAV — the no-ffmpeg fallback (main.py streams MP3 otherwise)."""
+    pcm = b"".join(qwen_pcm(text, v))
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(QWEN_RATE)
+        w.writeframes(pcm)
+    return buf.getvalue(), "audio/wav"
+
+
 def prewarm(cfg: dict) -> None:
     """Load the model + voice in the background at startup when Pocket is
-    the active provider, so the first 🔊 doesn't pay ~7 s of loading."""
+    the active provider, so the first 🔊 doesn't pay ~7 s of loading. For
+    Qwen: warm the remote service (it lazy-loads the model per voice type;
+    a cold clone request runs ~30 s)."""
     v = _voice_cfg(cfg)
-    if (v.get("tts_provider") or "gtts") != "pocket":
-        return
+    provider = v.get("tts_provider") or "gtts"
     try:
-        pocket_ready(v)
+        if provider == "pocket":
+            pocket_ready(v)
+        elif provider == "qwen":
+            qwen_ready(v)
+            b"".join(qwen_pcm("Prewarm.", v))
     except Exception as e:  # noqa: BLE001 - surfaced again on first real use
         import logging
-        logging.getLogger("langbang.voice").warning("pocket prewarm failed: %s", e)
+        logging.getLogger("langbang.voice").warning("%s tts prewarm failed: %s", provider, e)
 
 
 def transcribe(data: bytes, cfg: dict) -> str:

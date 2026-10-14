@@ -1521,10 +1521,11 @@ MAX_STT_BYTES = 10_000_000  # ~5 min of 16 kHz mono PCM16
 
 class TTSIn(BaseModel):
     text: str
-    # CONFIG ▶ preview: speak with this Pocket voice (and language) without
-    # saving settings — forces the pocket provider for this one request
+    # CONFIG ▶ preview: speak with this voice (and language) without saving
+    # settings — forces the pocket provider unless provider says "qwen"
     voice: str | None = None
     language: str | None = None
+    provider: str | None = None
 
 
 TTS_CACHE_DIR = os.path.join(config.DATA_DIR, "tts")
@@ -1542,7 +1543,9 @@ def _tts_key(clean: str, s: dict) -> str:
                   "gcloud_key_file", "gcloud_tts_lang", "gcloud_tts_voice")
         # pocket knobs only for pocket: adding them unconditionally would
         # re-key (orphan) every existing gTTS/gcloud cache entry
-        + (("pocket_voice", "pocket_language") if v.get("tts_provider") == "pocket" else ()))
+        + (("pocket_voice", "pocket_language") if v.get("tts_provider") == "pocket" else ())
+        # same idea for the qwen knobs: only ride along when qwen is active
+        + (("qwen_tts_url", "qwen_voice", "qwen_language") if v.get("tts_provider") == "qwen" else ()))
     return hashlib.sha256(f"{clean}|{tag}".encode()).hexdigest()
 
 
@@ -1569,8 +1572,12 @@ async def tts(body: TTSIn):
         raise HTTPException(400, f"text too long to speak (max {voice.MAX_TTS_CHARS} chars)")
     s = config.load()
     if body.voice:
-        s = {**s, "voice": {**(s.get("voice") or {}), "tts_provider": "pocket",
-                            "pocket_voice": body.voice,
+        # CONFIG ▶ preview: a qwen voice name only exists on the qwen service,
+        # so the preview says which provider to force for this one request
+        prov = "qwen" if body.provider == "qwen" else "pocket"
+        s = {**s, "voice": {**(s.get("voice") or {}), "tts_provider": prov,
+                            **({"qwen_voice": body.voice} if prov == "qwen" else
+                               {"pocket_voice": body.voice}),
                             **({"pocket_language": body.language} if body.language else {})}}
     # markdown → prose, then numbers/dates/times → words (keyed into the
     # cache: normalized text is a different clip)
@@ -1579,7 +1586,7 @@ async def tts(body: TTSIn):
         raise HTTPException(400, "nothing speakable in text")
     key = _tts_key(clean, s)
     v = s.get("voice") or {}
-    if (v.get("tts_provider") or "gtts") == "pocket" and shutil.which("ffmpeg"):
+    if (v.get("tts_provider") or "gtts") in ("pocket", "qwen") and shutil.which("ffmpeg"):
         # Streaming provider: answer with a URL the <audio> element plays
         # progressively (speech starts in ~0.1 s). A cached clip is the same
         # URL served as a seekable file. Load errors (model/voice) surface
@@ -1596,7 +1603,10 @@ async def tts(body: TTSIn):
             except OSError:
                 pass
         try:
-            await run_in_threadpool(voice.pocket_ready, v)
+            if (v.get("tts_provider") or "gtts") == "qwen":
+                await run_in_threadpool(voice.qwen_ready, v)
+            else:
+                await run_in_threadpool(voice.pocket_ready, v)
         except RuntimeError as e:
             raise HTTPException(502, str(e))
         ttsjobs.start(key, clean, v, os.path.join(TTS_CACHE_DIR, key + ".mp3"))
@@ -1641,6 +1651,93 @@ MAX_CLONE_BYTES = 25_000_000
 async def voices_list():
     return {"presets": list(voice.POCKET_VOICES), "languages": list(voice.POCKET_LANGS),
             "saved": voice.saved_voices(), "cloning_ready": voice.cloning_ready()}
+
+
+@app.get("/api/voices/qwen")
+async def voices_qwen():
+    """CONFIG → VOICE: the Qwen service's voice library (passthrough; {} when
+    the service is down — the UI falls back to a free-text voice name)."""
+    return await run_in_threadpool(voice.qwen_voices, config.load().get("voice") or {})
+
+
+@app.post("/api/voices/qwen")
+async def voices_qwen_clone(name: str = Form(...), language: str = Form("English"),
+                            ref_text: str = Form(""), consent: bool = Form(False),
+                            file: UploadFile = File(...)):
+    """Clone a voice into the Qwen service's library. Same cleanup as the
+    Pocket clone (rumble out, pauses trimmed, loudnorm, ~15 s of speech);
+    Qwen also needs the clip's transcript — typed, or whisper-transcribed
+    here when left blank. Returns {name, language, ref_text}."""
+    if not consent:
+        raise HTTPException(400, "confirm this is your voice or that you have the speaker's permission")
+    if not shutil.which("ffmpeg"):
+        raise HTTPException(500, "ffmpeg is required to read the uploaded audio")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,39}", name.strip()):
+        raise HTTPException(400, "name: letters, digits, _ or - (max 40)")
+    v = config.load().get("voice") or {}
+    lib = await run_in_threadpool(voice.qwen_voices, v)
+    if name.strip() in (lib.get("presets") or []):
+        raise HTTPException(400, f"{name.strip()} is a Qwen preset name — pick another")
+    work = os.path.join(config.DATA_DIR, "uploads", "qclone-" + uuid.uuid4().hex[:12])
+    os.makedirs(work, exist_ok=True)
+    try:
+        src = os.path.join(work, "src")
+        size = 0
+        with open(src, "wb") as fh:
+            while chunk := await file.read(1 << 20):
+                size += len(chunk)
+                if size > MAX_CLONE_BYTES:
+                    raise HTTPException(413, "audio too large (max 25 MB — about 15 s of speech is all it uses)")
+                fh.write(chunk)
+        wav = os.path.join(work, "ref.wav")
+        p = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-t", "60",
+            "-vn", "-ac", "1", "-af",
+            "highpass=f=70,silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.1"
+            ":stop_periods=-1:stop_duration=0.3:stop_threshold=-45dB:stop_silence=0.25,"
+            "loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-ar", "24000", "-t", "15", wav,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        _, err = await p.communicate()
+        if p.returncode != 0 or not os.path.isfile(wav):
+            raise HTTPException(400, "couldn't read that audio: " + err.decode(errors="replace").strip()[-200:])
+        text = ref_text.strip()
+        if not text:  # transcript of exactly the trimmed 15 s the clone uses
+            w16 = os.path.join(work, "ref16.wav")
+            p = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", wav,
+                "-ac", "1", "-ar", "16000", "-sample_fmt", "s16", w16,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await p.communicate()
+            try:
+                text = await run_in_threadpool(voice.transcribe_wav, w16, v)
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(502, f"couldn't transcribe the clip ({type(e).__name__}) — type what it says instead")
+            if not text:
+                raise HTTPException(400, "no speech found in that clip — type what it says, or use a clearer take")
+        try:
+            return await run_in_threadpool(voice.qwen_clone, name.strip(), wav, text, language, v)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except RuntimeError as e:
+            raise HTTPException(502, str(e))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)  # the source clip is never kept here
+
+
+@app.delete("/api/voices/qwen/{name}")
+async def voices_qwen_delete(name: str):
+    s = config.load()
+    v = s.get("voice") or {}
+    try:
+        ok = await run_in_threadpool(voice.qwen_delete, name, v)
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
+    if not ok:
+        raise HTTPException(404, "no such Qwen voice")
+    if v.get("qwen_voice") == name:  # deleting the active voice → back to a preset
+        config.save({**s, "voice": {**v, "qwen_voice": "Ryan"}})
+    return {"ok": True}
 
 
 @app.post("/api/voices")
@@ -1769,12 +1866,13 @@ async def stt(request: Request):
         raise HTTPException(413, "audio too large (max 10 MB)")
     s = config.load()
     try:
-        text = await run_in_threadpool(voice.transcribe, body, s)
+        d = await run_in_threadpool(voice.transcribe_detail, body, s)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, str(e) or type(e).__name__)
-    return {"text": text}
+    return {"text": d["text"], "words": d.get("words") or [],
+            "provider": d.get("provider")}
 
 
 # ---- phone IVR (server/ivr.py): separate, tool-limited agent ----
