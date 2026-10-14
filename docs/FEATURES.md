@@ -506,3 +506,33 @@ given a name and message, the agent sends it to Tyrel as an ntfy push
 (always, high priority) plus a 📞 toast in open tabs, and appends it to
 `data/ivr/messages.jsonl`. Placeholder calls are rejected; 3 per call max. Empty speech gets a "didn't catch
 that" reply without a model call.
+
+## ▮ TERM — terminals + fleet SSH (`server/term.py`, `web/term.js`)
+
+- **Sessions are tmux sessions** on a private server (`tmux -L langbang`, config
+  written to `data/term/tmux.conf`; your `~/.tmux.conf` is never read). Each browser
+  tab is one more tmux client on its own PTY, so closing the panel or the tab, opening
+  the same terminal on a phone, or restarting LangBang (the unit's `KillMode=process`
+  leaves the tmux server alive) never kills the shell. Only ✕ (two clicks) or `exit`
+  ends one. Mouse mode is on: the wheel scrolls tmux history, and Shift+drag selects text.
+- **Routes:**
+  - `GET/POST /api/term`: list or create (`{host: "local" | fleet name}`).
+  - `PATCH /api/term/{id}`: rename (double-click a tab).
+  - `DELETE /api/term/{id}`.
+  - `WS /api/term/{id}/ws`: binary frames carry terminal bytes; a JSON text frame
+    `{"resize": [cols, rows]}` resizes.
+  - The socket refuses any `Origin` that isn't this app (403), because browsers let
+    any web page open a WebSocket to the LAN.
+- **Fleet:**
+  - Hosts are stored in settings `fleet.hosts` as `[{name, ssh, note}]`. `ssh` is an
+    `~/.ssh/config` alias or `user@host[:port]`.
+  - IMPORT lists the concrete `Host` entries from `~/.ssh/config`, minus wildcards and
+    git remotes, deduped by HostName.
+  - ⟳ PROBE uses one BatchMode ssh per host for load/CPUs, memory, root disk, GPU
+    utilization, uptime and latency. Linux and macOS are both supported.
+  - ▶ opens an SSH tab. When ssh exits, the pane stays up with the reason until Enter.
+  - RUN ▶ runs one non-interactive command on the ☑ hosts in parallel, with a per-host
+    timeout (max 600 s). Results show as a ⇶ RUN tab with an exit code and output per host.
+  - Probes and runs use key auth only: no password prompt can hang a request.
+- **Phones:** a key row (Esc, Tab, ^C, ^D, ^Z, ^L, arrows, `| ~ /`) appears on touch
+  screens. The fleet list starts hidden there; ◫ FLEET toggles it.

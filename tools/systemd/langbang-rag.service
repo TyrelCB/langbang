@@ -1,8 +1,9 @@
 # LangBang RAG node (rag/ package): multimodal EmbeddingGemma 2 index + fleet
 # federation on :8900. Separate from langbang.service on purpose — restarting
 # the app must not reload the model, and torch encodes stay off its event loop.
-# Install: sudo cp tools/systemd/langbang-rag*.{service,timer} /etc/systemd/system/ &&
-#          sudo systemctl daemon-reload && sudo systemctl enable --now langbang-rag langbang-rag-scan.timer
+# Install: sudo cp tools/systemd/langbang-rag.service /etc/systemd/system/ &&
+#          sudo systemctl daemon-reload && sudo systemctl enable --now langbang-rag
+# (the node schedules its own nightly rescan: node.json rescan_at / ⏰ SCHEDULES)
 [Unit]
 Description=LangBang RAG node (EmbeddingGemma 2, :8900)
 After=network-online.target

@@ -44,7 +44,10 @@ DEFAULTS = {
         HOME + "/.langbang/memory": "memory",
     },
     "workers": 4,
-    "rescan_window": "01:00-08:00",  # timer rescans index only then; "" = any time
+    # nightly rescan, run by the node itself (server.py _scheduler): "" = off.
+    # It indexes only inside rescan_window and resumes the next night.
+    "rescan_at": "01:05",
+    "rescan_window": "01:00-08:00",  # scheduled rescans index only then; "" = any time
     "video_keyframes": 8,
     "peers": [],
     # fan-out budget per peer, seconds

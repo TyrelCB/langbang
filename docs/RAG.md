@@ -14,7 +14,7 @@ pictures, and an image finds similar images and video frames.
 
 | source | what | how it gets in |
 |---|---|---|
-| `home` | the home dir: code/docs/PDF/docx, images, audio (8 s windows), video (keyframes) | nightly rescan (`langbang-rag-scan.timer`, 01:05, runs only inside `rescan_window`), mtime-incremental |
+| `home` | the home dir: code/docs/PDF/docx, images, audio (8 s windows), video (keyframes) | nightly rescan (scheduled by the node itself at `rescan_at`, default 01:05, indexing only inside `rescan_window`; shown and editable in ⏰ SCHEDULES), mtime-incremental |
 | `output` | `~/Pictures/langbang` generated images; the sidecar prompt is indexed as a caption | pushed by `comfy.generate` |
 | `upload` | chat attachments and pasted images (`data/uploads`) | pushed on upload |
 | `thread` | each finished chat exchange (`USER: … LANGBANG: …`) | pushed by `runs._produce`; the thread delete removes it |
@@ -82,7 +82,7 @@ Write routes need loopback or `Authorization: Bearer $(cat data/keys/rag_token)`
   - Our index calls pause while a fleet search waits on Atlas (`embedder.quiet`).
   - Only one audio call is in flight at a time, in 2-minute segments.
   - A peer error is retried (3/10/30 s) before falling back to the CPU, which is about 10x slower.
-  - The bulk rescan runs only inside `rescan_window` (default `01:00-08:00`, set in node.json). The timer passes `windowed=1`, a run pauses at the end of the window, and the next night resumes it.
+  - The bulk rescan runs only inside `rescan_window` (default `01:00-08:00`, set in node.json). The node's scheduler (`rescan_at` in node.json, or ⏰ SCHEDULES → SYSTEM card) runs it windowed: a run pauses at the end of the window, and the next night resumes it. A night missed while the node was down runs on start if the window is still open. This replaced the `langbang-rag-scan.timer` systemd unit (2026-10-13); remove it on older installs with `sudo systemctl disable --now langbang-rag-scan.timer`.
   - Order is text → images → video → audio, with audio last because it costs hours of GPU.
 - **Atlas fan-out:**
   - A search across all kinds is one parallel call per media kind (~0.1 s).
@@ -129,8 +129,8 @@ Peers are configured in `data/rag/node.json`. That file holds the node's own set
 git clone https://github.com/TyrelCB/langbang && cd langbang
 uv sync --only-group rag          # just the node: torch CPU + sentence-transformers
 echo '{"node":"<name>","roots":["/home/<you>"]}' > data/rag/node.json   # (mkdir -p data/rag)
-sudo cp tools/systemd/langbang-rag*.{service,timer} /etc/systemd/system/   # edit User/paths
-sudo systemctl daemon-reload && sudo systemctl enable --now langbang-rag langbang-rag-scan.timer
+sudo cp tools/systemd/langbang-rag.service /etc/systemd/system/   # edit User/paths
+sudo systemctl daemon-reload && sudo systemctl enable --now langbang-rag   # it schedules its own nightly rescan
 ```
 
 Then copy the new node's `data/keys/rag_token` to `data/keys/rag_token_<name>` on each box that
@@ -157,7 +157,9 @@ doubly-prefixed strings. `python -m rag.migrate reembed` rebuilt them as documen
 sudo systemctl restart langbang-rag          # ~15 s: index load 2 s + model warm 10 s
 curl -s localhost:8900/api/stats | jq        # counts per node/category/source, rescan state
 curl -s -X POST localhost:8900/api/rescan    # walk now, ignoring rescan_window (loopback = authorized)
-curl -s -X POST 'localhost:8900/api/rescan?windowed=1'   # as the timer does: pauses outside the window
+curl -s -X POST 'localhost:8900/api/rescan?windowed=1'   # as the nightly schedule does: pauses outside the window
+curl -s localhost:8900/api/schedule | jq     # rescan_at / window / next / last; PUT {at, window} changes them
+curl -s -X POST localhost:8900/api/rescan/stop   # stop after the files in flight (resumable)
 .venv/bin/python -m unittest -v rag.tests.test_rag
 ```
 

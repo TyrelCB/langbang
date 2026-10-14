@@ -125,7 +125,7 @@ button, .thread .a, .thread .x { touch-action: manipulation; }
   display: flex; justify-content: space-between; align-items: center;
   padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--bg2);
 }
-.topbar-right { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.topbar-right { display: flex; align-items: center; gap: 6px 10px; min-width: 0; flex-wrap: wrap; justify-content: flex-end; }
 /* labels never break mid-word ("X-/SIM"); the model tag gives way instead */
 .topbar-right .btn { white-space: nowrap; }
 #ctx-tag { white-space: nowrap; }
@@ -1016,3 +1016,112 @@ html[data-theme="light"] ::highlight(lb-speak) { background-color: rgba(11, 126,
 .ivr-msg-who { color: var(--cyan); }
 .ivr-msg-ts { color: var(--muted); font-size: 10px; margin-left: 8px; }
 .ivr-msg-body { color: var(--text); white-space: pre-wrap; }
+
+/* ▮ TERM — tmux-backed terminals + fleet hosts (web/term.js) */
+#term-panel { position: fixed; inset: 0; background: rgba(2,6,12,.8); display: flex;
+  align-items: center; justify-content: center; z-index: 45; }
+.term-inner { max-height: none; width: min(1500px, 97vw); height: 92vh; height: 92dvh; display: flex;
+  flex-direction: column; overflow: hidden; }
+.term-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; min-width: 0; }
+.term-head h2 { margin: 0; }
+#term-tabs { flex: 1; min-width: 0; display: flex; gap: 4px; overflow-x: auto; scrollbar-width: thin; }
+.term-tab { display: flex; align-items: center; gap: 6px; padding: 3px 6px 3px 10px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--bg2); font-size: 11px; letter-spacing: 1px;
+  white-space: nowrap; color: var(--muted); }
+.term-tab:hover { color: var(--text); }
+.term-tab.on { color: var(--cyan); border-color: var(--cyan); background: var(--panel); }
+.term-tab.dead { opacity: .5; text-decoration: line-through; }
+.term-tab.lost .tt-dot { animation: tt-blink 1s steps(2) infinite; }
+@keyframes tt-blink { 50% { opacity: .2; } }
+.tt-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex: none; }
+.tt-dot.ssh { background: var(--orange); }
+.tt-name { max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+.tt-ren { width: 120px; font: inherit; background: var(--bg); color: var(--text);
+  border: 1px solid var(--cyan); padding: 0 4px; }
+.tt-x { background: none; border: none; color: var(--muted); cursor: pointer; font: inherit; padding: 0 2px; }
+.tt-x:hover, .tt-x.armed { color: var(--danger); }
+.term-body { flex: 1; min-height: 0; display: grid; gap: 10px;
+  grid-template-columns: minmax(0, 300px) minmax(0, 1fr); }
+#term-panel.no-fleet .term-body { grid-template-columns: minmax(0, 1fr); }
+#term-panel.no-fleet #term-fleet { display: none; }
+#term-panel:not(.no-fleet) #btn-term-fleet { color: var(--cyan); border-color: var(--cyan); }
+#term-fleet { display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow-y: auto;
+  border: 1px solid var(--line); background: var(--panel); padding: 8px; }
+.tf-head { display: flex; align-items: center; gap: 6px; }
+.tf-head span { flex: 1; color: var(--orange); letter-spacing: 2px; font-size: 12px; }
+#tf-list { display: flex; flex-direction: column; gap: 4px; }
+.tf-none { color: var(--muted); font-size: 11px; padding: 6px 2px; }
+.tf-host { display: flex; align-items: center; gap: 6px; padding: 4px 4px; border: 1px solid transparent; }
+.tf-host:hover { border-color: var(--line); background: var(--bg2); }
+.panel-inner .tf-host input[type=checkbox] { width: auto; margin: 0; accent-color: var(--cyan); }
+.tf-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line); flex: none; }
+.tf-host.up .tf-dot { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.tf-host.warn .tf-dot { background: var(--orange); box-shadow: 0 0 6px var(--orange); }
+.tf-host.down .tf-dot { background: var(--danger); }
+.tf-main { flex: 1; min-width: 0; }
+.tf-name { font-size: 12px; letter-spacing: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tf-line { font-size: 10px; color: var(--muted); overflow-wrap: anywhere; }
+.tf-host.down .tf-line { color: var(--danger); }
+.tf-host .btn.sm { padding: 1px 7px; }
+.tf-form { border: 1px solid var(--line); padding: 8px; display: flex; flex-direction: column; gap: 4px;
+  background: var(--bg2); }
+.tf-form label.chk { font-size: 11px; display: flex; gap: 6px; align-items: center; cursor: pointer; }
+.panel-inner .tf-form label.chk input { width: auto; margin: 0; }
+.tf-sub { color: var(--orange); font-size: 11px; letter-spacing: 2px; }
+.tf-exec { margin-top: auto; border-top: 1px solid var(--line); padding-top: 8px; }
+.panel-inner .tf-exec textarea { width: 100%; resize: vertical; font-size: 12px; margin: 0 0 4px; }
+.tf-exec .row { align-items: center; gap: 8px; margin: 0; }
+.panel-inner .tf-exec label.chk { display: flex; align-items: center; gap: 4px; margin: 0; font-size: 11px; }
+.panel-inner .tf-exec label.chk input { width: auto; margin: 0; }
+.panel-inner .tf-to { display: flex; align-items: center; gap: 4px; margin: 0; flex: 1; font-size: 11px; }
+.panel-inner .tf-to input { width: 58px; margin: 0; padding: 2px 4px; }
+.btn.danger { color: var(--danger); border-color: var(--danger); }
+#term-main { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column;
+  border: 1px solid var(--line); background: #060a12; }
+#term-screens { flex: 1; min-height: 0; position: relative; }
+.term-screen { position: absolute; inset: 0; padding: 6px 4px 4px 8px; }
+.term-screen .xterm { height: 100%; }
+.term-screen .xterm-viewport { scrollbar-width: thin; }
+.term-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  text-align: center; padding: 30px; color: var(--muted); letter-spacing: 1px; font-size: 12px; }
+.term-empty b { color: var(--cyan); }
+#tf-out { position: absolute; inset: 0; overflow-y: auto; padding: 10px; background: var(--bg); z-index: 2; }
+.tfo-head { display: flex; gap: 12px; align-items: baseline; margin-bottom: 8px; }
+.tfo-cmd { flex: 1; color: var(--cyan); white-space: pre-wrap; word-break: break-all; }
+.tfo-sum { color: var(--muted); font-size: 11px; letter-spacing: 1px; }
+.tfo-card { border: 1px solid var(--line); margin-bottom: 8px; background: var(--panel); }
+.tfo-card.bad { border-color: var(--danger); }
+.tfo-card summary { display: flex; gap: 12px; padding: 4px 8px; cursor: pointer; font-size: 12px; }
+.tfo-host { flex: 1; letter-spacing: 1px; }
+.tfo-card.ok .tfo-code { color: var(--green); }
+.tfo-card.bad .tfo-code { color: var(--danger); }
+.tfo-ms { color: var(--muted); }
+.tfo-pre { margin: 0; padding: 6px 10px; max-height: 360px; overflow: auto; font-size: 12px;
+  white-space: pre-wrap; word-break: break-word; border-top: 1px solid var(--line); }
+.tfo-pre.err { color: var(--danger); }
+.term-keys { display: none; gap: 4px; padding: 4px; overflow-x: auto; border-top: 1px solid var(--line); }
+.term-keys button { flex: none; background: var(--bg2); color: var(--text); border: 1px solid var(--line);
+  font: 11px inherit; padding: 6px 9px; min-width: 34px; }
+@media (hover: none) { .term-keys { display: flex; } }
+@media (max-width: 760px) {
+  .term-inner { width: 100vw; height: 100dvh; padding: 8px; }
+  .term-head h2 { display: none; }
+  .term-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 45%) minmax(0, 1fr); }
+  #term-panel.no-fleet .term-body { grid-template-rows: minmax(0, 1fr); }
+}
+
+/* ⏰ SCHEDULES system jobs (the RAG node's nightly rescan) */
+#sched-system { margin-bottom: 10px; }
+#sched-system:empty { display: none; }
+.sched-card.sys { border-style: dashed; }
+.sched-card.sys.off { opacity: .75; }
+.sched-badge.sys { font-size: 10px; letter-spacing: 2px; color: #04101c; background: var(--cyan-dim);
+  padding: 1px 6px; }
+.sched-title.sys { cursor: default; }
+.sched-title.sys:hover { color: var(--text); }
+.sched-sys-row { align-items: center; gap: 14px; margin: 8px 0 2px; flex-wrap: wrap; }
+.panel-inner .sched-sys-row label { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 12px;
+  color: var(--muted); }
+.panel-inner .sched-sys-row input[type=time] { width: auto; margin: 0; padding: 2px 6px; }
+.sched-sys-off { color: var(--muted); font-size: 12px; letter-spacing: 1px; padding: 4px 2px; }
+.term-inner.panel-inner { max-height: none; }

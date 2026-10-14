@@ -11,6 +11,7 @@
 <meta name="theme-color" content="#060a12">
 <meta name="application-name" content="LangBang">
 <meta name="apple-mobile-web-app-title" content="LangBang">
+<link rel="stylesheet" href="/static/vendor/xterm.css">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -39,6 +40,7 @@
         <button id="tab-chat" class="btn ghost tab on" title="chat view">▣ CHAT</button>
         <button id="tab-traj" class="btn ghost tab" title="agent trajectory — steps, timing, sub-agents">≡ TRAJECTORY</button>
         <button id="btn-files" class="btn ghost" title="browse + edit text files on the server (Ctrl+S saves)">✎ FILES</button>
+        <button id="btn-term" class="btn ghost" title="terminals on this box + SSH into the fleet (sessions survive closing the tab)">▮ TERM</button>
         <button id="btn-recap" class="btn ghost" title="session recap — LLM summary of this thread for cold resume">✦ RECAP</button>
         <button id="btn-game" class="btn ghost" title="X-SIM platformer — G to open, ESC to bail back to chat">⚔ X-SIM</button>
         <button id="btn-tprompt" class="btn ghost" title="instructions for THIS thread only — appended to the system prompt on every run here (scheduled runs too)" disabled>✎ PROMPT</button>
@@ -487,6 +489,9 @@
   <div id="sched-panel" class="hidden">
     <div class="panel-inner sched-inner">
       <h2>SCHEDULED TASKS</h2>
+      <!-- system jobs (not agent prompts): own container, so the 5 s list
+           repaint never wipes a half-typed time -->
+      <div id="sched-system"></div>
       <div id="sched-list"></div>
       <section class="cfg-card wide hidden" id="sched-editor">
         <h3 id="sched-editor-title">NEW TASK</h3>
@@ -525,6 +530,63 @@
       <div class="row end">
         <span id="recap-ts" class="recap-ts"></span>
         <button id="btn-recap-close" class="btn ghost">CLOSE</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ▮ TERM: tmux-backed terminals (server/term.py) + fleet hosts -->
+  <div id="term-panel" class="hidden">
+    <div class="panel-inner term-inner">
+      <div class="term-head">
+        <h2>TERMINAL</h2>
+        <div id="term-tabs" role="tablist"></div>
+        <button id="btn-term-new" class="btn ghost sm" type="button" title="new shell on this box">+ LOCAL</button>
+        <button id="btn-term-fleet" class="btn ghost sm" type="button" title="show/hide the fleet host list">◫ FLEET</button>
+        <button id="btn-term-close" class="btn ghost sm" type="button" title="hide — terminals keep running (✕ on a tab ends one)">CLOSE</button>
+      </div>
+      <div class="term-body">
+        <aside id="term-fleet">
+          <div class="tf-head">
+            <span>FLEET</span>
+            <button id="btn-tf-probe" class="btn ghost sm" type="button" title="check every host over ssh (key auth): load, memory, disk, GPU">⟳ PROBE</button>
+            <button id="btn-tf-add" class="btn ghost sm" type="button">+ ADD</button>
+            <button id="btn-tf-import" class="btn ghost sm" type="button" title="pick hosts from ~/.ssh/config">IMPORT</button>
+          </div>
+          <div id="tf-list"></div>
+          <div id="tf-edit" class="tf-form hidden">
+            <label>Name <input id="tf-name" type="text" autocomplete="off" spellcheck="false" placeholder="spark-ee93"></label>
+            <label>SSH target <input id="tf-ssh" type="text" autocomplete="off" spellcheck="false" placeholder="alias from ~/.ssh/config, or user@host:port"></label>
+            <label>Note <input id="tf-note" type="text" autocomplete="off" placeholder="what lives there"></label>
+            <div class="row end">
+              <button id="btn-tf-del" class="btn ghost sm danger" type="button">DELETE</button>
+              <button id="btn-tf-cancel" class="btn ghost sm" type="button">CANCEL</button>
+              <button id="btn-tf-save" class="btn accent sm" type="button">SAVE</button>
+            </div>
+          </div>
+          <div id="tf-import" class="tf-form hidden"></div>
+          <div class="tf-exec">
+            <textarea id="tf-cmd" rows="2" spellcheck="false" placeholder="command for the ☑ hosts — Enter runs (no TTY; use a terminal for interactive work)"></textarea>
+            <div class="row">
+              <label class="chk"><input type="checkbox" id="tf-all"> all</label>
+              <label class="tf-to">timeout <input id="tf-timeout" type="number" min="1" max="600" value="60"> s</label>
+              <button id="btn-tf-run" class="btn accent sm" type="button">RUN ▶</button>
+            </div>
+          </div>
+          <div id="tf-error" class="error hidden"></div>
+        </aside>
+        <div id="term-main">
+          <div id="term-screens"></div>
+          <div id="term-empty" class="term-empty">NO TERMINALS — <b>+ LOCAL</b> for this box, or <b>▶</b> on a fleet host. They keep running when you close this panel or the tab.</div>
+          <div id="tf-out" class="hidden"></div>
+          <div id="term-keys" class="term-keys">
+            <button data-k="\u001b">ESC</button><button data-k="\t">TAB</button>
+            <button data-k="\u0003">^C</button><button data-k="\u0004">^D</button>
+            <button data-k="\u001a">^Z</button><button data-k="\u000c">^L</button>
+            <button data-k="\u001b[A">↑</button><button data-k="\u001b[B">↓</button>
+            <button data-k="\u001b[D">←</button><button data-k="\u001b[C">→</button>
+            <button data-k="|">|</button><button data-k="~">~</button><button data-k="/">/</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -617,6 +679,10 @@
 <script src="/static/sfx.js"></script>
 <script src="/static/game.js"></script>
 <script src="/static/viz.js"></script>
+<script src="/static/vendor/xterm.js"></script>
+<script src="/static/vendor/addon-fit.js"></script>
+<script src="/static/vendor/addon-web-links.js"></script>
 <script src="/static/app.js"></script>
+<script src="/static/term.js"></script>
 </body>
 </html>
