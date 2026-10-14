@@ -286,7 +286,11 @@ _TECH_WORDS = {
     "dnsmasq": "D N S mask", "uvicorn": "you-vee-corn", "llama.cpp": "llama C P P",
     "nvidia-smi": "nvidia S M I", "dmon": "D mon", "systemd": "system D",
     "Nginx": "engine X", "Iperf": "I perf", "iperf": "I perf", "macOS": "mac O S",
-    "NX-OS": "N X O S", "MP-BGP": "M P B G P", "SD-WAN": "S D WAN", "BIG-IP": "big I P",
+    "NX-OS": "N X O S", "MP-BGP": "M P B G P", "SD-WAN": "S D WAN",
+    # heard "big IPL TM" on the IVR test ear 2026-10-13: a comma between the
+    # two spelled groups keeps Pocket from running them together
+    "BIG-IP LTM": "big I P, L T M",
+    "BIG-IP": "big I P",
     "EVPN": "E V P N", "OSPF": "O S P F", "EIGRP": "E I G R P", "RSPAN": "R span",
     "ERSPAN": "E R span", "CCNA": "C C N A", "CCNP": "C C N P", "ISDN": "I S D N",
     "AT&T": "A T and T", "C++": "C plus plus", "B.S.": "B S", "M.S.": "M S",
@@ -439,6 +443,9 @@ def _pre(t: str) -> str:
     t = re.sub(r"\s*[·•‣◦|]\s*", ". ", t)
     t = re.sub(r"(?<=\w)\s+[—–-]{1,2}\s+(?=\w)", ", ", t)  # spaced dashes → pause
     t = re.sub(r"\s*—\s*", ", ", t)
+    # tool-call echoes leak as `take_message{caller_name: …}` (IVR 2026-10-13);
+    # braces are pauses, not letters — Pocket tries to pronounce them
+    t = t.replace("{", ", ").replace("}", ", ")
     # short parentheticals → commas (not "(303) 555-…" phone area codes)
     t = re.sub(r"\((?!\d{3}\)\s?\d)([^()]{1,240})\)", r", \1,", t)
     t = re.sub(r"\b24/7\b", "twenty-four seven", t)

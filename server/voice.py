@@ -47,6 +47,11 @@ def speakable(text: str) -> str:
     """Markdown → prose for TTS. Code blocks become a spoken placeholder;
     markers, links and table chrome disappear; hard cap at a sentence end."""
     t = text or ""
+    # leaked reasoning tags (IVR 2026-10-13): ttsnorm's tag reader spoke
+    # "<|im_start|>" as the word "think", so the model's thinking bled
+    # into the greeting as "think. think." — strip the whole block.
+    t = re.sub(r"<(think|thinking|thought|reasoning)>.*?</\1>", " ", t, flags=re.S)
+    t = re.sub(r"</?(?:think|thinking|thought|reasoning)>", " ", t)
     t = re.sub(r"```.*?```", " … code block omitted … ", t, flags=re.S)
     t = re.sub(r"```.*$", " … code block omitted … ", t, flags=re.S)  # unterminated fence
     t = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", t)          # [text](url) -> text
