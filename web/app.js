@@ -2438,6 +2438,74 @@ const DEFAULT_VOICE = {
 };
 let loadedVoice = { ...DEFAULT_VOICE };
 
+// the VOICE card as a full voice block (SAVE, and ↻ TEST on unsaved values)
+function voiceForm() {
+  return {
+    ...loadedVoice,
+    tts_provider: $("#set-voice-tts_provider").value,
+    tts_lang: $("#set-voice-tts_lang").value.trim() || "en",
+    tts_tld: $("#set-voice-tts_tld").value.trim() || "com",
+    stt_provider: $("#set-voice-stt_provider").value,
+    stt_lang: $("#set-voice-stt_lang").value.trim() || "en-US",
+    gcloud_key_file: $("#set-voice-gcloud_key_file").value.trim(),
+    gcloud_tts_lang: $("#set-voice-gcloud_tts_lang").value.trim() || "en-US",
+    gcloud_tts_voice: $("#set-voice-gcloud_tts_voice").value.trim() || "en-US-Wavenet-J",
+    pocket_voice: pvValue() || "alba",
+    pocket_language: $("#set-voice-pocket_language").value || "english",
+    pocket_threads: Math.max(1, Math.min(8, parseInt($("#set-voice-pocket_threads").value, 10) || 2)),
+    qwen_tts_url: $("#set-voice-qwen_tts_url").value.trim() || "http://spark-ee93:8098",
+    qwen_voice: qvValue() || "Tyrel",
+    qwen_language: $("#set-voice-qwen_language").value || "English",
+    tts_normalize: $("#set-voice-tts_normalize").value || "pocket",
+    speak_reasoning: $("#set-voice-speak_reasoning").value || "off",
+    spoken_hud: $("#set-voice-spoken_hud").value || "on",
+  };
+}
+
+
+// ↻ TEST TTS / ↻ TEST STT — like the chat providers' TEST, on the form's
+// unsaved values (/api/voice/test). TTS plays the clip it made; STT is a
+// round trip: the TTS clip transcribed by the chosen STT provider and scored.
+let vtAudio = null;
+const vtSec = (ms) => (ms / 1000).toFixed(1) + " s";
+async function voiceTest(what) {
+  const btn = $("#btn-voice-test-" + what), out = $("#voice-test-" + what);
+  btn.disabled = true;
+  out.className = "prov-test busy";
+  out.textContent = what === "tts" ? "synthesizing…" : "speaking the test phrase, then transcribing…";
+  let r;
+  try {
+    r = await J(await fetch("/api/voice/test", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ what, voice: voiceForm() }) }));
+  } catch (e) { r = { ok: false, error: e.message }; }
+  btn.disabled = false;
+  const who = `${r.tts_provider || "?"}${r.voice ? " · " + r.voice : ""}`;
+  const notes = [];
+  if (r.seconds && r.synth_ms > r.seconds * 1000) notes.push("slower than real time");
+  if (r.seconds > 9) notes.push("much longer than the line — the voice may be looping");
+  if (r.warning) notes.push(r.warning);
+  if (!r.ok) {
+    out.className = "prov-test bad";
+    out.textContent = `✕ ${r.stage === "tts" && what === "stt" ? "TTS step: " : ""}${r.error || "failed"}` + (notes.length ? " · " + notes.join(" · ") : "");
+  } else if (what === "tts") {
+    out.className = "prov-test " + (notes.length ? "warn" : "ok");
+    out.textContent = `${notes.length ? "⚠" : "✓"} ${who} — ${r.seconds} s of audio in ${vtSec(r.synth_ms)}` +
+      (r.ready_ms > 1000 ? ` (+${vtSec(r.ready_ms)} loading)` : "") + (notes.length ? " · " + notes.join(" · ") : "") + " · playing";
+  } else {
+    out.className = "prov-test " + (notes.length ? "warn" : "ok");
+    out.textContent = `${notes.length ? "⚠" : "✓"} ${r.used} heard “${r.text}” — ${Math.round(r.score * 100)}% in ${vtSec(r.stt_ms)}` +
+      (r.words ? `, ${r.words} word timings` : "") + ` · spoken by ${who}` + (notes.length ? " · " + notes.join(" · ") : "");
+  }
+  if (what === "tts" && r.audio) {
+    if (vtAudio) vtAudio.pause();
+    vtAudio = new Audio(`data:${r.media};base64,${r.audio}`);
+    vtAudio.onended = () => { out.textContent = out.textContent.replace(/ · playing$/, ""); };
+    vtAudio.play().catch(() => { out.textContent = out.textContent.replace(/ · playing$/, " · (tap ↻ again to hear it)"); });
+  }
+}
+$("#btn-voice-test-tts").onclick = () => { SFX.play("click"); voiceTest("tts"); };
+$("#btn-voice-test-stt").onclick = () => { SFX.play("click"); voiceTest("stt"); };
+
 // ---- Pocket voice picker: presets / my (cloned) voices / ＋ clone ----
 const PV_CLONE = "__clone__";
 let pvPrev = "alba";      // selection to fall back to when the clone form closes
@@ -2828,26 +2896,7 @@ async function saveSettings() {
     local_tools,
     mcp_servers: mcpDraft,
     // complete dict — the server shallow-merges top-level keys only
-    voice: {
-      ...loadedVoice,
-      tts_provider: $("#set-voice-tts_provider").value,
-      tts_lang: $("#set-voice-tts_lang").value.trim() || "en",
-      tts_tld: $("#set-voice-tts_tld").value.trim() || "com",
-      stt_provider: $("#set-voice-stt_provider").value,
-      stt_lang: $("#set-voice-stt_lang").value.trim() || "en-US",
-      gcloud_key_file: $("#set-voice-gcloud_key_file").value.trim(),
-      gcloud_tts_lang: $("#set-voice-gcloud_tts_lang").value.trim() || "en-US",
-      gcloud_tts_voice: $("#set-voice-gcloud_tts_voice").value.trim() || "en-US-Wavenet-J",
-      pocket_voice: pvValue() || "alba",
-      pocket_language: $("#set-voice-pocket_language").value || "english",
-      pocket_threads: Math.max(1, Math.min(8, parseInt($("#set-voice-pocket_threads").value, 10) || 2)),
-      qwen_tts_url: $("#set-voice-qwen_tts_url").value.trim() || "http://spark-ee93:8098",
-      qwen_voice: qvValue() || "Tyrel",
-      qwen_language: $("#set-voice-qwen_language").value || "English",
-      tts_normalize: $("#set-voice-tts_normalize").value || "pocket",
-      speak_reasoning: $("#set-voice-speak_reasoning").value || "off",
-      spoken_hud: $("#set-voice-spoken_hud").value || "on",
-    },
+    voice: voiceForm(),
     notify: notifyForm(),
     rag: ragForm(),
     ivr: ivrForm(),

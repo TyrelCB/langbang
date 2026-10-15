@@ -1610,6 +1610,21 @@ def _prune_tts_cache() -> None:
         pass
 
 
+class VoiceTestIn(BaseModel):
+    what: str = "tts"  # "tts" | "stt" (STT = TTS clip → transcript round trip)
+    voice: dict = {}   # the CONFIG form's unsaved voice block
+
+
+@app.post("/api/voice/test")
+async def voice_test(body: VoiceTestIn):
+    """CONFIG → VOICE ↻ TEST: like the chat providers' TEST, on the form's
+    values before SAVE. Nothing is cached or saved."""
+    if body.what not in ("tts", "stt"):
+        raise HTTPException(400, "what must be tts or stt")
+    v = {**(config.load().get("voice") or {}), **body.voice}
+    return await run_in_threadpool(voice.selftest, v, body.what)
+
+
 @app.post("/api/tts")
 async def tts(body: TTSIn):
     if len(body.text) > voice.MAX_TTS_CHARS:
