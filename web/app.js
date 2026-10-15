@@ -1942,9 +1942,10 @@ function spkRemap() {
 }
 
 function spkAttach(aud, root, opts = {}) {
-  if (SPK.aud === aud) return;
+  if (SPK.aud === aud) { HUD.gone = false; return; } // resumed after ■: bring the HUD back
   spkDetach();
   const gen = ++SPK.gen;
+  HUD.gone = false; // ■ dismissed the last clip's HUD, not this one's
   Object.assign(SPK, { aud, root, opts, words: [], map: null, src: [], k: -2, done: false });
   const m = /\/api\/tts\/clip\/([0-9a-f]{64}\.mp3)/.exec(aud.src || "");
   const poll = async () => {
@@ -1984,7 +1985,7 @@ function spkFrame() {
   const t = a.currentTime;
   let lo = 0, hi = W.length - 1, k = -1;
   while (lo <= hi) { const mid = (lo + hi) >> 1; if (W[mid].s <= t) { k = mid; lo = mid + 1; } else hi = mid - 1; }
-  hudLive(!a.paused);
+  hudLive(true, a.paused);
   if (k === SPK.k) return;
   SPK.k = k;
   hudWord(k, W);
@@ -2001,7 +2002,8 @@ function spkFrame() {
   const box = SPK.opts.scroll;
   if (box && Date.now() > SPK.scrollHold) { // keep the spoken word in view (not while you scroll)
     const rr = r.getBoundingClientRect(), bb = box.getBoundingClientRect();
-    if (rr.top < bb.top + 20 || rr.bottom > bb.bottom - 20)
+    const floor = HUD.live ? Math.min(bb.bottom, HUD.box.getBoundingClientRect().top) : bb.bottom;
+    if (rr.top < bb.top + 20 || rr.bottom > floor - 20)
       box.scrollTop += rr.top - bb.top - bb.height / 3;
   }
 }
@@ -2017,8 +2019,10 @@ for (const ev of ["wheel", "touchmove", "keydown"])
 // transcript wall reads as a subtitle dump). Phrases break at punctuation,
 // ~4 words, ~1.6 s or a pause; words appear as they're voiced, the current
 // one lit. Driven by the same timings as the in-bubble highlight (spkFrame).
-// voice.spoken_hud = "off" hides it.
-const HUD = { box: null, phrase: null, meta: null, words: null, chunks: [], of: [], ci: -1, live: false };
+// voice.spoken_hud = "off" hides it. It carries its own ⏸/▶ and ■ (it sits
+// where the bubble's player usually is), stays up while paused, and pads
+// #chat while up so the bubble's own player can still scroll clear of it.
+const HUD = { box: null, phrase: null, meta: null, pp: null, words: null, chunks: [], of: [], ci: -1, live: false, gone: false, pad: 0 };
 
 function hudBuild() {
   if (HUD.box) return;
@@ -2028,7 +2032,11 @@ function hudBuild() {
   const bars = el("span", "spk-hud-bars");
   for (let i = 0; i < 5; i++) bars.appendChild(el("i"));
   HUD.meta = el("span", "spk-hud-meta");
-  head.append(el("span", "spk-hud-label", "◉ ACTIVE SPOKEN WORD"), HUD.meta, bars);
+  HUD.pp = el("button", "cb-btn", "⏸"); HUD.pp.title = "pause / resume";
+  HUD.pp.onclick = () => { const a = SPK.aud; if (a) a.paused ? a.play() : a.pause(); };
+  const stop = el("button", "cb-btn", "■"); stop.title = "stop reading (clears the read-aloud queue)";
+  stop.onclick = () => { if (SPK.aud) SPK.aud.pause(); stopSpeaking(); }; // SPK.aud: also a FILES-reader clip
+  head.append(el("span", "spk-hud-label", "◉ ACTIVE SPOKEN WORD"), HUD.meta, bars, HUD.pp, stop);
   HUD.phrase = el("div", "spk-hud-phrase");
   box.append(head, HUD.phrase);
   $("#main").appendChild(box);
@@ -2059,13 +2067,30 @@ function hudPlace() { // sit just above the to-dos strip / composer, whichever i
   HUD.box.style.bottom = Math.max(8, main.bottom - top + 10) + "px";
 }
 
-function hudLive(on) {
-  on = on && loadedVoice.spoken_hud !== "off" && SPK.k >= 0;
+function hudLive(on, paused = false) {
+  on = on && !HUD.gone && loadedVoice.spoken_hud !== "off" && SPK.k >= 0;
+  if (HUD.box && on) {
+    HUD.box.classList.toggle("paused", paused);
+    HUD.pp.textContent = paused ? "▶" : "⏸";
+  }
   if (on === HUD.live) return;
   HUD.live = on;
-  if (!HUD.box) { if (!on) return; hudBuild(); }
+  if (!HUD.box) { if (!on) return; hudBuild(); HUD.box.classList.toggle("paused", paused); }
   if (on) hudPlace();
   HUD.box.classList.toggle("hidden", !on);
+  hudPad(on);
+}
+
+// room under the last bubble while the HUD is up — a reader parked at the
+// bottom stays at the bottom, with the bubble's player above the card
+function hudPad(on) {
+  const chat = $("#chat");
+  const pin = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 40;
+  const px = on ? HUD.box.offsetHeight + 12 : 0;
+  if (px === HUD.pad) return;
+  HUD.pad = px;
+  chat.style.paddingBottom = px ? `${16 + px}px` : "";
+  if (pin) chat.scrollTop = chat.scrollHeight;
 }
 
 function hudWord(k, W) {
@@ -2084,8 +2109,8 @@ function hudWord(k, W) {
   const v = loadedVoice, prov = v.tts_provider || "gtts";
   const who = prov === "qwen" ? v.qwen_voice : prov === "pocket" ? v.pocket_voice : prov;
   HUD.meta.textContent = `${(who || "").toUpperCase()} · ${k + 1}/${W.length}${SPK.done ? "" : "+"}`;
-  if (!HUD.live) hudLive(SPK.aud && !SPK.aud.paused);
-  else hudPlace();
+  if (!HUD.live) hudLive(!!SPK.aud, SPK.aud && SPK.aud.paused);
+  else { hudPlace(); hudPad(true); }
 }
 
 // ---------- voice (read-aloud) ----------
@@ -2287,6 +2312,7 @@ function stopSpeaking() {
   speakQ = [];
   if (voiceCur) voiceCur._aud.pause(); // currentTime survives → resume is free
   markSpeaking(null);
+  HUD.gone = true; hudLive(false); // ■ = done listening; a paused HUD would linger
 }
 
 let lastVoiceFail = 0;

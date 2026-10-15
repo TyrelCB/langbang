@@ -1176,6 +1176,9 @@ html[data-theme="light"] ::highlight(lb-speak) { background-color: rgba(11, 126,
 .spk-hud-label { color: var(--cyan); }
 .spk-hud-meta { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
   color: var(--muted); letter-spacing: 1px; }
+#spk-hud .cb-btn { pointer-events: auto; padding: 1px 7px; font-size: 11px; letter-spacing: 0; }
+#spk-hud.paused .spk-hud-bars i { animation-play-state: paused; opacity: 0.4; }
+#spk-hud.paused .spk-hud-label { color: var(--muted); }
 .spk-hud-bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 12px; }
 .spk-hud-bars i { width: 3px; height: 30%; background: var(--cyan); opacity: 0.85;
   animation: spk-bar 0.9s ease-in-out infinite; }
