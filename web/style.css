@@ -1158,3 +1158,42 @@ html[data-theme="light"] ::highlight(lb-speak) { background-color: rgba(11, 126,
 .panel-inner .sched-sys-row input[type=time] { width: auto; margin: 0; padding: 2px 6px; }
 .sched-sys-off { color: var(--muted); font-size: 12px; letter-spacing: 1px; padding: 4px 2px; }
 .term-inner.panel-inner { max-height: none; }
+
+/* spoken-word HUD (app.js hudWord): the phrase being voiced right now, one
+   short chunk at a time, above the composer. Non-interactive. */
+#spk-hud {
+  position: absolute; left: 50%; transform: translateX(-50%); z-index: 29; /* under #jump-bottom */
+  width: min(620px, calc(100% - 32px)); pointer-events: none;
+  background: rgba(11, 19, 34, 0.92); border: 1px solid var(--cyan-dim);
+  border-left: 3px solid var(--cyan); clip-path: var(--clip);
+  padding: 7px 14px 9px; box-shadow: 0 6px 22px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(3px);
+}
+#spk-hud.hidden { display: none; }
+.spk-hud-head { display: flex; align-items: center; gap: 10px; font-size: 10px;
+  letter-spacing: 2px; color: var(--cyan-dim); }
+.spk-hud-label { color: var(--cyan); }
+.spk-hud-meta { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  color: var(--muted); letter-spacing: 1px; }
+.spk-hud-bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 12px; }
+.spk-hud-bars i { width: 3px; height: 30%; background: var(--cyan); opacity: 0.85;
+  animation: spk-bar 0.9s ease-in-out infinite; }
+.spk-hud-bars i:nth-child(2) { animation-delay: -0.55s; }
+.spk-hud-bars i:nth-child(3) { animation-delay: -0.2s; }
+.spk-hud-bars i:nth-child(4) { animation-delay: -0.7s; }
+.spk-hud-bars i:nth-child(5) { animation-delay: -0.35s; }
+@keyframes spk-bar { 0%, 100% { height: 25%; } 50% { height: 100%; } }
+.spk-hud-phrase { margin-top: 4px; font-size: 20px; line-height: 1.35; letter-spacing: 1.5px;
+  text-transform: uppercase; color: var(--text); min-height: 1.35em;
+  display: flex; flex-wrap: wrap; gap: 0 0.55em; }
+.spk-hud-phrase.in { animation: spk-in 0.14s ease-out; }
+@keyframes spk-in { from { opacity: 0.4; transform: translateY(4px) scale(0.985); } }
+.spk-hud-phrase span.p { color: var(--text); opacity: 0.75; }
+.spk-hud-phrase span.on { color: var(--cyan); text-shadow: 0 0 10px rgba(63, 214, 255, 0.55); }
+.spk-hud-phrase span.f { visibility: hidden; } /* reserved: the phrase doesn't reflow as words land */
+html[data-theme="light"] #spk-hud { background: rgba(242, 247, 251, 0.94); box-shadow: 0 6px 18px rgba(16, 40, 60, 0.18); }
+html[data-theme="light"] .spk-hud-phrase span.on { text-shadow: none; }
+@media (prefers-reduced-motion: reduce) {
+  .spk-hud-bars i, .spk-hud-phrase.in { animation: none; }
+}
+@media (max-width: 720px) { .spk-hud-phrase { font-size: 17px; } }

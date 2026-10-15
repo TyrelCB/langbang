@@ -138,6 +138,7 @@ DEFAULTS = {
         # Off by default — xhigh reasoning runs to minutes of audio, and the
         # queue is serial, so the answer would wait behind it.
         "speak_reasoning": "off",
+        "spoken_hud": "on",  # read-aloud: show the spoken words in a HUD card
     },
     # Phone IVR front door (server/ivr.py, /api/ivr/*): a separate, small
     # agent — NOT the chat agent. Only tools named here are built in (MCP or
