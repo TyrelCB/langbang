@@ -1145,7 +1145,8 @@ html[data-theme="light"] ::highlight(lb-speak) { background-color: rgba(11, 126,
 
 /* ⏰ SCHEDULES system jobs (the RAG node's nightly rescan) */
 #sched-system { margin-bottom: 10px; }
-#sched-system:empty { display: none; }
+#sched-system > div:empty { display: none; }
+#sched-system > div:not(:empty) ~ div:not(:empty) { margin-top: 10px; }
 .sched-card.sys { border-style: dashed; }
 .sched-card.sys.off { opacity: .75; }
 .sched-badge.sys { font-size: 10px; letter-spacing: 2px; color: #04101c; background: var(--cyan-dim);
@@ -1197,3 +1198,19 @@ html[data-theme="light"] .spk-hud-phrase span.on { text-shadow: none; }
   .spk-hud-bars i, .spk-hud-phrase.in { animation: none; }
 }
 @media (max-width: 720px) { .spk-hud-phrase { font-size: 17px; } }
+
+/* ⏰ SCHEDULES: home backup system card (app.js bkSystem) */
+.bk-warn { color: var(--danger); }
+.bk-det { margin-top: 8px; font-size: 12px; }
+.bk-det summary { cursor: pointer; color: var(--muted); letter-spacing: 1px; font-size: 11px; }
+.bk-det summary:hover { color: var(--cyan); }
+.bk-cycles { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+.bk-cycle { border-left: 2px solid var(--line); padding-left: 8px; }
+.bk-cyc-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: var(--text); letter-spacing: 1px; }
+.bk-arch { color: var(--muted); white-space: pre; font-size: 11px; }
+.bk-conf { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; margin: 6px 0 8px; }
+.bk-kv { display: contents; }
+.bk-kv .k { color: var(--muted); letter-spacing: 1px; }
+.bk-kv .v { color: var(--text); overflow-wrap: anywhere; }
+.bk-log { max-height: 240px; overflow: auto; font-size: 11px; margin-top: 6px; white-space: pre-wrap; }
+@media (max-width: 720px) { .bk-conf { grid-template-columns: 1fr; } .bk-kv .k { margin-top: 4px; } }

@@ -38,6 +38,10 @@ CYCLES=$ARCHIVE_DIR/cycles
 # Staged db copies must live under $HOME: tar --listed-incremental allows only one -C.
 STAGE_REL=${STAGE_REL:-.local/state/home-backup/stage}
 STAGE=$HOME/$STAGE_REL
+# Run state for LangBang's ⏰ SCHEDULES card (and anyone else): status.json is
+# rewritten at each phase; touching full-next makes the next run a full.
+STATE_DIR=$HOME/.local/state/home-backup
+STATUS=$STATE_DIR/status.json
 
 log() { printf '%s %s\n' "$(date '+%F %T')" "$*"; }
 
@@ -55,10 +59,33 @@ PY
 }
 # Pushes only on failure, plus one "OK again" on the first success after a
 # failure, so a stale FAILED alert on the phone is visibly superseded.
-notify_fail() { touch "$ARCHIVE_DIR/.last_failed"; ntfy "Backup FAILED" high warning "$1"; }
+notify_fail() {
+  status state=failed phase= finished="$(date +%s)" error="$1"
+  touch "$ARCHIVE_DIR/.last_failed"; ntfy "Backup FAILED" high warning "$1"
+}
 notify_recovered() {
   [[ -f $ARCHIVE_DIR/.last_failed ]] || return 0
   rm -f "$ARCHIVE_DIR/.last_failed"; ntfy "Backup OK again" default white_check_mark "$1"
+}
+
+status() {  # status key=value ... — merged into $STATUS ("key=" clears)
+  python3 - "$STATUS" "$@" <<'PY' || true
+import json, os, sys, time
+p = sys.argv[1]
+try:
+    d = json.load(open(p))
+except Exception:
+    d = {}
+for kv in sys.argv[2:]:
+    k, _, v = kv.partition("=")
+    d[k] = int(v) if v.isdigit() else (v or None)
+if d.get("state") == "ok":
+    d["last_ok"] = {k: d.get(k) for k in ("finished", "level", "cycle", "archive", "size", "remote")}
+d["updated"] = int(time.time())
+with open(p + ".tmp", "w") as fh:
+    json.dump(d, fh)
+os.replace(p + ".tmp", p)
+PY
 }
 
 remote_host() { echo "${REMOTE%%:*}"; }
@@ -97,13 +124,21 @@ PY
 
 do_run() {
   local force_full=${1:-}
-  mkdir -p "$CYCLES" "$STAGE"; chmod 700 "$ARCHIVE_DIR" "$HOME/${STAGE_REL%/stage}"
+  mkdir -p "$CYCLES" "$STAGE" "$STATE_DIR"; chmod 700 "$ARCHIVE_DIR" "$STATE_DIR" "$HOME/${STAGE_REL%/stage}"
   exec 9>"$ARCHIVE_DIR/.lock"
   flock -n 9 || { log "another run holds the lock"; exit 1; }
+  [[ -f $STATE_DIR/full-next ]] && force_full=--full
   local on_err='log "FAILED at line $LINENO"; notify_fail "home-backup failed at line $LINENO on $(hostname)"'
   trap "$on_err" ERR
+  local cur="" level="" stamp="" out="" snar_tmp=""
+  # systemctl stop (the card's ■ STOP): drop the half-written archive — and a
+  # full's cycle dir, which would otherwise count against KEEP_LOCAL. A sync
+  # cut short just resumes next run (rsync --partial).
+  trap 'trap - ERR TERM INT; rm -f ${out:+"$out.part"} ${snar_tmp:+"$snar_tmp"}
+        [[ $level == full && ! -f $cur/state.snar ]] && rm -rf "$cur"
+        status state=stopped phase= finished="$(date +%s)" error="stopped"; log "stopped"; exit 143' TERM INT
 
-  local cur level stamp; cur=$(latest_cycle); stamp=$(date +%Y%m%d-%H%M%S)
+  cur=$(latest_cycle); stamp=$(date +%Y%m%d-%H%M%S)
   if [[ $force_full == --full || -z $cur || ! -f $cur/state.snar || ! -d $STAGE/_sqlite ]] \
      || { [[ $(date +%u) == "$FULL_DOW" ]] && [[ $(basename "$cur") != $(date +%Y%m%d)-* ]]; }; then
     level=full; cur=$CYCLES/$stamp; mkdir -p "$cur"
@@ -112,6 +147,8 @@ do_run() {
     level=incr
   fi
   log "start $level → $(basename "$cur")"
+  status state=running phase=staging level=$level cycle="$(basename "$cur")" started="$(date +%s)" \
+         finished= archive= size= remote= error= pid=$$
 
   SQLITE_LIVE=()
   stage_sqlite "$level"
@@ -129,7 +166,8 @@ do_run() {
   while IFS= read -r -d '' e; do e=${e#"$HOME"/}; ex+=(--exclude="$e" --exclude="$e-wal" --exclude="$e-shm" --exclude="$e-journal")
   done < <(for s in "${srcs[@]}"; do find "$HOME/$s" -name '*.db-wal' -not -path '*/node_modules/*' -print0 | sed -z 's/-wal$//'; done)
 
-  local out=$cur/$stamp-$level.tar.zst snar_tmp=$cur/.state.snar.part
+  out=$cur/$stamp-$level.tar.zst snar_tmp=$cur/.state.snar.part
+  status phase=archiving archive="$out"
   if [[ $level == incr ]]; then cp -f "$cur/state.snar" "$snar_tmp"; else rm -f "$snar_tmp"; fi
   set +e; trap - ERR
   tar --create --file=- --listed-incremental="$snar_tmp" --ignore-failed-read \
@@ -143,22 +181,28 @@ do_run() {
     rm -f "$out.part" "$snar_tmp"; [[ $level == full ]] && rm -rf "$cur"
     log "FAILED tar=${rc[0]} zstd=${rc[1]}"; notify_fail "tar=${rc[0]} zstd=${rc[1]} on $(hostname) ($level)"; exit 1
   fi
+  status phase=verifying
   zstd -q -t "$out.part"
   mv -f "$out.part" "$out"; mv -f "$snar_tmp" "$cur/state.snar"
   (cd "$cur" && sha256sum "$(basename "$out")" > "$(basename "$out").sha256")
   log "wrote $(basename "$out") $(du -h "$out" | cut -f1) (sqlite: ${#SQLITE_LIVE[@]} dbs)"
+  [[ $level == full ]] && rm -f "$STATE_DIR/full-next"
+  status size="$(stat -c %s "$out")" remote=off
 
   prune "$CYCLES" "$KEEP_LOCAL"
 
   if [[ -n $REMOTE ]]; then
     local rh rp; rh=$(remote_host); rp=$(remote_path)
+    status phase=syncing remote=syncing
     ssh -o BatchMode=yes "$rh" "mkdir -p '$rp/cycles' && chmod 700 '$rp'"
     rsync -a --partial --chmod=D700,F600 -e "ssh -o BatchMode=yes" "$CYCLES/" "$REMOTE/cycles/"
     ssh -o BatchMode=yes "$rh" "cd '$rp/cycles/$(basename "$cur")' && sha256sum -c --quiet '$(basename "$out").sha256'" \
       || { log "FAILED remote checksum"; notify_fail "remote checksum mismatch for $(basename "$out")"; exit 1; }
     ssh -o BatchMode=yes "$rh" "cd '$rp/cycles' && ls -1d */ | sort | head -n -$KEEP_REMOTE | xargs -r rm -rf --"
     log "synced → $rh (verified)"
+    status remote=verified
   fi
+  status state=ok phase= finished="$(date +%s)"
   notify_recovered "$(basename "$out") written$([[ -n $REMOTE ]] && echo " and synced to $(remote_host)")"
   log "done"
 }
