@@ -777,27 +777,32 @@ def _to_wav16k(audio: bytes) -> bytes:
     return r.stdout
 
 
-def selftest(v: dict, what: str) -> dict:
+def selftest(v: dict, what: str, clip: tuple | None = None, extra: dict | None = None) -> dict:
     """CONFIG → VOICE ↻ TEST, on the form's UNSAVED voice settings.
-    tts: synthesize TEST_PHRASE with the chosen provider/voice → timing + the
-    clip (the page plays it). stt: the same clip transcribed by the chosen STT
+    tts: the test line synthesized by the chosen provider/voice → timing + the
+    clip (the page plays it). stt: that clip transcribed by the chosen STT
     provider, scored against the phrase — a real round trip, not a ping.
+    `clip` = (audio, media) already made by the caller — main.py's streaming
+    test hands in the MP3 it pulled through the real read-aloud path, with its
+    stream stats in `extra`; without it, a one-shot synthesize() here.
     Never raises: {ok: False, error} carries provider trouble verbatim."""
     import time
     prov = v.get("tts_provider") or "gtts"
     who = {"qwen": v.get("qwen_voice"), "pocket": v.get("pocket_voice"),
            "gcloud": v.get("gcloud_tts_voice")}.get(prov) or ""
-    out = {"what": what, "tts_provider": prov, "voice": who}
-    t0 = time.monotonic()
+    out = {"what": what, "tts_provider": prov, "voice": who, "mode": "oneshot", **(extra or {})}
     try:
-        if prov == "pocket":
-            pocket_ready(v)
-        elif prov == "qwen":
-            qwen_ready(v)
-        out["ready_ms"] = round((time.monotonic() - t0) * 1000)
-        t1 = time.monotonic()
-        audio, media = synthesize(TEST_PHRASE, {"voice": v})
-        out["synth_ms"] = round((time.monotonic() - t1) * 1000)
+        if clip is None:
+            t0 = time.monotonic()
+            if prov == "pocket":
+                pocket_ready(v)
+            elif prov == "qwen":
+                qwen_ready(v)
+            out["ready_ms"] = round((time.monotonic() - t0) * 1000)
+            t1 = time.monotonic()
+            clip = synthesize(TEST_PHRASE, {"voice": v})
+            out["synth_ms"] = round((time.monotonic() - t1) * 1000)
+        audio, media = clip
         wav = _to_wav16k(audio)
         out["seconds"] = round((len(wav) - 44) / 32000, 2)
     except Exception as e:  # noqa: BLE001 - shown verbatim in the row
