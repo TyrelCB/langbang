@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from . import agent, audioart, comfy, config, decide, fileassist, ivr, learning, mcp, notify, rag, runs, schedule, sfxgen, term, ttsjobs, voice
+from . import agent, audioart, backup, comfy, config, decide, fileassist, ivr, learning, mcp, notify, rag, runs, schedule, sfxgen, term, ttsjobs, voice
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -1422,6 +1422,50 @@ async def rag_rescan(windowed: bool = False):
 @app.post("/api/rag/rescan/stop")
 async def rag_rescan_stop():
     return await _rag_call("POST", "/api/rescan/stop")
+
+
+# ---- home backup (server/backup.py): the ⏰ SCHEDULES system card ----
+# systemd user units own the schedule and the run; these routes only show and
+# steer them, so backups keep running when LangBang itself doesn't.
+
+class BackupSchedIn(BaseModel):
+    enabled: bool
+    at: str | None = None
+
+
+def _backup_err(e):
+    return HTTPException(409 if "already running" in str(e) else 400 if isinstance(e, ValueError) else 502, str(e))
+
+
+@app.get("/api/backup")
+async def backup_status(log: bool = False):
+    return await asyncio.to_thread(backup.status, log)
+
+
+@app.put("/api/backup/schedule")
+async def backup_schedule(body: BackupSchedIn):
+    try:
+        return await asyncio.to_thread(backup.set_schedule, body.enabled, body.at)
+    except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as e:
+        raise _backup_err(e)
+
+
+@app.post("/api/backup/run")
+async def backup_run(full: bool = False):
+    try:
+        await asyncio.to_thread(backup.run, full)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+        raise _backup_err(e)
+    return {"ok": True}
+
+
+@app.post("/api/backup/stop")
+async def backup_stop():
+    try:
+        await asyncio.to_thread(backup.stop)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+        raise _backup_err(e)
+    return {"ok": True}
 
 
 # ---- decision endpoint (server/decide.py) ----

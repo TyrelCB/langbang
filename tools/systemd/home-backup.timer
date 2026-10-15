@@ -2,7 +2,8 @@
 Description=Nightly home backup
 
 [Timer]
-# after the RAG node's 01:05 rescan window
+# after the RAG node's 01:05 rescan window. LangBang's SCHEDULES card moves it
+# with a drop-in (~/.config/systemd/user/home-backup.timer.d/schedule.conf).
 OnCalendar=*-*-* 03:30:00
 RandomizedDelaySec=10m
 Persistent=true

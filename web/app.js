@@ -3445,15 +3445,16 @@ async function openSchedules() {
   await refreshSchedules();
   $("#sched-panel").classList.remove("hidden");
   schedSystem(true);
+  bkSystem(true);
   clearInterval(schedTimer);
-  schedTimer = setInterval(() => { refreshSchedules(); schedSystem(false); }, 5000);
+  schedTimer = setInterval(() => { refreshSchedules(); schedSystem(false); bkSystem(false); }, 5000);
 }
 
 // System job: the RAG node's nightly rescan. Not an agent task on purpose —
 // a crawl needs no model, so it lives in the node (rag/server.py _scheduler)
 // and this card just shows/edits it. Built once per open; polls touch text only.
 async function schedSystem(build) {
-  const box = $("#sched-system");
+  const box = $("#sched-sys-rag");
   let d;
   try { d = await J(await fetch("/api/rag/schedule")); }
   catch (e) {
@@ -3510,7 +3511,7 @@ async function schedSystem(build) {
 }
 
 function schedSysFill(d, inputs) {
-  const card = $("#sched-system .sched-card");
+  const card = $("#sched-sys-rag .sched-card");
   if (!card) return;
   if (inputs) {
     $("#sys-rag-on").checked = !!d.at;
@@ -3535,6 +3536,147 @@ function schedSysFill(d, inputs) {
   }
   $("#sys-rag-st").textContent = bits.join(" · ");
 }
+// System job: the nightly home backup (tools/backup/home-backup.sh). Like the
+// rescan it's no agent task — and LangBang doesn't even run it: a systemd USER
+// timer does (server/backup.py), so backups keep happening while LangBang is
+// down. This card shows the run and steers the timer; the folder list stays in
+// ~/.config/home-backup/config (shown read-only — one writer, no clobbers).
+const bkSize = (n) => !n ? "0 B" : n >= 1e9 ? (n / 1e9).toFixed(1) + " GB" : n >= 1e6 ? (n / 1e6).toFixed(0) + " MB" : fmtBytes(n);
+const bkHost = (r) => (r || "").split(":")[0];
+let bkSig = "";
+async function bkSystem(build) {
+  const box = $("#sched-sys-backup");
+  let d;
+  try { d = await J(await fetch("/api/backup")); }
+  catch (e) {
+    if (build) box.replaceChildren(el("div", "sched-sys-off", "◫ Home backup — status unavailable (" + e.message.slice(0, 80) + ")"));
+    return;
+  }
+  const c = d.config || {};
+  if (build || !box.querySelector(".sched-card")) {
+    bkSig = "";
+    const card = el("div", "sched-card sys");
+    const head = el("div", "sched-head");
+    const title = el("div", "sched-title sys", "◫ HOME BACKUP — nightly incremental, weekly full" +
+      (c.remote ? `, copied to ${bkHost(c.remote)}` : ", local only"));
+    const en = el("label", "sched-en");
+    const cb = el("input"); cb.type = "checkbox"; cb.id = "sys-bk-on";
+    en.append(cb, document.createTextNode(" nightly"));
+    const run = el("button", "btn ghost sm", "▶ RUN NOW"); run.id = "sys-bk-run";
+    run.title = "back up now: an incremental in the current cycle (a full if none exists yet)";
+    const full = el("button", "btn ghost sm", "⧉ FULL NOW"); full.id = "sys-bk-full";
+    full.title = "start a new cycle with a full archive now (several GB, a few minutes, then the copy off-box)";
+    const stop = el("button", "btn ghost sm", "■ STOP"); stop.id = "sys-bk-stop";
+    stop.title = "stop: the half-written archive is deleted, earlier archives are untouched; a cut-short copy resumes next run";
+    head.append(el("span", "sched-badge sys", "SYSTEM"), title, en, run, full, stop);
+    const row = el("div", "row sched-sys-row");
+    const at = el("label", "", "at "); const ati = el("input"); ati.type = "time"; ati.id = "sys-bk-at"; at.appendChild(ati);
+    const save = el("button", "btn accent sm", "SAVE"); save.id = "sys-bk-save";
+    row.append(at, save);
+    const st = el("div", "sched-sub dim"); st.id = "sys-bk-st";
+    const warn = el("div", "sched-sub bk-warn hidden"); warn.id = "sys-bk-warn";
+    const det = el("details", "bk-det");
+    det.append(el("summary", "", "ARCHIVES · WHAT'S BACKED UP · LOG"));
+    const cyc = el("div", "bk-cycles"); cyc.id = "sys-bk-cycles";
+    const conf = el("div", "bk-conf"); conf.id = "sys-bk-conf";
+    const logb = el("button", "btn ghost sm", "SHOW LOG"); logb.id = "sys-bk-logb";
+    const log = el("pre", "bk-log hidden"); log.id = "sys-bk-log";
+    det.append(cyc, conf, logb, log);
+    const hint = el("div", "hint", "Run by a systemd user timer, not by LangBang — it keeps backing up when LangBang is down. " +
+      "Failures push to your phone (ntfy). Restores are by hand on purpose: copy a cycle's command from ARCHIVES.");
+    card.append(head, row, st, warn, det, hint);
+    box.replaceChildren(card);
+    const put = async (body) => {
+      try {
+        await J(await fetch("/api/backup/schedule", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
+        SFX.play("click");
+        bkSystem(true);
+      } catch (e) { st.textContent = "✕ " + e.message; }
+    };
+    cb.onchange = () => put({ enabled: cb.checked });
+    save.onclick = () => put({ enabled: cb.checked, at: ati.value || "03:30" });
+    const post = async (url) => {
+      SFX.play("click");
+      try { await J(await fetch(url, { method: "POST" })); } catch (e) { st.textContent = "✕ " + e.message; return; }
+      setTimeout(() => bkSystem(false), 600);
+    };
+    run.onclick = () => post("/api/backup/run");
+    full.onclick = () => post("/api/backup/run?full=true");
+    stop.onclick = () => post("/api/backup/stop");
+    logb.onclick = async () => {
+      if (!log.classList.contains("hidden")) { log.classList.add("hidden"); logb.textContent = "SHOW LOG"; return; }
+      try { log.textContent = ((await J(await fetch("/api/backup?log=true"))).log || []).join("\n") || "(no log yet)"; }
+      catch (e) { log.textContent = "✕ " + e.message; }
+      log.classList.remove("hidden"); logb.textContent = "HIDE LOG";
+    };
+    bkFill(d, true);
+  } else bkFill(d, false);
+}
+
+function bkFill(d, inputs) {
+  const card = $("#sched-sys-backup .sched-card");
+  if (!card) return;
+  const s = d.status || {}, sc = d.schedule || {}, c = d.config || {}, ok = s.last_ok || {};
+  if (inputs) {
+    $("#sys-bk-on").checked = !!sc.enabled;
+    $("#sys-bk-at").value = sc.at || "03:30";
+  }
+  card.classList.toggle("off", !sc.enabled);
+  card.classList.toggle("running", !!d.running);
+  $("#sys-bk-stop").classList.toggle("hidden", !d.running);
+  $("#sys-bk-run").classList.toggle("hidden", !!d.running);
+  $("#sys-bk-full").classList.toggle("hidden", !!d.running);
+  const host = bkHost(c.remote), bits = [];
+  if (d.unit_error) bits.push("✕ " + d.unit_error);
+  if (d.running) {
+    const ph = { staging: "copying live databases", archiving: "archiving" + (d.part_size ? ` (${bkSize(d.part_size)} so far)` : ""),
+      verifying: "verifying the archive", syncing: `copying to ${host} and checking it there` }[s.phase] || s.phase || "starting";
+    bits.push(`RUNNING ${s.level || ""} · ${ph}`);
+  }
+  if (ok.finished) bits.push(`last OK ${schedWhen(ok.finished)}: ${ok.level} ${bkSize(ok.size)}` +
+    (ok.remote === "verified" ? `, verified on ${host}` : ok.remote === "off" ? " (local only)" : ""));
+  bits.push(sc.enabled ? "next " + schedWhen(sc.next) : "nightly run OFF");
+  if (d.full_next && !d.running) bits.push("next run is a FULL");
+  if (d.disk) bits.push(`${bkSize(d.disk.free)} free on the archive disk`);
+  $("#sys-bk-st").textContent = bits.join(" · ");
+  const warn = $("#sys-bk-warn");
+  const bad = !d.running && ["failed", "interrupted"].includes(s.state) ? s : null;
+  warn.classList.toggle("hidden", !bad && !(d.failed_marker && !d.running));
+  warn.textContent = bad
+    ? `✕ last run ${bad.state.toUpperCase()} ${schedWhen(bad.finished || bad.updated)}${bad.error ? ": " + bad.error : ""} — your phone got a FAILED push; the next good run sends "OK again"`
+    : "✕ the last failure hasn't been followed by a good run yet — RUN NOW to clear it";
+  if (s.state === "stopped" && !d.running) warn.classList.add("hidden");
+  // archives + config: rebuilt only when they change (polls must not collapse <details> or eat a copy click)
+  const sig = JSON.stringify([d.cycles, c]);
+  if (sig === bkSig) return;
+  bkSig = sig;
+  const cyc = $("#sys-bk-cycles");
+  cyc.replaceChildren();
+  if (!d.cycles.length) cyc.append(el("div", "sched-sys-off", "no archives yet"));
+  for (const y of [...d.cycles].reverse()) {
+    const b = el("div", "bk-cycle");
+    const h = el("div", "bk-cyc-head");
+    const cp = el("button", "btn ghost sm", "⧉ RESTORE CMD");
+    cp.title = "copy the restore command (extracts into an EMPTY folder — nothing is overwritten)";
+    cp.onclick = async () => { cp.textContent = (await copyText(y.restore)) ? "✓ COPIED" : "✕ COPY FAILED"; setTimeout(() => (cp.textContent = "⧉ RESTORE CMD"), 1500); };
+    h.append(el("span", "", `CYCLE ${y.cycle} · ${y.archives.length} archive${y.archives.length === 1 ? "" : "s"} · ${bkSize(y.size)}`), cp);
+    b.append(h);
+    for (const a of y.archives) b.append(el("div", "bk-arch", `${a.level === "full" ? "■ full" : "□ incr"}  ${schedWhen(a.mtime)}  ${bkSize(a.size)}`));
+    cyc.append(b);
+  }
+  const conf = $("#sys-bk-conf");
+  conf.replaceChildren();
+  if (c.missing || c.error) { conf.append(el("div", "sched-sys-off", `config: ${c.error || "missing"} (${c.path})`)); return; }
+  const line = (k, v) => { const r = el("div", "bk-kv"); r.append(el("span", "k", k), el("span", "v", v)); conf.append(r); };
+  line("backs up", (c.sources || []).map((x) => "~/" + x).join("  "));
+  line("skips", (c.excludes || []).join("  "));
+  if ((c.weekly_only || []).length) line("weekly only", c.weekly_only.join("  ") + "  (big, rebuildable)");
+  line("archives", c.archive_dir || "—");
+  line("off-box", c.remote ? `${c.remote}  (keeps ${c.keep_remote} weeks)` : "none");
+  line("kept here", `${c.keep_local} weeks · full on ${["", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][+c.full_dow] || c.full_dow}s`);
+  line("edit in", c.path + "  (applies on the next run)");
+}
+
 function closeSchedules() {
   $("#sched-panel").classList.add("hidden");
   clearInterval(schedTimer);
