@@ -761,3 +761,68 @@ def _transcribe_gcloud(pcm: bytes, v: dict) -> str:
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"Google Cloud STT failed ({e}) — check key file") from e
     return " ".join(r.alternatives[0].transcript for r in resp.results if r.alternatives)
+
+
+TEST_PHRASE = "Testing one two three. This is the LangBang voice check."
+
+
+def _to_wav16k(audio: bytes) -> bytes:
+    """Any clip ffmpeg reads → 16 kHz mono PCM16 WAV (the STT input format)."""
+    import subprocess
+    r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
+                        "-ac", "1", "-ar", "16000", "-f", "wav", "pipe:1"],
+                       input=audio, capture_output=True, timeout=60)
+    if r.returncode or len(r.stdout) < 100:
+        raise RuntimeError("ffmpeg could not convert the test clip: " + r.stderr.decode(errors="replace")[:160])
+    return r.stdout
+
+
+def selftest(v: dict, what: str) -> dict:
+    """CONFIG → VOICE ↻ TEST, on the form's UNSAVED voice settings.
+    tts: synthesize TEST_PHRASE with the chosen provider/voice → timing + the
+    clip (the page plays it). stt: the same clip transcribed by the chosen STT
+    provider, scored against the phrase — a real round trip, not a ping.
+    Never raises: {ok: False, error} carries provider trouble verbatim."""
+    import time
+    prov = v.get("tts_provider") or "gtts"
+    who = {"qwen": v.get("qwen_voice"), "pocket": v.get("pocket_voice"),
+           "gcloud": v.get("gcloud_tts_voice")}.get(prov) or ""
+    out = {"what": what, "tts_provider": prov, "voice": who}
+    t0 = time.monotonic()
+    try:
+        if prov == "pocket":
+            pocket_ready(v)
+        elif prov == "qwen":
+            qwen_ready(v)
+        out["ready_ms"] = round((time.monotonic() - t0) * 1000)
+        t1 = time.monotonic()
+        audio, media = synthesize(TEST_PHRASE, {"voice": v})
+        out["synth_ms"] = round((time.monotonic() - t1) * 1000)
+        wav = _to_wav16k(audio)
+        out["seconds"] = round((len(wav) - 44) / 32000, 2)
+    except Exception as e:  # noqa: BLE001 - shown verbatim in the row
+        return {**out, "ok": False, "stage": "tts", "error": f"{type(e).__name__}: {e}"[:400]}
+    if what == "tts":
+        import base64
+        return {**out, "ok": out["seconds"] > 0.5, "media": media,
+                "audio": base64.b64encode(audio).decode(),
+                **({} if out["seconds"] > 0.5 else {"error": "synthesized clip is (nearly) silent"})}
+    want = v.get("stt_provider") or "sr"
+    out["stt_provider"] = want
+    t2 = time.monotonic()
+    try:
+        r = transcribe_detail(wav, {"voice": v})
+    except Exception as e:  # noqa: BLE001
+        return {**out, "ok": False, "stage": "stt", "error": f"{type(e).__name__}: {e}"[:400]}
+    out["stt_ms"] = round((time.monotonic() - t2) * 1000)
+    # "1, 2, 3" and "one two three" are the same hearing
+    nums = dict(zip("0123456789", "zero one two three four five six seven eight nine".split()))
+    norm = lambda s: [nums.get(w, w) for w in re.findall(r"[a-z0-9]+", s.lower().replace("langbang", "lang bang"))]
+    exp, got = norm(TEST_PHRASE), norm(r["text"])
+    hit = sum(1 for w in exp if w in got)
+    score = round(hit / len(exp), 2)
+    out.update(text=r["text"], used=r["provider"], score=score, words=len(r.get("words") or []))
+    if r["provider"] != want:  # whisper threw and transcribe_detail fell back to sr
+        out["warning"] = f"{want} failed — this answer came from the {r['provider']} fallback (see the LangBang log)"
+    return {**out, "ok": score >= 0.6 and r["provider"] == want,
+            **({} if score >= 0.6 else {"error": f"heard {r['text']!r} — only {int(score * 100)}% of the test words"})}

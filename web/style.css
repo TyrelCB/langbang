@@ -1217,3 +1217,13 @@ html[data-theme="light"] .spk-hud-phrase span.on { text-shadow: none; }
 .bk-kv .v { color: var(--text); overflow-wrap: anywhere; }
 .bk-log { max-height: 240px; overflow: auto; font-size: 11px; margin-top: 6px; white-space: pre-wrap; }
 @media (max-width: 720px) { .bk-conf { grid-template-columns: 1fr; } .bk-kv .k { margin-top: 4px; } }
+
+/* CONFIG → VOICE ↻ TEST TTS / STT (app.js voiceTest) */
+.voice-tests { display: flex; flex-direction: column; gap: 6px; margin: 2px 0 10px; }
+.vt-line { display: flex; align-items: baseline; gap: 10px; font-size: 12px; }
+.vt-line .btn { flex: none; }
+.voice-tests .prov-test { color: var(--muted); overflow-wrap: anywhere; }
+.voice-tests .prov-test.busy { color: var(--orange); }
+.voice-tests .prov-test.ok { color: var(--cyan); }
+.voice-tests .prov-test.warn { color: var(--orange); }
+.voice-tests .prov-test.bad { color: var(--danger); }
