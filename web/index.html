@@ -233,7 +233,7 @@
           <label>STT lang <input id="set-voice-stt_lang" type="text" placeholder="en-US"></label>
         </div>
         <div class="voice-tests">
-          <div class="vt-line"><button id="btn-voice-test-tts" class="btn ghost sm" type="button" title="Synthesize a test line with the TTS provider and voice set above (unsaved values are fine) and play it">↻ TEST TTS</button><span id="voice-test-tts" class="prov-test"></span></div>
+          <div class="vt-line"><button id="btn-voice-test-tts" class="btn ghost sm" type="button" title="Speak a test line with the TTS provider and voice set above (unsaved values are fine) and play it. Pocket/Qwen go through the real streaming read-aloud path: time to first sound, stalls, word timings">↻ TEST TTS</button><span id="voice-test-tts" class="prov-test"></span></div>
           <div class="vt-line"><button id="btn-voice-test-stt" class="btn ghost sm" type="button" title="Round trip: speak a known phrase with the TTS above, transcribe it with the STT provider above, and score what it heard">↻ TEST STT</button><span id="voice-test-stt" class="prov-test"></span></div>
         </div>
         <div class="row">

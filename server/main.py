@@ -1615,13 +1615,116 @@ class VoiceTestIn(BaseModel):
     voice: dict = {}   # the CONFIG form's unsaved voice block
 
 
+MP3_BPS = 64_000 // 8  # ttsjobs.FFMPEG encodes CBR 64 kbit/s: bytes → seconds of audio
+
+
+def _playback_sim(arrivals: list, prebuffer: float = 0.25) -> dict:
+    """Replay chunk arrivals [(t, total_bytes)] against a listener who starts
+    once `prebuffer` s of audio is in and then plays in real time: did the
+    stream stay ahead, and by how little? Stalls under 0.1 s are jitter."""
+    if not arrivals:
+        return {}
+    start = next(((t, b) for t, b in arrivals if b / MP3_BPS >= prebuffer), arrivals[-1])
+    ts, ps = start[0], 0.0  # playing since ts from position ps
+    have = start[1] / MP3_BPS
+    stalls, stall_s, longest, thin = 0, 0.0, 0.0, None
+    for t, b in arrivals:
+        if t <= start[0]:
+            continue
+        pos = ps + (t - ts)
+        if pos > have:  # ran dry before this chunk landed
+            gap = t - (ts + (have - ps))
+            if gap > 0.1:
+                stalls += 1
+                stall_s += gap
+                longest = max(longest, gap)
+            ts, ps = t, have
+        else:
+            thin = have - pos if thin is None else min(thin, have - pos)
+        have = b / MP3_BPS
+    return {"stalls": stalls, "stall_s": round(stall_s, 2), "longest_stall_s": round(longest, 2),
+            "thinnest_buffer_s": None if thin is None else round(thin, 2)}
+
+
+async def _voice_stream_test(v: dict, base: str) -> dict:
+    """The read-aloud path for real: a ttsjobs clip (Pocket/Qwen PCM → ffmpeg
+    MP3) fetched progressively from /api/tts/clip over HTTP like the <audio>
+    element does, with its /words polled mid-stream like the highlight/HUD
+    do. Times every chunk; the clip is a throwaway key, deleted afterwards."""
+    prov = v.get("tts_provider")
+    t_req = time.monotonic()
+    try:
+        await run_in_threadpool(voice.qwen_ready if prov == "qwen" else voice.pocket_ready, v)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "stage": "tts", "error": f"{type(e).__name__}: {e}"[:400]}
+    out = {"mode": "stream", "ready_ms": round((time.monotonic() - t_req) * 1000)}
+    clean = voice.prepare(voice.TEST_PHRASE, {"voice": v})  # same text pipeline as a chat reply
+    key = hashlib.sha256(f"voice-selftest|{uuid.uuid4()}".encode()).hexdigest()
+    mp3 = os.path.join(TTS_CACHE_DIR, key + ".mp3")
+    out["queued_behind"] = sum(1 for j in ttsjobs.JOBS.values() if not j.done)
+    url = f"{base}/api/tts/clip/{key}.mp3"
+    ttsjobs.start(key, clean, v, mp3)
+    t0 = time.monotonic()
+    arrivals, data = [], bytearray()
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=90.0)) as c:
+            async with c.stream("GET", url) as r:
+                out["transport"] = r.headers.get("x-tts-cache")
+                if r.status_code != 200:
+                    await r.aread()
+                    raise RuntimeError(f"clip endpoint said {r.status_code}: {r.text[:160]}")
+                async for b in r.aiter_raw():
+                    data += b
+                    arrivals.append((time.monotonic() - t0, len(data)))
+                    if "timings_mid" not in out and len(data) >= MP3_BPS * 1.5:
+                        w = (await c.get(url + "/words")).json()  # what the highlight sees mid-play
+                        out["timings_mid"] = len(w.get("words") or [])
+            w = (await c.get(url + "/words")).json()
+            out["timings"] = len(w.get("words") or [])
+        job = ttsjobs.JOBS.get(key)
+        if job is not None and job.error:
+            raise RuntimeError(job.error)
+        if not arrivals:
+            raise RuntimeError("the clip stream ended without audio")
+    except Exception as e:  # noqa: BLE001
+        return {**out, "ok": False, "stage": "tts", "error": f"{type(e).__name__}: {e}"[:400]}
+    finally:
+        ttsjobs.JOBS.pop(key, None)
+        for f in (mp3, mp3 + ".part", ttsjobs.words_path(mp3)):
+            try:
+                os.remove(f)
+            except FileNotFoundError:
+                pass
+    first, last = arrivals[0][0], arrivals[-1][0]
+    audio_s = len(data) / MP3_BPS
+    out.update(first_audio_ms=round(first * 1000), synth_ms=round(last * 1000),
+               chunks=len(arrivals), rtf=round(audio_s / max(last - first, 1e-3), 2),
+               **_playback_sim(arrivals), clip=bytes(data))
+    return out
+
+
+class VoiceTestIn(BaseModel):
+    what: str = "tts"  # "tts" | "stt" (STT = TTS clip → transcript round trip)
+    voice: dict = {}   # the CONFIG form's unsaved voice block
+
+
 @app.post("/api/voice/test")
-async def voice_test(body: VoiceTestIn):
+async def voice_test(body: VoiceTestIn, request: Request):
     """CONFIG → VOICE ↻ TEST: like the chat providers' TEST, on the form's
-    values before SAVE. Nothing is cached or saved."""
+    values before SAVE. Pocket/Qwen go through the real streaming read-aloud
+    path (_voice_stream_test); gTTS/gcloud are one-shot. Nothing is saved."""
     if body.what not in ("tts", "stt"):
         raise HTTPException(400, "what must be tts or stt")
     v = {**(config.load().get("voice") or {}), **body.voice}
+    if (v.get("tts_provider") or "gtts") in ("pocket", "qwen") and shutil.which("ffmpeg"):
+        port = (request.scope.get("server") or ("127.0.0.1", 8123))[1]
+        st = await _voice_stream_test(v, f"http://127.0.0.1:{port}")
+        if not st.get("ok", True):
+            prov = v.get("tts_provider")
+            return {"what": body.what, "tts_provider": prov,
+                    "voice": v.get("qwen_voice" if prov == "qwen" else "pocket_voice"), **st}
+        clip = st.pop("clip")
+        return await run_in_threadpool(voice.selftest, v, body.what, (clip, "audio/mpeg"), st)
     return await run_in_threadpool(voice.selftest, v, body.what)
 
 

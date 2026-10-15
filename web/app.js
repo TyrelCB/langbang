@@ -2480,8 +2480,13 @@ async function voiceTest(what) {
   } catch (e) { r = { ok: false, error: e.message }; }
   btn.disabled = false;
   const who = `${r.tts_provider || "?"}${r.voice ? " · " + r.voice : ""}`;
-  const notes = [];
-  if (r.seconds && r.synth_ms > r.seconds * 1000) notes.push("slower than real time");
+  const notes = [], stream = r.mode === "stream";
+  if (stream) { // the real read-aloud path: what a listener would have heard
+    if (r.stalls) notes.push(`playback would stall ${r.stalls}× (longest ${r.longest_stall_s} s)`);
+    if (r.first_audio_ms > 2000) notes.push(`slow start (${vtSec(r.first_audio_ms)} to first audio)`);
+    if (r.ok !== false && !r.timings) notes.push("no word timings — the highlight and HUD can't follow");
+    if (r.transport && r.transport !== "stream") notes.push(`served as ${r.transport}, not a live stream`);
+  } else if (r.seconds && r.synth_ms > r.seconds * 1000) notes.push("slower than real time");
   if (r.seconds > 9) notes.push("much longer than the line — the voice may be looping");
   if (r.warning) notes.push(r.warning);
   if (!r.ok) {
@@ -2489,12 +2494,19 @@ async function voiceTest(what) {
     out.textContent = `✕ ${r.stage === "tts" && what === "stt" ? "TTS step: " : ""}${r.error || "failed"}` + (notes.length ? " · " + notes.join(" · ") : "");
   } else if (what === "tts") {
     out.className = "prov-test " + (notes.length ? "warn" : "ok");
-    out.textContent = `${notes.length ? "⚠" : "✓"} ${who} — ${r.seconds} s of audio in ${vtSec(r.synth_ms)}` +
+    const facts = stream
+      ? `streamed ${r.seconds} s of audio: first sound in ${vtSec(r.first_audio_ms)}, ${r.chunks} chunks, ${r.rtf}× real time, ` +
+        (r.stalls ? `${r.stalls} stall${r.stalls > 1 ? "s" : ""}` : "no stalls" + (r.thinnest_buffer_s != null ? ` (thinnest buffer ${r.thinnest_buffer_s} s)` : "")) +
+        `, ${r.timings} word timings` + (r.timings_mid ? ` (${r.timings_mid} already mid-stream)` : "") +
+        (r.queued_behind ? ` · waited behind ${r.queued_behind} clip${r.queued_behind > 1 ? "s" : ""}` : "")
+      : `${r.seconds} s of audio in ${vtSec(r.synth_ms)} (one-shot — ${r.tts_provider} doesn't stream)`;
+    out.textContent = `${notes.length ? "⚠" : "✓"} ${who} — ${facts}` +
       (r.ready_ms > 1000 ? ` (+${vtSec(r.ready_ms)} loading)` : "") + (notes.length ? " · " + notes.join(" · ") : "") + " · playing";
   } else {
     out.className = "prov-test " + (notes.length ? "warn" : "ok");
     out.textContent = `${notes.length ? "⚠" : "✓"} ${r.used} heard “${r.text}” — ${Math.round(r.score * 100)}% in ${vtSec(r.stt_ms)}` +
-      (r.words ? `, ${r.words} word timings` : "") + ` · spoken by ${who}` + (notes.length ? " · " + notes.join(" · ") : "");
+      (r.words ? `, ${r.words} word timings` : "") + ` · spoken by ${who}` + (stream ? ` via the streaming path (first sound ${vtSec(r.first_audio_ms)}, ${r.stalls ? r.stalls + " stalls" : "no stalls"})` : "") +
+      (notes.length ? " · " + notes.join(" · ") : "");
   }
   if (what === "tts" && r.audio) {
     if (vtAudio) vtAudio.pause();
