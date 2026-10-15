@@ -1952,7 +1952,7 @@ function spkAttach(aud, root, opts = {}) {
     if (!m) { // no timings (gTTS / gcloud blob): spread on-screen words over the duration
       if (!isFinite(aud.duration) || !aud.duration) return setTimeout(poll, 500);
       const src = spkTokens(root), d = aud.duration;
-      SPK.words = src.map((t, i) => ({ w: t.norm, s: (i / src.length) * d * 0.97, e: ((i + 1) / src.length) * d * 0.97 }));
+      SPK.words = src.map((t, i) => ({ w: t.node.data.slice(t.start, t.end), s: (i / src.length) * d * 0.97, e: ((i + 1) / src.length) * d * 0.97 }));
       SPK.done = true;
       return spkRemap();
     }
@@ -1974,6 +1974,7 @@ function spkDetach() {
   cancelAnimationFrame(SPK.raf);
   SPK.aud = null;
   if (spkOK) CSS.highlights.delete("lb-speak");
+  hudLive(false);
 }
 
 function spkFrame() {
@@ -1983,8 +1984,10 @@ function spkFrame() {
   const t = a.currentTime;
   let lo = 0, hi = W.length - 1, k = -1;
   while (lo <= hi) { const mid = (lo + hi) >> 1; if (W[mid].s <= t) { k = mid; lo = mid + 1; } else hi = mid - 1; }
+  hudLive(!a.paused);
   if (k === SPK.k) return;
   SPK.k = k;
+  hudWord(k, W);
   if (SPK.opts.onWord) SPK.opts.onWord(k, W);
   if (!spkOK || k < 0) return;
   if (SPK.map[k] < 0) return; // past the last anchor of a growing list: hold
@@ -2006,6 +2009,84 @@ for (const ev of ["wheel", "touchmove", "keydown"])
   document.addEventListener(ev, (e) => {
     if (SPK.opts.scroll && SPK.opts.scroll.contains(e.target)) SPK.scrollHold = Date.now() + 4000;
   }, { passive: true });
+
+// ---------- spoken-word HUD ----------
+// While a clip plays, a HUD card above the composer shows the words as
+// they're SPOKEN ("gig one slash zero", not "Gi1/0/1"), one short phrase at
+// a time — never the whole script (the hyperframes-spoken-hud lesson: a
+// transcript wall reads as a subtitle dump). Phrases break at punctuation,
+// ~4 words, ~1.6 s or a pause; words appear as they're voiced, the current
+// one lit. Driven by the same timings as the in-bubble highlight (spkFrame).
+// voice.spoken_hud = "off" hides it.
+const HUD = { box: null, phrase: null, meta: null, words: null, chunks: [], of: [], ci: -1, live: false };
+
+function hudBuild() {
+  if (HUD.box) return;
+  const box = el("div", "hidden"); box.id = "spk-hud";
+  box.setAttribute("aria-hidden", "true"); // the audio IS the content; don't double it for screen readers
+  const head = el("div", "spk-hud-head");
+  const bars = el("span", "spk-hud-bars");
+  for (let i = 0; i < 5; i++) bars.appendChild(el("i"));
+  HUD.meta = el("span", "spk-hud-meta");
+  head.append(el("span", "spk-hud-label", "◉ ACTIVE SPOKEN WORD"), HUD.meta, bars);
+  HUD.phrase = el("div", "spk-hud-phrase");
+  box.append(head, HUD.phrase);
+  $("#main").appendChild(box);
+  HUD.box = box;
+}
+
+const HUD_BREAK = /[.,;:!?…—)\]"”]$/;
+function hudChunk(W) { // → chunks [[i0, i1)], of[k] = chunk index of word k
+  const chunks = [], of = new Int32Array(W.length);
+  let i0 = 0;
+  for (let k = 0; k < W.length; k++) {
+    of[k] = chunks.length;
+    const n = k + 1 - i0, next = W[k + 1];
+    if (!next || n >= 4 || HUD_BREAK.test(W[k].w) || next.e - W[i0].s > 1.6 || next.s - W[k].e > 0.45) {
+      chunks.push([i0, k + 1]); i0 = k + 1;
+    }
+  }
+  return { chunks, of };
+}
+
+function hudPlace() { // sit just above the to-dos strip / composer, whichever is higher
+  const main = $("#main").getBoundingClientRect();
+  let top = $("#composer").getBoundingClientRect().top;
+  for (const id of ["#todo-panel", "#attach-strip"]) {
+    const n = $(id);
+    if (n && !n.classList.contains("hidden") && n.offsetHeight) top = Math.min(top, n.getBoundingClientRect().top);
+  }
+  HUD.box.style.bottom = Math.max(8, main.bottom - top + 10) + "px";
+}
+
+function hudLive(on) {
+  on = on && loadedVoice.spoken_hud !== "off" && SPK.k >= 0;
+  if (on === HUD.live) return;
+  HUD.live = on;
+  if (!HUD.box) { if (!on) return; hudBuild(); }
+  if (on) hudPlace();
+  HUD.box.classList.toggle("hidden", !on);
+}
+
+function hudWord(k, W) {
+  if (loadedVoice.spoken_hud === "off" || k < 0) return hudLive(false);
+  hudBuild();
+  if (HUD.words !== W || HUD.of.length !== W.length) { // timings grew (streaming) or a new clip
+    Object.assign(HUD, hudChunk(W), { words: W, ci: -1 });
+  }
+  const ci = HUD.of[k], [i0, i1] = HUD.chunks[ci];
+  if (ci !== HUD.ci) {
+    HUD.ci = ci;
+    HUD.phrase.replaceChildren(...W.slice(i0, i1).map((w) => el("span", "", w.w)));
+    HUD.phrase.classList.remove("in"); void HUD.phrase.offsetWidth; HUD.phrase.classList.add("in");
+  }
+  [...HUD.phrase.children].forEach((n, j) => { n.className = i0 + j < k ? "p" : i0 + j === k ? "on" : "f"; });
+  const v = loadedVoice, prov = v.tts_provider || "gtts";
+  const who = prov === "qwen" ? v.qwen_voice : prov === "pocket" ? v.pocket_voice : prov;
+  HUD.meta.textContent = `${(who || "").toUpperCase()} · ${k + 1}/${W.length}${SPK.done ? "" : "+"}`;
+  if (!HUD.live) hudLive(SPK.aud && !SPK.aud.paused);
+  else hudPlace();
+}
 
 // ---------- voice (read-aloud) ----------
 // Synthesis happens server-side (/api/tts -> one clip per request; the server
@@ -2327,6 +2408,7 @@ const DEFAULT_VOICE = {
   qwen_tts_url: "http://spark-ee93:8098", qwen_voice: "Tyrel", qwen_language: "English",
   tts_normalize: "pocket",
   speak_reasoning: "off",
+  spoken_hud: "on",
 };
 let loadedVoice = { ...DEFAULT_VOICE };
 
@@ -2738,6 +2820,7 @@ async function saveSettings() {
       qwen_language: $("#set-voice-qwen_language").value || "English",
       tts_normalize: $("#set-voice-tts_normalize").value || "pocket",
       speak_reasoning: $("#set-voice-speak_reasoning").value || "off",
+      spoken_hud: $("#set-voice-spoken_hud").value || "on",
     },
     notify: notifyForm(),
     rag: ragForm(),
@@ -2749,8 +2832,9 @@ async function saveSettings() {
     },
   });
   applySplash($("#set-splash_image").value.trim());
-  // runs read speak_reasoning from loadedVoice — take the saved value now
-  loadedVoice = { ...loadedVoice, speak_reasoning: $("#set-voice-speak_reasoning").value || "off" };
+  // runs read speak_reasoning (and the HUD spoken_hud) from loadedVoice — take the saved values now
+  loadedVoice = { ...loadedVoice, speak_reasoning: $("#set-voice-speak_reasoning").value || "off",
+    spoken_hud: $("#set-voice-spoken_hud").value || "on" };
   $("#settings-panel").classList.add("hidden");
   cfgBase = null;  // the save closed the draft; next openSettings re-snapshots
   $("#cfg-dirty").classList.add("hidden");
