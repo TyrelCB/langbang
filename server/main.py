@@ -172,6 +172,36 @@ async def del_thread(tid: str):
     return {"ok": True}
 
 
+class ThreadPinIn(BaseModel):
+    pinned: bool = True
+
+
+@app.put("/api/threads/{tid}/pin")
+async def pin_thread(tid: str, body: ThreadPinIn):
+    if not await agent.pin_thread(tid, body.pinned):
+        raise HTTPException(404, "no such thread")
+    return {"pinned": body.pinned}
+
+
+class ThreadForkIn(BaseModel):
+    at: int | None = None  # history() index of the bubble, when it came from /messages
+    role: str = ""         # user | ai — with text, locates a live-streamed bubble
+    text: str = ""
+
+
+@app.post("/api/threads/{tid}/fork")
+async def fork_thread(tid: str, body: ThreadForkIn):
+    # a run mid-flight is still writing the state we'd copy
+    if tid in runs.active_map()["runs"]:
+        raise HTTPException(409, "this thread is running — fork it when the run finishes")
+    try:
+        return await agent.fork_thread(tid, body.at, body.role, body.text)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/api/threads/{tid}/touch")
 async def touch_thread(tid: str):
     """Resume-bump: opening a thread moves it to the top of the sidebar."""
