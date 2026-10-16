@@ -42,7 +42,7 @@ import httpx
 import openai
 from fastapi.concurrency import run_in_threadpool
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 
 from . import agent, config, local_tools, mcp, notify, voice
@@ -550,25 +550,56 @@ async def turn_audio(text: str, s: dict, cfg: dict, out: str, rate: int) -> byte
     return await run_in_threadpool(speak, text, s, cfg, out, rate)
 
 
-async def prewarm(s: dict) -> None:
+async def _warm_prefix(s: dict, cfg: dict, cid: str, c: dict) -> None:
+    """Prefill exactly what every turn starts with — the system prompt and
+    the same tool schemas the agent binds — on the backend a turn would use."""
+    tools = await _tools(s, cfg, cid, c)
+    err = None
+    for conn, j, eb in _attempts(s, cfg):
+        if err is not None and isinstance(err, _UNREACHABLE) and conn["base_url"] == err.base_url:
+            continue
+        llm = _llm(conn, {**cfg, "max_tokens": 1}, eb, streaming=False)
+        try:
+            await (llm.bind_tools(tools) if tools else llm).ainvoke([SystemMessage(system_prompt(cfg))])
+            _accepts[conn["base_url"]] = j
+            _recovered(conn)
+            return
+        except Exception as e:  # noqa: BLE001 — sorted by _retryable
+            err = _retryable(e, conn, eb)
+    raise err
+
+
+async def prewarm(s: dict, with_voice: bool = True) -> None:
     """Startup: pay the first call's cold costs before a caller does —
     the IVR voice (Pocket model + voice state + first synthesis, ~11 s) and
     the IVR model's prompt prefix (system prompt + knowledge + tool schemas,
     ~3k tokens: ~6 s of prefill on the Mac mini, then cached). One throwaway
-    turn on a scratch call, take_message disarmed, nothing audited."""
+    turn on a scratch call, take_message disarmed, nothing audited.
+
+    The model warm-up sends the system prompt + tools ALONE (no user turn)
+    and stops after one token. Ollama on the Mac can only reuse a cached
+    prefix up to a point it checkpointed, and it checkpoints near the end of
+    each prompt: warming with a "Hello?" turn left no checkpoint before the
+    caller's own first words, so that turn re-read all ~3.3k tokens anyway
+    (13.7 s, call 19ab861b76c9, 2026-10-16). Ending the warm-up where the
+    caller's turn begins makes it a cache hit (0.3 s). with_voice=False skips the
+    synthesis — at call start the greeting just warmed the voice, and a second
+    synthesis competed for fedora's CPU with the caller's first STT (8.3 s and
+    3.3 s first-turn STT on 2026-10-16 vs ~1.6 s mid-call)."""
     cfg = s.get("ivr") or {}
     if not cfg.get("enabled"):
         return
     t0 = time.time()
-    try:
-        await run_in_threadpool(lambda: sum(len(b) for b in speak_pcm("Hello.", s, cfg)))
-    except Exception as e:  # noqa: BLE001 — the first real call will say why
-        logger.warning("ivr prewarm (voice) failed: %s", e)
+    if with_voice:
+        try:
+            await run_in_threadpool(lambda: sum(len(b) for b in speak_pcm("Hello.", s, cfg)))
+        except Exception as e:  # noqa: BLE001 — the first real call will say why
+            logger.warning("ivr prewarm (voice) failed: %s", e)
     t1 = time.time()
     cid, c = call("_prewarm", cfg)
     c["left"] = MAX_MESSAGES_PER_CALL  # a warm-up must never send a message
     try:
-        await reply(cid, c, "Hello?", s, cfg)
+        await _warm_prefix(s, cfg, cid, c)
     except Exception as e:  # noqa: BLE001
         logger.warning("ivr prewarm (model) failed: %s", e)
     finally:

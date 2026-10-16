@@ -18,6 +18,8 @@ import os
 import re
 import threading
 import time
+import urllib.error
+import urllib.request
 import wave
 import logging
 
@@ -664,9 +666,12 @@ def transcribe_detail(data: bytes, cfg: dict) -> dict:
     if provider == "gcloud":
         return {"text": _transcribe_gcloud(pcm, v), "words": [], "provider": "gcloud"}
     if provider == "whisper":
+        remote = _transcribe_whisper_remote(pcm, v)
+        if remote is not None:
+            return {"text": remote[0], "words": remote[1], "provider": "whisper", "where": "remote"}
         try:
             text, words = _transcribe_whisper(pcm, v)
-            return {"text": text, "words": words, "provider": "whisper"}
+            return {"text": text, "words": words, "provider": "whisper", "where": "local"}
         except Exception as e:  # noqa: BLE001 — free Google STT still answers
             import logging
             logging.getLogger("langbang").warning(
@@ -722,6 +727,45 @@ def _whisper_model(v: dict):
                     v.get("whisper_model") or "small",
                     device="cpu", compute_type="int8", cpu_threads=8)
     return _WHISPER
+
+
+# voice.whisper_url: a whisper service on another box (mac-stt on the Mac
+# mini's GPU: ~0.6 s per caller utterance vs 1.5-2.0 s for the in-process
+# CPU model, 2026-10-16). Tried first; any failure falls back to the local
+# model. An unreachable box is skipped for _REMOTE_DOWN_S, then probed again.
+_REMOTE_DOWN_S = 60.0
+_remote_down = 0.0  # when whisper_url was last found unreachable (0 = up)
+
+
+def _transcribe_whisper_remote(pcm: bytes, v: dict) -> tuple[str, list] | None:
+    global _remote_down
+    url = (v.get("whisper_url") or "").rstrip("/")
+    if not url or time.time() - _remote_down < _REMOTE_DOWN_S:
+        return None
+    # a 5-min call leg (ivr_report) takes far longer than a caller's turn:
+    # scale the wait with the audio so a long job isn't mistaken for a dead box
+    timeout = 5.0 + len(pcm) / 32000 * 0.5
+    try:
+        req = urllib.request.Request(url + "/stt", data=pcm,
+                                     headers={"Content-Type": "application/octet-stream"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            d = json.load(r)
+    except (urllib.error.URLError, ConnectionError) as e:
+        if isinstance(e, urllib.error.HTTPError) or "timed out" in str(e):
+            logger.warning("remote whisper at %s failed (%s); using the local model", url, e)
+            return None  # it answered or is busy: not down
+        if not _remote_down:
+            logger.error("remote whisper at %s unreachable (%s); using the local model "
+                         "until it is back", url, e)
+        _remote_down = time.time()
+        return None
+    except (OSError, ValueError) as e:  # read timeout, bad JSON
+        logger.warning("remote whisper at %s failed (%s); using the local model", url, e)
+        return None
+    if _remote_down:
+        logger.warning("remote whisper at %s reachable again", url)
+        _remote_down = 0.0
+    return (d.get("text") or "").strip(), d.get("words") or []
 
 
 def _transcribe_whisper(pcm: bytes, v: dict) -> tuple[str, list]:

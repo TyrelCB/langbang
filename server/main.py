@@ -2132,10 +2132,11 @@ async def ivr_start(request: Request, call_id: str = "", out: str = "wav", rate:
     greet = cfg.get("greeting") or ""
     ivr.audit({"call_id": cid, "event": "start", "ip": request.client.host if request.client else None})
     greeting_audio = await _ivr_say(greet, s, cfg, out, rate) if greet else {}
-    # the greeting bought us a few seconds: re-warm voice+model in the
-    # background so the caller's FIRST spoken turn isn't the cold one
-    # (14 s observed on 2026-10-12/13 first turns despite boot prewarm)
-    asyncio.create_task(ivr.prewarm(s))
+    # the greeting bought us a few seconds: re-warm the model's prompt cache
+    # in the background so the caller's FIRST spoken turn isn't the cold one
+    # (14 s observed on 2026-10-12/13 first turns despite boot prewarm). The
+    # voice is already warm from the greeting just synthesized.
+    asyncio.create_task(ivr.prewarm(s, with_voice=False))
     return {"call_id": cid, "reply": greet, **greeting_audio}
 
 
