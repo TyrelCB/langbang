@@ -102,6 +102,16 @@ const api = {
   async recap(id) {
     return J(await fetch(`/api/threads/${id}/recap`, { method: "POST" }));
   },
+  async pinThread(id, pinned) {
+    return J(await fetch(`/api/threads/${id}/pin`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pinned }),
+    }));
+  },
+  async forkThread(id, point) {
+    return J(await fetch(`/api/threads/${id}/fork`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(point),
+    }));
+  },
   async touchThread(id) { await fetch("/api/threads/" + id + "/touch", { method: "POST" }); },
   async messages(id) { return J(await fetch(`/api/threads/${id}/messages`)); },
   async todos(id) { return J(await fetch(`/api/threads/${id}/todos`)); },
@@ -385,6 +395,8 @@ function addMsg(role, text, images, host) {
     img.src = url;
     m.insertBefore(img, m.firstChild);
   }
+  if (bulkRender && histIdx != null) m.dataset.hidx = histIdx;
+  if (role === "user" && !host) attachFork(m, "user", text);
   (host || $("#chat")).appendChild(m);
   scrollBottom();
   return m;
@@ -510,7 +522,8 @@ function renderHistoryInner(msgs) {
   // chat (even inside a schedule's thread) and ends the segment. Survives
   // compaction — archived heads keep their sched stamps in their JSON.
   let curSched = null;
-  for (const m of msgs) {
+  for (const [i, m] of msgs.entries()) {
+    histIdx = i; // addMsg stamps it: ⑂ then names its exact /messages index
     // one malformed step must never truncate the rest of the transcript —
     // a string where an array was expected used to throw here and the whole
     // chat after it silently disappeared (thread dc17b8aa6519)
@@ -522,6 +535,49 @@ function renderHistoryInner(msgs) {
       b.querySelector("pre").textContent = String(e) + "\n" + JSON.stringify(m).slice(0, 4000);
     }
   }
+  histIdx = null;
+}
+
+// ⑂ FORK — a new thread with this conversation up to this bubble (the
+// source thread is never touched). On an answer: keeps it. On a user
+// message: keeps everything before it and puts its text in the composer
+// (edit-and-resend). The chip lives INSIDE the bubble: #chat children stay
+// 1:1 with messages (search-jump pos mapping, see schedStrip).
+let histIdx = null;
+function attachFork(msg, role, text) {
+  if (msg.querySelector(".fork-btn")) return;
+  const b = el("button", "cb-btn fork-btn", "⑂");
+  b.title = role === "user"
+    ? "Fork: new thread from BEFORE this message, with it in the composer to edit and resend"
+    : "Fork: new thread with the conversation up to here (this one stays as it is)";
+  b.onclick = async (e) => {
+    e.stopPropagation();
+    if (!threadId) return;
+    // only OUR live stream is refused here: serverRuns trails the 4 s
+    // poller, so right after a run ends it still says busy — the server's
+    // 409 is the authority for runs in other tabs / schedules
+    if (RUNS.has(threadId)) {
+      b.classList.add("fail"); b.title = "This thread is running — fork it when the run finishes";
+      SFX.play("error"); return;
+    }
+    SFX.play("click");
+    b.textContent = "…";
+    const at = msg.dataset.hidx != null ? +msg.dataset.hidx : null;
+    let r;
+    try {
+      r = await api.forkThread(threadId, { at, role: role === "user" ? "user" : "ai", text });
+    } catch (err) { r = { detail: String(err) }; }
+    b.textContent = "⑂";
+    if (!r || !r.id) {
+      b.classList.add("fail"); b.title = "Fork failed: " + ((r && r.detail) || "error");
+      SFX.play("error"); return;
+    }
+    await refreshThreads();
+    await openThread(r);
+    if (r.draft) { const inp = $("#input"); inp.value = r.draft; inp.focus(); inp.dispatchEvent(new Event("input")); }
+  };
+  if (role === "user") msg.appendChild(b);
+  else msg.insertBefore(b, msg._speakBtn || null);
 }
 
 // ask_user args as the model sent them — a list, or (parser fallback) a JSON string
@@ -1551,16 +1607,20 @@ async function refreshThreads() {
   }
   renamingTid = null; // the editor is gone (thread deleted / view rebuilt)
   box.innerHTML = "";
+  let pinGroup = false;
   for (const t of threads) {
+    // server sorts pinned rows first; a rule closes the pinned group
+    if (pinGroup && !t.pinned) box.appendChild(el("div", "pin-rule"));
+    pinGroup = !!t.pinned;
     // busy = OUR client has a run in it, or the server says one is in flight
     // (another tab, a phone, or a cron-scheduled run we know nothing about)
     const busy = RUNS.has(t.id) || serverRuns.has(t.id);
     const d = el("div", "thread" + (t.id === threadId ? " active" : "")
-                 + (busy ? " running" : ""));
+                 + (busy ? " running" : "") + (t.pinned ? " pinned" : ""));
     d.dataset.tid = t.id;
     d.appendChild(el("span", "ctx", t.context_tokens != null ? fmtTok(t.context_tokens) : ""));
     const name = el("span", "t-name", t.title);
-    name.title = t.title;
+    name.title = t.title + (t.parent ? `\n⑂ forked from “${t.parent.title}”` : "");
     d.appendChild(name);
     // one-click title ops; ✎ (manual) is handled as inline edit below
     const act = (txt, tip, fn) => {
@@ -1591,6 +1651,15 @@ async function refreshThreads() {
     pen.title = "Rename — Enter saves, Esc cancels";
     pen.onclick = (e) => { e.stopPropagation(); SFX.play("click"); startInlineRename(t, d, name); };
     d.appendChild(pen);
+    const pin = el("span", "a pin" + (t.pinned ? " on" : ""), t.pinned ? "★" : "☆");
+    pin.title = t.pinned ? "Unpin" : "Pin to the top";
+    pin.onclick = async (e) => {
+      e.stopPropagation();
+      SFX.play("click");
+      try { await api.pinThread(t.id, !t.pinned); } catch { SFX.play("error"); }
+      refreshThreads();
+    };
+    d.appendChild(pin);
     const x = el("span", "x", "✕");
     x.title = "Delete thread";
     if (armedTid === t.id) {  // repaint mid-confirm: re-apply the armed look
@@ -2394,6 +2463,7 @@ function attachSpeak(msg, raw) {
   };
   msg._speakBtn = b;
   msg.appendChild(b);
+  attachFork(msg, "ai", raw);
 }
 
 // 🔊 for a ◈ THINKING card: button + mini player ride in the <summary> so

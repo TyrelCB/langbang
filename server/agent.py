@@ -118,9 +118,12 @@ async def init() -> None:
     # ⟲ revert-title restores. Existing DBs predate the column.
     # threads.prompt = per-thread instructions appended to the system prompt
     # threads.model = JSON {provider, model} override of the global default
-    for col in ("orig", "prompt", "model"):
+    # threads.parent = JSON {tid, title} of the thread this one was ⑂ forked from
+    # threads.pinned = pin time (REAL) — pinned rows sort above the rest
+    for col, typ in (("orig", "TEXT"), ("prompt", "TEXT"), ("model", "TEXT"),
+                     ("parent", "TEXT"), ("pinned", "REAL")):
         try:
-            await _db.execute(f"ALTER TABLE threads ADD COLUMN {col} TEXT")
+            await _db.execute(f"ALTER TABLE threads ADD COLUMN {col} {typ}")
         except aiosqlite.OperationalError:  # duplicate column — already migrated
             pass
     await _db.execute("UPDATE threads SET orig=title WHERE orig IS NULL")
@@ -1987,7 +1990,8 @@ async def list_threads() -> list:
     and DB busy exactly when a thread switch needed /messages. Now cached
     per thread, keyed by its newest checkpoint_id (every superstep / compaction
     writes a new one), so only threads that actually changed are recomputed."""
-    cur = await _db.execute("SELECT id,title,created_at,updated_at,orig FROM threads ORDER BY updated_at DESC")
+    cur = await _db.execute("SELECT id,title,created_at,updated_at,orig,pinned,parent FROM threads "
+                            "ORDER BY pinned IS NULL, updated_at DESC")
     rows = await cur.fetchall()
     cur = await _db.execute(
         "SELECT thread_id, MAX(checkpoint_id) FROM checkpoints "
@@ -2010,9 +2014,151 @@ async def list_threads() -> list:
              "context_tokens": base + hit[1], "orig": r[4],
              # cheap content signal the sidebar uses to decide whether the ✕
              # needs a confirm click (see web/app.js refreshThreads)
-             "n_msgs": hit[2], "chars": hit[3]}
+             "n_msgs": hit[2], "chars": hit[3],
+             "pinned": r[5] is not None, "parent": json.loads(r[6]) if r[6] else None}
         )
     return out
+
+
+async def pin_thread(tid: str, pinned: bool) -> bool:
+    """★ pin/unpin. Pinned rows sort first (still newest-first among
+    themselves); False = no such thread."""
+    async with _wt(_db):
+        cur = await _db.execute("UPDATE threads SET pinned=? WHERE id=?",
+                                (time.time() if pinned else None, tid))
+    return cur.rowcount > 0
+
+
+def _dict_transcript(ds: list, budget: int = 60000) -> str:
+    """_transcript for archived message DICTS (the originals are gone), newest
+    kept when over budget — the fork continues from the end, so the end is
+    what the model needs most."""
+    lines = []
+    for d in ds:
+        role = d.get("role")
+        if role == "system" or d.get("compacted"):
+            continue
+        who = {"human": "USER", "ai": "ASSISTANT", "tool": f"TOOL[{d.get('tool_name')}]"}.get(role, role)
+        text = _text_only(d.get("content", "")).strip()
+        calls = "; ".join(f"{tc['name']}({json.dumps(tc.get('args'), ensure_ascii=False)[:300]})"
+                          for tc in d.get("tool_calls") or [])
+        if calls:
+            text = (text + "\n" if text else "") + f"[called {calls}]"
+        lines.append(f"{who}: {text[:1200]}")
+    out, n = [], 0
+    for ln in reversed(lines):
+        n += len(ln) + 2
+        if n > budget:
+            out.append(f"[… {len(lines) - len(out)} earlier messages omitted]")
+            break
+        out.append(ln)
+    return "\n\n".join(reversed(out))
+
+
+def _ui_text(content) -> str:
+    """The text a chat bubble shows (web/app.js textOf) — what a live
+    bubble's ⑂ sends back to be matched."""
+    if isinstance(content, list):
+        return "".join(b if isinstance(b, str) else (b.get("text") or "") if isinstance(b, dict) else ""
+                       for b in content)
+    return content if isinstance(content, str) else json.dumps(content)
+
+
+def _norm(t: str) -> str:
+    return re.sub(r"\s+", " ", t or "").strip()
+
+
+async def fork_thread(tid: str, at: int | None = None, role: str = "", text: str = "") -> dict:
+    """⑂ Fork: a NEW thread holding this one's conversation up to a point;
+    the source is never touched.
+
+    The point is a history() index (`at`, from a bubble rendered out of
+    /messages) or — for a bubble streamed live, which has none — its role +
+    text, matched from the end. On an assistant answer the fork keeps that
+    message (plus its tool results, so no tool call dangles); on a user
+    message it keeps everything BEFORE it and hands the text back for the
+    composer (edit-and-resend).
+
+    State is SEEDED, not copied: raw checkpoint rows are delta-chained and
+    pruned (prune_checkpoints), so the fork gets the live messages as fresh
+    graph input — the same as_node="__start__" append run_user_shell uses.
+    A point inside the compacted region (originals only survive as lossy
+    dicts in archived_messages) seeds a ⟲ summary note built from them."""
+    cur = await _db.execute("SELECT title,prompt,model FROM threads WHERE id=?", (tid,))
+    row = await cur.fetchone()
+    if row is None:
+        raise LookupError("no such thread")
+    cur = await _db.execute("SELECT msg FROM archived_messages WHERE thread_id=? ORDER BY seq", (tid,))
+    arch_raw = [r[0] for r in await cur.fetchall()]
+    arch = [json.loads(m) for m in arch_raw]
+    live = await _live_messages(tid)
+    hist = arch + [_msg_dict(m) for m in live]  # index-aligned with history()
+
+    want = "human" if role == "user" else role
+    def hit(i):
+        d = hist[i]
+        return (d.get("role") == want and not d.get("compacted") and not d.get("shell")
+                and _norm(_ui_text(d.get("content", ""))) == _norm(text))
+    if at is not None and 0 <= at < len(hist) and (not text or hit(at)):
+        i = at
+    elif text and want in ("human", "ai"):
+        i = next((j for j in range(len(hist) - 1, -1, -1) if hit(j)), None)
+        if i is None:
+            raise ValueError("couldn't find that message in the thread any more")
+    else:
+        raise ValueError("bad fork point")
+    kind = hist[i].get("role")
+    if kind == "human":
+        cut, carry = i, _ui_text(hist[i].get("content", ""))
+    elif kind == "ai":
+        cut, carry = i + 1, ""
+        while cut < len(hist) and hist[cut].get("role") == "tool":
+            cut += 1
+    else:
+        raise ValueError("fork from a user message or an answer")
+
+    na = len(arch)
+    if cut > na:
+        keep_arch, seed = arch_raw, live[: cut - na]
+    else:
+        keep_arch = arch_raw[:cut]
+        seed = [HumanMessage(
+            content="Summary of the conversation so far (forked from an earlier thread; "
+                    "the full transcript stays visible above):\n\n" + _dict_transcript(arch[:cut]),
+            additional_kwargs={"lb_compacted": {"count": cut, "forked": True}})] if cut else []
+    # todos AT the fork point: the last write_todos inside the kept span
+    # (the channel itself only holds the newest list)
+    todos = None
+    if cut == len(hist):
+        todos = await current_todos(tid)
+    else:
+        for m in reversed(seed):
+            for tc in reversed(getattr(m, "tool_calls", None) or []):
+                if tc["name"] == "write_todos" and isinstance(tc.get("args", {}).get("todos"), list):
+                    todos = tc["args"]["todos"]
+                    break
+            if todos is not None:
+                break
+
+    new = uuid.uuid4().hex[:12]
+    title = ("⑂ " + (row[0] or "chat").removeprefix("⑂ "))[:80]
+    now = time.time()
+    async with _wt(_db):
+        await _db.execute(
+            "INSERT INTO threads(id,title,created_at,updated_at,orig,prompt,model,parent) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (new, title, now, now, title, row[1], row[2],
+             json.dumps({"tid": tid, "title": row[0], "at": i}, ensure_ascii=False)))
+        for m in keep_arch:
+            await _db.execute("INSERT INTO archived_messages(thread_id,msg) VALUES(?,?)", (new, m))
+    if seed or todos:
+        upd = {"messages": seed}
+        if todos:
+            upd["todos"] = todos
+        g = await _read_agent()
+        await g.aupdate_state({"configurable": {"thread_id": new}}, upd, as_node="__start__")
+    return {"id": new, "title": title, "created_at": now, "updated_at": now,
+            "draft": carry, "kept": cut, "of": len(hist)}
 
 
 async def search_text(m: dict) -> str:

@@ -57,6 +57,9 @@ button, .thread .a, .thread .x { touch-action: manipulation; }
 .thread .a { color: var(--muted); padding-left: 6px; }
 .thread .a:hover { color: var(--cyan); }
 .thread .a.fail { color: var(--danger); }
+/* ★ pinned: the star stays visible (hover-only for ☆) */
+.thread .a.pin.on { display: inline-block; color: var(--orange); }
+.pin-rule { flex-shrink: 0; height: 0; border-top: 1px dashed var(--cyan-dim); margin: 2px 4px; }
 /* row actions only exist on hover — four always-on glyphs left ~4 chars
    of title in a 240 px bar. (JS .click() still fires while display:none,
    so the CDP suites are unaffected.) */
@@ -547,6 +550,12 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
 #btn-voice.on { color: var(--cyan); border-color: var(--cyan-dim); }
 /* sits below the message body, reuses .cb-btn chip chrome */
 .speak-btn { display: block; margin-top: 6px; }
+/* ⑂ fork chip: beside 🔊 on answers, at the foot of user bubbles */
+.fork-btn { display: inline-block; margin: 6px 6px 0 0; font-size: 14px; line-height: 1; padding: 2px 7px; }
+.msg.assistant .fork-btn + .speak-btn { display: inline-block; }
+.fork-btn.fail { color: var(--danger); border-color: var(--danger); }
+.msg.user .fork-btn { display: block; margin: 6px 0 0 auto; opacity: .55; }
+.msg.user:hover .fork-btn, .fork-btn:focus { opacity: 1; }
 .speak-btn.on { color: var(--cyan); border-color: var(--cyan); }
 /* per-bubble TTS mini player — inside .msg (chat child-index invariant) */
 .tts-player { display: flex; align-items: center; gap: 5px; margin-top: 6px; }
