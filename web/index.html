@@ -57,6 +57,13 @@
       <button id="btn-update-later" class="btn ghost sm">LATER</button>
     </div>
     <div id="chat"></div>
+    <!-- NEW CHAT screen: splash + status overview. A SIBLING after #chat (never
+         inside — search-jump keys off #chat child indices); CSS shows it only
+         while a draft's #chat is empty and visible -->
+    <div id="welcome">
+      <div id="wl-splash"></div>
+      <div id="wl-info"></div>
+    </div>
     <!-- trajectory + todo panel are SIBLINGS of #chat: search-jump keys off
          #chat child indices and server pos-counting, so nothing may nest in there -->
     <div id="trajectory" class="hidden">

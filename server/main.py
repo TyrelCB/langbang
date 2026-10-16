@@ -100,6 +100,12 @@ async def health():
     }
 
 
+@app.get("/api/overview")
+async def overview():
+    """NEW CHAT status panel: tools, MCP servers, skills the next run gets."""
+    return await agent.overview()
+
+
 @app.get("/api/settings")
 async def get_settings():
     return config.load()

@@ -1673,6 +1673,77 @@ async def build_agent(s: dict, checkpointer=None, thread_prompt: str = ""):
     )
 
 
+_overview_cache: tuple = (0.0, None, None)
+
+
+async def overview() -> dict:
+    """NEW CHAT status panel (Hermes-banner style): what the agent would
+    actually get on its next run. Tool names come from a real build_agent
+    graph (its ToolNode), so harness tools, CONFIG toggles and MCP health
+    are all reflected rather than re-derived. Cached 20 s per settings."""
+    global _overview_cache
+    s = config.load()
+    key = json.dumps(s, sort_keys=True, default=str)
+    if _overview_cache[1] == key and time.time() - _overview_cache[0] < 20:
+        return _overview_cache[2]
+    g = await build_agent(s)
+    names = set(getattr(g.nodes["tools"].bound, "tools_by_name", {}) or {}) - {"execute"}  # hidden: see register_harness_profile
+    servers = s.get("mcp_servers") or {}
+    mcp_names = {n for v in mcp.by_server.values() for n in v}
+    local_all = [t.name for t in local_tools.LOCAL_TOOLS]
+    enabled = s.get("local_tools") or {}
+    memory = {t.name for t in learning.MEMORY_TOOLS}
+    tools = [
+        {"group": "local", "on": [n for n in local_all if n in names],
+         "off": [n for n in local_all if not enabled.get(n, True)]},
+        {"group": "agent harness", "on": sorted(names - set(local_all) - mcp_names - memory), "off": []},
+        {"group": "memory", "on": sorted(names & memory), "off": []},
+    ]
+    mcps = []
+    for name, cfg in servers.items():
+        st = ("off" if cfg.get("disabled") else "error" if name in mcp.last_errors
+              else "ok" if name in mcp.by_server else "unloaded")
+        mcps.append({"name": name, "state": st, "transport": cfg.get("transport") or "",
+                     "tools": mcp.by_server.get(name, []) if st == "ok" else [],
+                     "error": mcp.last_errors.get(name)})
+    skills: dict[str, dict] = {}
+    if s.get("skills_enabled", True):
+        hermes_root = os.path.realpath(os.path.expanduser(s.get("skills_hermes_dir") or "~/.hermes/skills"))
+        for src, label in _skill_sources(s):
+            cat = ("langbang" if label == "Langbang"
+                   else "hermes" if os.path.realpath(src) == hermes_root
+                   else "hermes/" + os.path.basename(src))
+            try:
+                dirs = sorted(os.listdir(src))
+            except OSError:
+                continue
+            for d in dirs:
+                p = os.path.join(src, d, "SKILL.md")
+                if d.startswith(".") or not os.path.isfile(p):
+                    continue
+                try:
+                    meta = learning.parse_frontmatter(open(p, encoding="utf-8").read())[0] or {}
+                except OSError:
+                    meta = {}
+                # same name later = override (last source wins, as in the middleware)
+                skills[d] = {"name": d, "cat": cat, "desc": str(meta.get("description") or "")[:240]}
+    cats: dict[str, list] = {}
+    for sk in skills.values():
+        cats.setdefault(sk["cat"], []).append({"name": sk["name"], "desc": sk["desc"]})
+    out = {
+        "model": s.get("model"), "provider": s.get("provider"),
+        "deep_agent": bool(s.get("deep_agent", True)),
+        "tools": tools, "tool_count": len(names),
+        "mcp": mcps,
+        "skills": [{"cat": c, "items": sorted(v, key=lambda x: x["name"])}
+                   for c, v in sorted(cats.items(), key=lambda kv: (kv[0] != "langbang", kv[0]))],
+        "skill_count": len(skills),
+        "memories": len(learning.list_memories(s)) if s.get("memory_enabled", True) else None,
+    }
+    _overview_cache = (time.time(), key, out)
+    return out
+
+
 def _msg_dict(m) -> dict:
     d = {"role": m.type, "content": m.content}
     if isinstance(m, AIMessage) and m.tool_calls:
