@@ -629,6 +629,14 @@ def prewarm(cfg: dict) -> None:
     Qwen: warm the remote service (it lazy-loads the model per voice type;
     a cold clone request runs ~30 s)."""
     v = _voice_cfg(cfg)
+    if v.get("stt_provider") == "whisper":
+        # load + one pass, else the first caller's first turn pays it (8.3 s
+        # STT on call ccb9b75b8a73, the first after a restart)
+        try:
+            _transcribe_whisper(b"\0" * 32000, v)
+        except Exception as e:  # noqa: BLE001 - surfaced again on first real use
+            import logging
+            logging.getLogger("langbang.voice").warning("whisper prewarm failed: %s", e)
     provider = v.get("tts_provider") or "gtts"
     try:
         if provider == "pocket":

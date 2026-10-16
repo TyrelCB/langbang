@@ -38,6 +38,7 @@ import time
 import uuid
 import wave
 
+import httpx
 import openai
 from fastapi.concurrency import run_in_threadpool
 from langchain.agents import create_agent
@@ -441,21 +442,38 @@ def _conns(s: dict, cfg: dict) -> list[dict]:
     pname = cfg.get("provider") or ""
     if pname and pname in (s.get("providers") or {}):
         own = config.effective(s, {"provider": pname, "model": cfg.get("model") or ""})
-        return [own, main] if own["base_url"] != main["base_url"] else [own]
+        if own["base_url"] == main["base_url"]:
+            return [own]
+        if time.time() - _down.get(own["base_url"], -_DOWN_S) < _DOWN_S:
+            return [main]  # found dead moments ago: don't pay to rediscover it every turn
+        return [{**own, "fast_fail": True}, main]
     if pname:
         logger.warning("ivr.provider %r not in providers; using the chat default", pname)
     return [main]
 
 
 _UNREACHABLE = (openai.APIConnectionError, openai.APITimeoutError)
+# an unreachable IVR box is skipped for this long, then probed again. Each
+# probe fails fast (no retry, 2 s connect timeout): the Mac mini sitting at
+# the login window after a reboot cost ~1.5 s of retry on every turn of
+# calls ccb9b75b8a73/1ce80a04f8af (2026-10-16) before the fallback answered
+_DOWN_S = 60.0
+_down: dict[str, float] = {}  # base_url -> when it was last found unreachable
 
 
 def _llm(conn: dict, cfg: dict, extra_body: dict | None, streaming: bool):
     return agent.SGlangChatOpenAI(
         model=conn["model"], base_url=conn["base_url"], api_key=conn["api_key"],
         temperature=conn.get("temperature", 0.7), max_tokens=int(cfg.get("max_tokens") or 600),
-        timeout=float(cfg.get("llm_timeout_s") or 30), max_retries=1,
+        timeout=(httpx.Timeout(float(cfg.get("llm_timeout_s") or 30), connect=2.0)
+                 if conn.get("fast_fail") else float(cfg.get("llm_timeout_s") or 30)),
+        max_retries=0 if conn.get("fast_fail") else 1,
         streaming=streaming, extra_body=extra_body)
+
+
+def _recovered(conn: dict) -> None:
+    if _down.pop(conn["base_url"], None) is not None:
+        logger.warning("IVR model at %s reachable again", conn["base_url"])
 
 
 def _retryable(e: Exception, conn: dict, eb: dict | None) -> Exception:
@@ -465,7 +483,10 @@ def _retryable(e: Exception, conn: dict, eb: dict | None) -> Exception:
         logger.warning("%s rejected %s; IVR trying the next thinking switch",
                        conn["base_url"], ", ".join(eb))
     elif isinstance(e, _UNREACHABLE):
-        logger.warning("IVR model at %s unreachable (%s); falling back", conn["base_url"], e)
+        if conn["base_url"] not in _down:  # loud once per outage, then quiet until it recovers
+            logger.error("IVR model at %s unreachable (%s); calls fall back to the chat "
+                         "model (slower) until it is back", conn["base_url"], e)
+        _down[conn["base_url"]] = time.time()
     else:
         raise e
     e.base_url = conn["base_url"]
@@ -499,6 +520,7 @@ async def reply(cid: str, c: dict, said: str, s: dict, cfg: dict) -> dict:
                     {"messages": [*hist, HumanMessage(said)]},
                     {"recursion_limit": 2 * int(cfg.get("max_steps") or 6) + 2})
                 _accepts[conn["base_url"]] = j
+                _recovered(conn)
                 break
             except Exception as e:  # noqa: BLE001 — sorted below
                 err = _retryable(e, conn, eb)
@@ -671,6 +693,7 @@ async def reply_stream(cid: str, c: dict, said: str, s: dict, cfg: dict, ctl: di
                     parts.append(t)
                     yield ("text", t)
                 _accepts[conn["base_url"]] = j
+                _recovered(conn)
                 break
             except Exception as e:  # noqa: BLE001 — sorted below
                 if parts or len(final) > len(hist) + 1:
