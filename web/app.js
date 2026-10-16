@@ -2989,6 +2989,7 @@ async function saveSettings() {
     },
   });
   applySplash($("#set-splash_image").value.trim());
+  if (!threadId) loadOverview(true); // tool toggles / MCP / skills may have changed
   // runs read speak_reasoning (and the HUD spoken_hud) from loadedVoice — take the saved values now
   loadedVoice = { ...loadedVoice, speak_reasoning: $("#set-voice-speak_reasoning").value || "off",
     spoken_hud: $("#set-voice-spoken_hud").value || "on" };
@@ -6860,13 +6861,114 @@ api.settings().then((s) => {
 
 // NEW CHAT splash: CSS paints /api/splash behind an EMPTY #chat (a ::before,
 // so no node lands in #chat), only on a draft — never while a thread loads
-function syncDraft() { document.body.classList.toggle("draft", !threadId); }
+function syncDraft() {
+  document.body.classList.toggle("draft", !threadId);
+  if (!threadId) loadOverview();
+}
 // boot: a ?thread= link is about to open a thread — don't flash the splash first
 let splashVer = 0;
 function applySplash(path) {
-  document.body.classList.toggle("has-splash", !!(path || "").trim());
+  path = (path || "").trim();
+  document.body.classList.toggle("has-splash", !!path);
   // cache-bust on change: same URL, different file
-  document.documentElement.style.setProperty("--splash", `url("/api/splash?v=${++splashVer}")`);
+  const url = `/api/splash?v=${++splashVer}`;
+  document.documentElement.style.setProperty("--splash", `url("${url}")`);
+  // a video splash can't be a CSS background — it gets a muted looping <video>
+  const box = $("#wl-splash"), vid = /\.(mp4|webm|mov|m4v)$/i.test(path);
+  box.classList.toggle("vid", vid);
+  box.innerHTML = "";
+  if (vid) {
+    const v = el("video");
+    Object.assign(v, { src: url, muted: true, loop: true, autoplay: true, playsInline: true });
+    box.appendChild(v);
+  }
+}
+
+// NEW CHAT status overview (Hermes-banner style): the tools, MCP servers and
+// skills the NEXT run would get, from /api/overview (a real agent build).
+let ovAt = 0;
+async function loadOverview(force) {
+  if (!force && Date.now() - ovAt < 15000) return;
+  ovAt = Date.now();
+  let o;
+  try { o = await J(await fetch("/api/overview")); } catch { ovAt = 0; return; }
+  if (threadId) return; // a thread opened meanwhile — the panel is hidden anyway
+  renderOverview(o);
+}
+function renderOverview(o) {
+  const box = $("#wl-info");
+  box.innerHTML = "";
+  const head = el("div", "wl-head");
+  head.appendChild(el("span", null, "◉ LANGBANG READY"));
+  head.appendChild(el("span", "wl-model", `${o.model || "?"}${o.provider ? " · " + o.provider : ""}`));
+  box.appendChild(head);
+  const sec = (title) => {
+    const s = el("div", "wl-sec");
+    s.appendChild(el("h4", null, title));
+    box.appendChild(s);
+    return s;
+  };
+  const row = (host, k, fill, clamp) => {
+    const r = el("div", "wl-row");
+    const kk = el("span", "wl-k");
+    if (typeof k === "string") kk.textContent = k; else kk.appendChild(k);
+    kk.title = kk.textContent;
+    const v = el("span", "wl-v" + (clamp ? " clamp" : ""));
+    fill(v);
+    if (clamp) v.onclick = () => v.classList.toggle("open");
+    r.append(kk, v);
+    host.appendChild(r);
+  };
+  const names = (v, list, cls, tip) => list.forEach((n, i) => {
+    if (i) v.appendChild(document.createTextNode(", "));
+    const s = el("span", cls || null, typeof n === "string" ? n : n.name);
+    if (tip && n.desc) s.title = n.desc;
+    v.appendChild(s);
+  });
+  const t = sec(`AVAILABLE TOOLS · ${o.tool_count}`);
+  for (const g of o.tools) {
+    if (!g.on.length && !g.off.length) continue;
+    row(t, g.group, (v) => {
+      names(v, g.on);
+      if (g.off.length) { if (g.on.length) v.appendChild(document.createTextNode(", ")); names(v, g.off, "off"); }
+    }, true);
+  }
+  if (o.mcp.length) {
+    const live = o.mcp.filter((m) => m.state === "ok").length;
+    const m = sec(`MCP SERVERS · ${live}/${o.mcp.length}`);
+    for (const s of o.mcp) {
+      const k = el("span");
+      k.appendChild(el("span", "wl-dot " + s.state, "●"));
+      k.appendChild(document.createTextNode(s.name));
+      row(m, k, (v) => {
+        if (s.state === "ok") { v.appendChild(el("b", null, `${s.tools.length} tools: `)); names(v, s.tools); }
+        else if (s.state === "error") v.appendChild(el("span", "wl-err", s.error || "failed to load"));
+        else v.appendChild(el("span", "off", s.state === "off" ? "disabled" : "not loaded yet"));
+      }, s.state === "ok");
+    }
+  }
+  if (o.skill_count) {
+    // LangBang's own dir first; Hermes's tree is read-only, keyed by category
+    const own = o.skills.filter((c) => c.cat === "langbang");
+    const herm = o.skills.filter((c) => c.cat !== "langbang");
+    const n = (cs) => cs.reduce((a, c) => a + c.items.length, 0);
+    if (own.length) {
+      const k = sec(`SKILLS · LANGBANG · ${n(own)}`);
+      row(k, "all", (v) => names(v, own[0].items, "sk", true), true);
+    }
+    if (herm.length) {
+      const k = sec(`SKILLS · HERMES (read-only) · ${n(herm)}`);
+      for (const c of herm) {
+        const cat = c.cat === "hermes" ? "uncategorized" : c.cat.replace(/^hermes\//, "");
+        row(k, `${cat} ${c.items.length}`, (v) => names(v, c.items, "sk", true), true);
+      }
+    }
+  }
+  const foot = [];
+  if (o.memories != null) foot.push(`${o.memories} memories`);
+  foot.push(o.deep_agent ? "deep agent" : "react agent");
+  foot.push("click a list to expand · hover a skill for its description");
+  box.appendChild(el("div", "wl-foot", foot.join(" · ")));
 }
 if (!new URLSearchParams(location.search).get("thread")) syncDraft();
 

@@ -971,14 +971,48 @@ details.block.tool.retried > summary { color: var(--orange); }
 .block summary .block-voice .speak-btn { display: inline-block; margin: 0; padding: 0 6px; }
 .block summary .block-voice .tts-player { margin: 0; min-width: 220px; }
 
-/* NEW CHAT splash (CONFIG → APPEARANCE): screen-blend drops the image's
-   black backdrop into the HUD background; light theme shows it as-is */
-body.draft.has-splash #chat:empty::before {
-  content: ""; flex: 1; width: 100%; max-height: 720px; margin: auto 0;
-  background: var(--splash) center / contain no-repeat;
-  mix-blend-mode: screen; pointer-events: none;
+/* NEW CHAT screen = #welcome (splash + status overview), shown in place of
+   an empty draft #chat. Splash (CONFIG → APPEARANCE): screen-blend drops the
+   image's black backdrop into the HUD background; light theme shows it as-is */
+#welcome { display: none; }
+body.draft #chat:empty:not(.hidden) { flex: 0 0 0; padding: 0; overflow: hidden; }
+body.draft #chat:empty:not(.hidden) ~ #welcome {
+  display: flex; flex: 1; min-height: 0; gap: 24px; padding: 16px 24px; align-items: center;
 }
-html[data-theme="light"] body.draft.has-splash #chat:empty::before { mix-blend-mode: normal; }
+#wl-splash { display: none; flex: 1 1 45%; min-width: 0; height: 100%; max-height: 720px;
+  background: var(--splash) center / contain no-repeat; mix-blend-mode: screen; pointer-events: none; }
+body.has-splash #wl-splash { display: block; }
+#wl-splash.vid { background: none; }
+#wl-splash video { width: 100%; height: 100%; object-fit: contain; display: block; }
+html[data-theme="light"] #wl-splash { mix-blend-mode: normal; }
+#wl-info { flex: 1 1 55%; min-width: 0; max-width: 760px; max-height: 100%; overflow-y: auto;
+  margin: 0 auto; padding: 14px 18px; font-size: 12px; line-height: 1.55;
+  background: var(--panel); border: 1px solid var(--line); clip-path: var(--clip); }
+#wl-info:empty { display: none; }
+.wl-head { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline;
+  color: var(--cyan); letter-spacing: 2px; font-weight: 700; margin-bottom: 6px; }
+.wl-head .wl-model { color: var(--orange); letter-spacing: 1px; font-weight: 400; overflow-wrap: anywhere; }
+.wl-sec { margin-top: 10px; }
+.wl-sec > h4 { margin: 0 0 4px; font-size: 11px; letter-spacing: 2px; color: var(--muted); font-weight: 600;
+  border-bottom: 1px dashed var(--line); padding-bottom: 2px; }
+.wl-row { display: flex; gap: 10px; align-items: baseline; }
+.wl-row > .wl-k { flex: 0 0 22ch; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wl-row > .wl-v { flex: 1; min-width: 0; color: var(--cyan-dim); overflow-wrap: anywhere; }
+.wl-v.clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
+.wl-v.clamp.open { display: block; }
+.wl-v .off { color: var(--muted); text-decoration: line-through; }
+.wl-v .sk { cursor: help; }
+.wl-dot { font-size: 9px; margin-right: 6px; }
+.wl-dot.ok { color: var(--green); } .wl-dot.error { color: var(--danger); }
+.wl-dot.off, .wl-dot.unloaded { color: var(--muted); }
+.wl-err { color: var(--danger); }
+.wl-foot { margin-top: 10px; color: var(--muted); letter-spacing: 1px; }
+@media (max-width: 900px) {
+  body.draft #chat:empty:not(.hidden) ~ #welcome { flex-direction: column; align-items: stretch; gap: 10px; padding: 10px 16px; overflow-y: auto; }
+  #wl-splash { flex: 0 0 30vh; height: 30vh; }
+  #wl-info { max-height: none; overflow: visible; max-width: none; flex: 0 0 auto; }
+  .wl-row > .wl-k { flex-basis: 11ch; }
+}
 
 /* 🎙 MIC: red while recording, fill tracks the input level (--lvl 0..1) */
 #btn-mic.on { color: var(--danger); border-color: var(--danger);

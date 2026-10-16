@@ -26,6 +26,7 @@ _tools: list = []
 _tools_lock = asyncio.Lock()
 _fingerprint = None
 last_errors: dict[str, str] = {}  # server -> why its tools are missing right now
+by_server: dict[str, list[str]] = {}  # server -> tool names from the last load (NEW CHAT overview)
 
 
 def _fingerprint_of(servers: dict):
@@ -74,6 +75,7 @@ async def get_tools(servers: dict) -> list:
             return _tools
         tools: list = []
         last_errors.clear()
+        by_server.clear()
         client = MultiServerMCPClient({n: _client_cfg(c) for n, c in servers.items()}) if servers else None
         for name, cfg in servers.items():
             try:
@@ -83,6 +85,7 @@ async def get_tools(servers: dict) -> list:
                                      if isinstance(e, asyncio.TimeoutError) else _root(e))
                 logger.warning("MCP server %r skipped this run: %s", name, last_errors[name])
                 continue
+            by_server[name] = [t.name for t in got]
             secs = float(cfg.get("call_timeout") or CALL_TIMEOUT)
             tools += [_with_timeout(t, name, secs) for t in got]
         _tools = tools
