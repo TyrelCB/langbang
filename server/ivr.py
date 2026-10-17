@@ -46,13 +46,13 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Sys
 from langchain_core.tools import tool
 
 from . import agent, config, local_tools, mcp, notify, voice
+from .ivr_core import PINNED_MSGS, THINKING_OFF, Sentences, rejected, variants, window  # noqa: F401
 
 logger = logging.getLogger("langbang.ivr")
 
 TOKEN_PATH = os.path.join(config.DATA_DIR, "keys", "ivr_token")
 LOG_DIR = os.path.join(config.DATA_DIR, "ivr")
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
-PINNED_MSGS = 4  # a call's first two exchanges (who's calling, and why) always stay
 MAX_MESSAGES_PER_CALL = 3  # take_message sends per call
 MAX_KNOWLEDGE_CHARS = 40_000  # reference document cap (~10k tokens)
 
@@ -150,26 +150,10 @@ def hangup(cid: str) -> bool:
 
 
 def history(c: dict, cfg: dict) -> list:
-    """The call's history sent to the model: all of it while it fits
-    ivr.max_history messages, then the opening exchanges (PINNED_MSGS — the
-    caller's name and reason usually come first) plus the most recent ones.
-    Spoken exchanges are short (~25 tokens a message), so the default 160
-    holds a 30+ minute call in ~4k tokens. Also trims what's kept in RAM.
-
-    Trimmed in chunks, not one exchange per turn: dropping the oldest
-    unpinned exchange changes the prompt right after the opening, so the
-    backend's prefix cache misses and re-prefills the whole history — every
-    turn (measured on the Mac mini: turns 81+ of a call went 1.3 s → 6.5 s).
-    Cutting a quarter of the window at once pays that once per ~20 turns."""
-    cap = max(PINNED_MSGS + 2, int(cfg.get("max_history") or 160))
-    cap -= cap % 2  # whole exchanges: the kept tail must start on a caller turn
-    msgs = c["msgs"]
-    if len(msgs) > cap:
-        slack = max(2, cap // 4)
-        slack -= slack % 2
-        keep = max(2, cap - slack - PINNED_MSGS)
-        msgs = c["msgs"] = msgs[:PINNED_MSGS] + msgs[-keep:]
-    return list(msgs)
+    """The call's history sent to the model (ivr_core.window); also trims
+    what's kept in RAM."""
+    c["msgs"] = window(c["msgs"], cfg)
+    return list(c["msgs"])
 
 
 def _slot(cfg: dict) -> asyncio.Semaphore:
@@ -410,27 +394,15 @@ def _text(content) -> str:
     return "".join(b.get("text", "") for b in content or [] if isinstance(b, dict))
 
 
-# thinking OFF regardless of the provider's template_kwargs checkbox (Qwen
-# hybrids think by default when the switch isn't sent — minutes of dead air
-# on a phone line). Backends disagree on the switch: sglang/vLLM read
-# chat_template_kwargs; Ollama's /v1 ignores that (and its own "think":false
-# once tools are in the request) and honours only reasoning_effort "none",
-# which vLLM 400s on. So try both, then each alone-ish, then nothing, and
-# remember per backend what it accepted — the 400 round trip is paid once.
-_TPL_OFF = {"chat_template_kwargs": {"enable_thinking": False}}
-_THINKING_OFF = ({**_TPL_OFF, "reasoning_effort": "none"}, _TPL_OFF, None)
-_accepts: dict[str, int] = {}  # base_url → index into _THINKING_OFF that worked
+_accepts: dict[str, int] = {}  # base_url → index into THINKING_OFF that worked
 
 
 def _variants(conn: dict):
-    i = _accepts.get(conn["base_url"], 0)
-    return [(j, _THINKING_OFF[j]) for j in range(i, len(_THINKING_OFF))]
+    return variants(_accepts, conn["base_url"])
 
 
 def _rejected(e: Exception, eb: dict | None) -> bool:
-    """A 400 about one of the thinking switches (→ try the next variant)."""
-    return eb is not None and isinstance(e, openai.BadRequestError) and \
-        any(k in str(e) for k in eb)
+    return rejected(e, eb)
 
 
 def _conns(s: dict, cfg: dict) -> list[dict]:
@@ -630,51 +602,6 @@ def speak_pcm(text: str, s: dict, cfg: dict, stop: threading.Event | None = None
     else:
         audio, _ = voice.synthesize(clean, {**s, "voice": v})
         yield _ffmpeg(audio, [], ["-f", "s16le", "-ar", str(STREAM_RATE), "-ac", "1"])
-
-
-class Sentences:
-    """Cut streamed model text into speakable sentences. A sentence ends at
-    . ! ? (plus closing quotes/brackets) followed by whitespace, or at a
-    newline; "3.5" and "e.g." mid-word never split because the next char
-    isn't whitespace. Fragments shorter than `min_chars` wait for more text
-    so Pocket isn't handed "Sure." and "Okay." as separate chunks.
-
-    Until the first piece is out, a clause ending in , ; : also counts once
-    it is `first_clause` chars long: the caller hears audio as soon as there
-    is a natural pause to cut at, not after a long first sentence."""
-    _END = re.compile(r"[.!?]+[\"')\]]*\s+|\n+")
-    _CLAUSE = re.compile(r"[.!?,;:]+[\"')\]]*\s+|\n+")
-    _ABBREV = re.compile(r"(?:\b(?:e\.g|i\.e|etc|vs|Mr|Mrs|Ms|Dr|St|Jr|Sr|Inc|Co|No)|\b[A-Z])\.$")
-
-    def __init__(self, min_chars: int = 12, first_clause: int = 40):
-        self.buf, self.min, self.first, self.started = "", min_chars, first_clause, False
-
-    def feed(self, text: str) -> list[str]:
-        self.buf += text
-        out, start = [], 0
-        if not self.started:
-            for m in self._CLAUSE.finditer(self.buf):
-                piece = self.buf[:m.end()].strip()
-                if self._ABBREV.search(piece):
-                    continue
-                ends_sentence = bool(self._END.fullmatch(m.group()))
-                if len(piece) >= (self.min if ends_sentence else self.first):
-                    out.append(piece)
-                    start = m.end()
-                    self.started = True
-                    break
-        for m in self._END.finditer(self.buf, start):
-            piece = self.buf[start:m.end()].strip()
-            if len(piece) >= self.min and not self._ABBREV.search(piece):
-                out.append(piece)
-                start = m.end()
-        self.buf = self.buf[start:]
-        return out
-
-    def flush(self) -> list[str]:
-        rest, self.buf = self.buf.strip(), ""
-        self.started = True
-        return [rest] if rest else []
 
 
 async def reply_stream(cid: str, c: dict, said: str, s: dict, cfg: dict, ctl: dict | None = None):
