@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 from . import agent, audioart, backup, comfy, config, decide, fileassist, ivr, learning, mcp, notify, rag, runs, schedule, sfxgen, term, ttsjobs, voice
+from .ivr_hub import router as ivr_hub_router
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -2248,6 +2249,10 @@ async def ivr_hangup(request: Request, call_id: str = ""):
         raise HTTPException(400, "call_id required (?call_id= or JSON body)")
     ivr.audit({"call_id": call_id, "event": "hangup"})
     return {"ok": ivr.hangup(call_id)}
+
+
+# federated IVR nodes (server/ivr_hub.py): config pull, voice, call-log push
+app.include_router(ivr_hub_router)
 
 
 # ---- web UI ----
