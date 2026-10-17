@@ -1280,6 +1280,23 @@ class _FileArgAlias(AgentMiddleware):
                 res = res.model_copy(update={"content": f"{_text_only(res.content)}\n\n{warn}"})
         return res
 
+class _PrefetchNote(AgentMiddleware):
+    """Show the model each human turn's auto-search hits (server/prefetch.py).
+    They live in the message's `lb_prefetch` kwarg and are rendered into the
+    call-local copy only, so the stored message and its chat bubble stay as
+    typed — and since every past turn renders identically on every call, the
+    prompt prefix cache survives."""
+
+    async def awrap_model_call(self, request, handler):  # noqa: ANN001
+        from . import prefetch
+        msgs, hit = [], False
+        for m in request.messages:
+            if isinstance(m, HumanMessage) and (m.additional_kwargs or {}).get("lb_prefetch"):
+                m, hit = prefetch.render(m), True
+            msgs.append(m)
+        return await handler(request.override(messages=msgs) if hit else request)
+
+
 class _MediaReadGuard(AgentMiddleware):
     """Keep binary media that read_file returns out of the model's context.
 
@@ -1685,6 +1702,7 @@ async def build_agent(s: dict, checkpointer=None, thread_prompt: str = ""):
         mw.append(_TodoReconcile())  # deterministic finish-line gate
         mw.append(_FileArgAlias())  # repair path->file_path arg drift pre-validation
         mw.append(_MediaReadGuard())  # audio/video base64 never reaches the model
+        mw.append(_PrefetchNote())  # auto-search hints on human turns (prefetch.py)
         mw.append(_HumanGate())  # ask_user / plan mode (interrupt-based gates)
         perms = []
         if s.get("skills_enabled", True):
@@ -1812,6 +1830,9 @@ def _msg_dict(m) -> dict:
     sched = (m.additional_kwargs or {}).get("lb_sched")
     if sched:
         d["sched"] = sched  # UI stamps the bubble ⏰ SCHEDULED RUN (see schedule._fire)
+    pf = (m.additional_kwargs or {}).get("lb_prefetch")
+    if pf:
+        d["prefetch"] = {k: v for k, v in pf.items() if k != "note"}  # ⌕ AUTO-SEARCH strip
     return d
 
 
@@ -1912,6 +1933,21 @@ async def history(thread_id: str) -> list:
 
 
 # ---- run trajectory (agentic visibility) ----
+
+async def _prior_user_text(thread_id: str) -> str:
+    """The thread's previous user message (from the trajectory log: one
+    indexed row, no checkpoint replay). '' when none or on any error."""
+    try:
+        cur = await _edb.execute(
+            "SELECT meta FROM run_events WHERE thread_id=? AND type='user' "
+            "ORDER BY seq DESC LIMIT 1", (thread_id,))
+        row = await cur.fetchone()
+        await cur.close()
+        m = json.loads(row[0]) if row and row[0] else {}
+        return "" if m.get("gate") else str(m.get("text") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
 
 async def _log(
     thread_id: str,
@@ -2524,6 +2560,12 @@ async def run_chat(
     t_run0 = time.time()
     try:
         await _touch(thread_id, user_text or "[image]")
+        pf_task = None
+        if not resume and user_text and bool(s.get("deep_agent", True)):
+            from . import prefetch
+            # started before build_agent (MCP tool load) so its ~0.3-0.7 s
+            # usually costs nothing; read before this turn's own user row
+            pf_task = asyncio.ensure_future(prefetch.gather(user_text, await _prior_user_text(thread_id), s))
         await _log(
             thread_id, turn_id, "user",
             meta={"text": _cap(user_text or "[image]", 800),
@@ -2550,6 +2592,22 @@ async def run_chat(
             ] + [{"type": "text", "text": user_text or "Describe the image."}]
         else:
             content = user_text
+        h_kwargs = {"lb_sched": sched} if sched else {}
+        if pf_task is not None:
+            pf = None
+            try:
+                pf = await pf_task
+            except Exception as e:  # noqa: BLE001 - a hint, never a failure
+                logger.warning("prefetch failed: %r", e)
+            if pf:
+                from . import prefetch
+                summ = prefetch.summary(pf)
+                h_kwargs["lb_prefetch"] = {"note": pf["note"], **summ}
+                await _log(thread_id, turn_id, "tool", name="auto_search", dur=pf["ms"] / 1000,
+                           meta={"in": _cap({"why": pf["why"], "gate": pf.get("gate"),
+                                             "queries": pf["queries"]}, 2000),
+                                 "out": _cap(pf["hits"], 2000), "sub": None})
+                yield {"type": "prefetch", **summ}
         # Per model-call timing, for the usage/speed line streamed to the UI.
         # A turn can contain several model calls (one per ReAct round, plus the
         # compaction summarizer); each gets its own usage event.
@@ -2573,9 +2631,10 @@ async def run_chat(
                 "messages": [
                     HumanMessage(
                         content=content,
-                        # scheduled-run stamp {ts, manual}: survives the
-                        # messages reducer/checkpoint, surfaced by _msg_dict
-                        additional_kwargs={"lb_sched": sched} if sched else {},
+                        # scheduled-run stamp {ts, manual} and auto-search
+                        # hits: survive the messages reducer/checkpoint,
+                        # surfaced by _msg_dict
+                        additional_kwargs=h_kwargs,
                     )
                 ]
             }
