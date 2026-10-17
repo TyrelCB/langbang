@@ -91,6 +91,11 @@ def _hub_req(path: str, data: bytes | None = None, headers: dict | None = None, 
 
 # ---- config from the hub ----
 
+def _warm_key(cfg: dict) -> tuple:
+    own = cfg.get("own") or {}
+    return cfg.get("system_prompt"), own.get("model"), (cfg.get("fallback") or {}).get("model")
+
+
 class Hub:
     """The config this node answers with, pulled from the hub every SYNC_S
     and cached on disk. A changed config waits in `pending` until no call is
@@ -170,7 +175,7 @@ class Hub:
         with self.lock:
             if self.pending is None or live_calls():
                 return False
-            old_prompt = self.cfg.get("system_prompt")
+            warm_key = _warm_key(self.cfg)
             self.cfg, self.etag = self.pending["config"], self.pending["etag"]
             self.pending = None
         os.makedirs(DATA, exist_ok=True)
@@ -179,7 +184,8 @@ class Hub:
             json.dump({"config": self.cfg, "etag": self.etag, "pulled": time.time()}, fh)
         os.replace(tmp, CONFIG_CACHE)
         logger.warning("applied hub config %s", self.etag)
-        if self.cfg.get("system_prompt") != old_prompt and _loop is not None:
+        # the model's cached prefix is (model, prompt): either changing leaves it cold
+        if _warm_key(self.cfg) != warm_key and _loop is not None:
             asyncio.run_coroutine_threadsafe(prewarm(with_voice=False), _loop)
         return True
 
