@@ -296,6 +296,7 @@ _TECH_WORDS = {
     "AT&T": "A T and T", "C++": "C plus plus", "B.S.": "B S", "M.S.": "M S",
     "Ph.D.": "P H D", "LOC": "lines of code", "GenAI": "gen A I", "vLLM": "V L L M",
     "SGLang": "S G lang", "TCPDump": "T C P dump", "tcpdump": "T C P dump",
+    "Chewy": "Chooey",  # the employer; Pocket said it oddly (IVR call 9b1a6e70284f, 2026-10-16)
     "tyrelcb": "tyrel C B", "EVPN-VXLAN": "E V P N V X LAN", "I/O": "I O", "N/A": "N A",
 }
 # lowercase protocol / platform acronyms inside identifiers (ios_actions,
