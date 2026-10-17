@@ -235,9 +235,13 @@ async def embeddings(req: EmbedRequest):
             v = _local.embed_text(texts, req.mode)
         else:
             m = _local.model()
-            with _local._lock:
+            # PriorityLock is not a context manager (`with` 500'd every raw call)
+            _local._lock.acquire(False)
+            try:
                 v = m.encode(texts, prompt_name=req.prompt_name, batch_size=16,
                              normalize_embeddings=True, convert_to_numpy=True)
+            finally:
+                _local._lock.release()
         if req.dimensions:
             if req.dimensions not in (128, 256, 512, 768):
                 raise HTTPException(400, "dimensions must be 128|256|512|768")
