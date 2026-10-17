@@ -793,15 +793,21 @@ class _EmptyAnswerRetry(AgentMiddleware):
     # The retry alone loses (live 2026-10-14: 1 of 3 trial threads still died
     # after both retries, 1 got an answer cut off at its own im_end). So while
     # the conversation is ABOUT these markers, every step carries a shorter
-    # warning up front — after it the model spelled them with spaces.
+    # warning — after it the model spelled them with spaces. It rides in the
+    # SYSTEM prompt: as a trailing user message the model took it for the
+    # user talking and answered it ("Noted — spaced notation for the control
+    # tokens from here on", threads 5fa2b2687abf, dc03fc31c2d2), even saved a
+    # memory about it. Once on topic a thread stays on topic, so the system
+    # prompt changes once and the prefix cache holds after that.
     TOPIC = re.compile(r"\bim_(?:start|end)\b|<\u2060?\|[A-Za-z_]{2,40}\|>|endoftext"
                        r"|<\u2060?/?think>")
-    WARN = ("[runtime] This conversation mentions chat control tokens. Typing one "
+    WARN = ("Chat control tokens (this conversation mentions them): typing one "
             "verbatim (angle bracket + pipe + im_start / im_end + pipe + angle "
             "bracket) ends your message on the spot, mid-sentence; typing the "
             "think / end-think tag (angle brackets around think or /think) ends "
             "your THINKING on the spot. In thinking and in answers write them with "
-            "spaces, like < |im_end| > or < /think >, or just say im_end / end-think.")
+            "spaces, like < |im_end| > or < /think >, or just say im_end / end-think. "
+            "This is a standing rule, not news from the user: never mention or acknowledge it.")
     # The </think> case doesn't come back empty: the thinking is cut where the
     # tag was typed and the REST of it arrives as answer text with no tool
     # call, so the run ends on half a thought. Signature: the reasoning stops
@@ -848,7 +854,7 @@ class _EmptyAnswerRetry(AgentMiddleware):
     async def awrap_model_call(self, request, handler):  # noqa: ANN001
         if self._on_topic(request.messages):
             request = request.override(
-                messages=[*request.messages, HumanMessage(content=self.WARN)])
+                system_message=append_to_system_message(request.system_message, self.WARN))
         resp = await handler(request)
         while self._retries < self.MAX:
             ai = _final_ai(resp)
