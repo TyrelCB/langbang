@@ -148,6 +148,10 @@ body.hide-reasoning .block.thinking { display: none; }
 .msg.assistant { align-self: flex-start; border-color: var(--cyan-dim); }
 .msg.error { align-self: center; border-color: var(--danger); color: var(--danger); }
 /* run stamp inside a scheduled turn's user bubble (see schedStrip in app.js) */
+.pf-strip { margin-top: 6px; font-size: 11px; letter-spacing: 1px; color: var(--cyan); }
+.pf-strip summary { cursor: pointer; opacity: .8; }
+.pf-strip pre { white-space: pre-wrap; word-break: break-all; font-size: 11px; letter-spacing: 0;
+  max-height: 260px; overflow: auto; margin: 4px 0 0; color: var(--text); opacity: .85; }
 .sched-strip { font-size: 11px; letter-spacing: 1px; color: var(--cyan);
   border-bottom: 1px dashed var(--line); padding-bottom: 5px; margin-bottom: 7px; }
 /* compact provenance tag on each AI bubble inside a scheduled run's segment */

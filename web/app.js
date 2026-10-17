@@ -499,6 +499,23 @@ function schedStrip(s) {
     " " + p(t.getHours()) + ":" + p(t.getMinutes()) + ":" + p(t.getSeconds()));
 }
 
+function pfStrip(pf) {
+  // auto-search hits the server attached to this turn (server/prefetch.py):
+  // what the model was handed before its first call. Inside the user bubble,
+  // like schedStrip, so #chat children stay 1:1 with messages.
+  const n = (pf.hits || "").split("\n").filter((l) => /^\d\.\d{3} \[/.test(l)).length;
+  const d = el("details", "pf-strip");
+  d.appendChild(el("summary", null, `⌕ AUTO-SEARCH · ${n} HIT${n === 1 ? "" : "S"} · ` +
+    `${((pf.ms || 0) / 1000).toFixed(1)}s · ${pf.why || ""}`));
+  d.appendChild(el("pre", null, pf.hits || ""));
+  return d;
+}
+
+function attachPf(msg, pf) {
+  if (!msg || msg.querySelector(".pf-strip")) return;
+  msg.insertBefore(pfStrip(pf), msg.querySelector(".fork-btn"));
+}
+
 function runChip(s) {
   // tiny provenance tag on an AI bubble produced by a scheduled run — the
   // full ⏰ strip lives on the run's prompt far above, but by the time you're
@@ -609,6 +626,7 @@ function renderHistoryMsg(m, curSched) {
     if (m.role === "human") {
       const b = addMsg("user", textOf(m.content), imagesOf(m.content));
       if (m.sched) b.prepend(schedStrip(m.sched));
+      if (m.prefetch) attachPf(b, m.prefetch);
       curSched = m.sched || null;
     } else if (m.role === "ai") {
       if (m.thinking) {
@@ -875,8 +893,15 @@ function runPipeline(run) {
       if (run.viewing) scrollBottom();
       return; // not a hub event — seen counts server events only
     }
-    if (run.waiting) { run.waiting.remove(); run.waiting = null; } // first REAL event
+    // auto-search lands before the model's first token: keep AWAITING MODEL up
+    if (run.waiting && ev.type !== "prefetch") { run.waiting.remove(); run.waiting = null; } // first REAL event
     run.seen++;
+    if (ev.type === "prefetch") {
+      const ub = run.nodes.find((n) => n.classList && n.classList.contains("user")) ||
+        (run.viewing ? [...document.querySelectorAll("#chat > .msg.user")].pop() : null);
+      attachPf(ub, ev);
+      return;
+    }
     if (ev.type === "done" || ev.type === "error") run.terminal = true;
     if (ev.type === "token") {
       sealThinking(true);
@@ -1935,7 +1960,7 @@ $("#search").addEventListener("keydown", (e) => {
 const SPK = { aud: null, root: null, opts: {}, src: [], words: [], map: null, k: -2, raf: 0, gen: 0, scrollHold: 0 };
 const spkOK = typeof CSS !== "undefined" && CSS.highlights && typeof Highlight === "function";
 const spkNorm = (w) => w.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
-const SPK_SKIP = "pre, .tts-player, button, .speak-btn, .cb-bar, .cb-frame, .sched-strip, .run-chip, audio, video, .tool-media, .block-voice";
+const SPK_SKIP = ".pf-strip, pre, .tts-player, button, .speak-btn, .cb-bar, .cb-frame, .sched-strip, .run-chip, audio, video, .tool-media, .block-voice";
 
 function spkTokens(root) {
   const out = [];

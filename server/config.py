@@ -219,6 +219,9 @@ DEFAULTS = {
         "auto_ingest": True,  # push outputs/uploads/memories/skills as they're written
         "index_threads": True,  # each finished exchange becomes a searchable doc
         "scope": "fleet",  # semantic_search default: fleet | local
+        # auto-search before the first model call (server/prefetch.py): a
+        # reference phrase or a Laya gate >= threshold attaches the hits
+        "prefetch": {"enabled": True, "threshold": 0.5, "top_k": 6, "media_k": 3, "budget_s": 1.5},
     },
     # Decision endpoint POST /v1/systemone (server/decide.py). backends speak
     # the Jev/Laya systemone protocol and are tried in order; key_file names a
