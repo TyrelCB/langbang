@@ -342,18 +342,27 @@ async def current_todos(thread_id: str):
 # with an empty answer. Outgoing messages get a word joiner after the "<"
 # (text unchanged to the eye, ordinary tokens to the model); tool-call args
 # coming back have it removed, so files the agent edits keep the real string.
+# Same for the reasoning tags (2026-10-17, thread 5fa2b2687abf): thinking
+# about a heretic config's `response_prefix = "<think></think>"`, the model
+# emitted the REAL </think> mid-thought — sglang's reasoning parser ended the
+# thinking there and the rest of it became the "final answer", ending the run.
 _CTRL_TOKEN = re.compile(r"<\|([A-Za-z0-9_]{1,40})\|>")
+_THINK_TAG = re.compile(r"<(/?think)>")
 _WJ = "\u2060"
 
 
 def defang(text: str) -> str:
-    return _CTRL_TOKEN.sub(lambda m: f"<{_WJ}|{m.group(1)}|>", text) if "<|" in text else text
+    if "<|" in text:
+        text = _CTRL_TOKEN.sub(lambda m: f"<{_WJ}|{m.group(1)}|>", text)
+    if "think>" in text:
+        text = _THINK_TAG.sub(lambda m: f"<{_WJ}{m.group(1)}>", text)
+    return text
 
 
 def undefang(v):
     """Inverse of defang over a tool-call args structure."""
     if isinstance(v, str):
-        return v.replace(f"<{_WJ}|", "<|") if _WJ in v else v
+        return v.replace(f"<{_WJ}", "<") if _WJ in v else v
     if isinstance(v, dict):
         return {k: undefang(x) for k, x in v.items()}
     if isinstance(v, list):
@@ -785,12 +794,30 @@ class _EmptyAnswerRetry(AgentMiddleware):
     # after both retries, 1 got an answer cut off at its own im_end). So while
     # the conversation is ABOUT these markers, every step carries a shorter
     # warning up front — after it the model spelled them with spaces.
-    TOPIC = re.compile(r"\bim_(?:start|end)\b|<\u2060?\|[A-Za-z_]{2,40}\|>|endoftext")
+    TOPIC = re.compile(r"\bim_(?:start|end)\b|<\u2060?\|[A-Za-z_]{2,40}\|>|endoftext"
+                       r"|<\u2060?/?think>")
     WARN = ("[runtime] This conversation mentions chat control tokens. Typing one "
             "verbatim (angle bracket + pipe + im_start / im_end + pipe + angle "
-            "bracket) ends your message on the spot, mid-sentence. In thinking and "
-            "in answers write them with spaces, like < |im_end| >, or just say "
-            "im_start / im_end.")
+            "bracket) ends your message on the spot, mid-sentence; typing the "
+            "think / end-think tag (angle brackets around think or /think) ends "
+            "your THINKING on the spot. In thinking and in answers write them with "
+            "spaces, like < |im_end| > or < /think >, or just say im_end / end-think.")
+    # The </think> case doesn't come back empty: the thinking is cut where the
+    # tag was typed and the REST of it arrives as answer text with no tool
+    # call, so the run ends on half a thought. Signature: the reasoning stops
+    # on an opening delimiter (`= "`, a backtick, `(`…) or mid-sentence, and
+    # the "answer" picks up with the matching closer.
+    SPILL_NOTE = ("[runtime] Your previous reply was cut: you typed the end-think tag "
+                  "(angle brackets around /think) verbatim inside your thinking, so the "
+                  "server ended your thinking there and the rest of it was shown to the "
+                  "user as your answer. Never write that tag literally — say end-think "
+                  "or write < /think > with spaces. Now continue: answer the user or "
+                  "make your next tool call.")
+    # a quote only OPENS after =, (, :, a comma or a space — a thought that
+    # ends on a closing quote/backtick is finished (5 of 995 past answers)
+    _OPEN_TAIL = re.compile(r"""(?:[=:(\[{,<]|(?:^|[\s=(\[{:,])["'`])\s*$""")
+    _CLOSE_HEAD = re.compile(r"""^\s*(?:["'`>)\]}]|[a-z])""")
+    _DONE_TAIL = re.compile(r"""[.!?)\]*`"'>:]\s*$""")
 
     def __init__(self):
         super().__init__()
@@ -804,6 +831,20 @@ class _EmptyAnswerRetry(AgentMiddleware):
                 return True
         return False
 
+    @classmethod
+    def spilled(cls, ai) -> bool:
+        """A final answer that is really the tail of a thinking block cut by a
+        verbatim </think> (see SPILL_NOTE)."""
+        if ai is None or ai.tool_calls:
+            return False
+        think = str((ai.additional_kwargs or {}).get("reasoning_content") or "").rstrip()
+        text = _text_only(ai.content or "")
+        if not think or not text.strip():
+            return False
+        if cls._OPEN_TAIL.search(think):
+            return True
+        return bool(cls._CLOSE_HEAD.search(text)) and not cls._DONE_TAIL.search(think)
+
     async def awrap_model_call(self, request, handler):  # noqa: ANN001
         if self._on_topic(request.messages):
             request = request.override(
@@ -811,13 +852,18 @@ class _EmptyAnswerRetry(AgentMiddleware):
         resp = await handler(request)
         while self._retries < self.MAX:
             ai = _final_ai(resp)
-            if ai is None or ai.tool_calls or _text_only(ai.content or "").strip():
+            if ai is None or ai.tool_calls:
+                return resp
+            if self.spilled(ai):
+                note, why = self.SPILL_NOTE, "thinking spilled into the answer (verbatim </think>)"
+            elif not _text_only(ai.content or "").strip():
+                note, why = self.NOTE, "model step returned nothing"
+            else:
                 return resp
             self._retries += 1
-            logger.warning("empty-answer: model step returned nothing, retry %d/%d",
-                           self._retries, self.MAX)
+            logger.warning("empty-answer: %s, retry %d/%d", why, self._retries, self.MAX)
             resp = await handler(request.override(
-                messages=[*request.messages, HumanMessage(content=self.NOTE)]))
+                messages=[*request.messages, HumanMessage(content=note)]))
         return resp
 
 
