@@ -18,7 +18,7 @@ Same API as LangBang's IVR, so ivr_loop.py / ivr_probe.py point at either:
 No agent framework and no tools: the model is called directly and streamed.
 
 Run:  LANGBANG_DATA_DIR=<node data dir> python -m server.ivr_node
-Env:  IVR_NODE_HUB       hub base URL (http://fedora.tail34585a.ts.net:8123)
+Env:  IVR_NODE_HUB       hub base URL (http://fedora:8123)
       IVR_NODE_NAME      this node's name in the hub's log (mac-mini)
       IVR_NODE_BIND / IVR_NODE_PORT  (0.0.0.0 / 8130)
       IVR_NODE_LLM_URL   the local OpenAI-compatible model server, used in
@@ -60,7 +60,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger("ivr_node")
 
 DATA = config.DATA_DIR
-HUB = os.environ.get("IVR_NODE_HUB", "http://fedora.tail34585a.ts.net:8123").rstrip("/")
+HUB = os.environ.get("IVR_NODE_HUB", "http://fedora:8123").rstrip("/")
 NAME = os.environ.get("IVR_NODE_NAME", "mac-mini")
 LLM_URL = os.environ.get("IVR_NODE_LLM_URL", "http://127.0.0.1:11434/v1")
 STT_URL = os.environ.get("IVR_NODE_STT_URL", "http://127.0.0.1:8020").rstrip("/")
