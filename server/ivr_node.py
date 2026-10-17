@@ -13,7 +13,7 @@ A new config is applied only between calls: a prompt change mid-call
 throws away the model's prompt cache and costs the caller ~12 s.
 
 Same API as LangBang's IVR, so ivr_loop.py / ivr_probe.py point at either:
-  POST /api/ivr/start, /api/ivr/turn/stream, /api/ivr/hangup
+  POST /api/ivr/start, /api/ivr/turn, /api/ivr/turn/stream, /api/ivr/hangup
   GET  /api/ivr/status          POST /api/stt
 No agent framework and no tools: the model is called directly and streamed.
 
@@ -704,6 +704,49 @@ async def ivr_start(request: Request, call_id: str = "", out: str = "wav", rate:
                  "sample_rate": rate, "tts_s": round(time.time() - t, 2)}
     asyncio.create_task(prewarm(with_voice=False))
     return {"call_id": cid, "reply": greet, **audio}
+
+
+@app.post("/api/ivr/turn")
+async def ivr_turn(request: Request, call_id: str = "", fmt: str = "auto",
+                   out: str = "wav", rate: int = 8000, caller: str = ""):
+    """One utterance -> the whole reply at once (text + wav), as LangBang's
+    /api/ivr/turn. Used by ivr_sms.py (JSON {"text": ...} in, reply text out),
+    so no spoken-word cap applies."""
+    _gate(request)
+    if out != "wav":
+        raise HTTPException(400, "this node returns out=wav only")
+    cid, c = call(call_id, caller)
+    timing: dict = {}
+    t0 = time.time()
+    said, stt, words = await _hear(request, fmt)
+    if stt:
+        timing["stt_s"] = round(time.time() - t0, 2)
+    if not said:
+        r = {"reply": "Sorry, I didn't catch that. Could you say it again?", "tools": []}
+    else:
+        t1 = time.time()
+        r = None
+        try:
+            async for kind, val in reply_stream(cid, c, said, {}):
+                if kind == "done":
+                    r = {"reply": val["reply"], "tools": []}
+        except Busy as e:
+            raise HTTPException(503, str(e))
+        except Exception as e:  # noqa: BLE001
+            logger.exception("turn failed")
+            r = {"reply": ERROR_REPLY, "tools": [], "error": f"{type(e).__name__}: {e}"}
+        timing["agent_s"] = round(time.time() - t1, 2)
+    t2 = time.time()
+    try:
+        wav = await run_in_threadpool(speak_wav, r["reply"], rate)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"TTS failed: {e}")
+    timing["tts_s"] = round(time.time() - t2, 2)
+    timing["total_s"] = round(time.time() - t0, 2)
+    audit({"call_id": cid, "event": "turn", "transcript": said, "reply": r["reply"], "tools": [],
+           "error": r.get("error"), **({"words": words[:80]} if words else {}), **timing})
+    return {"call_id": cid, "transcript": said, **r, "audio_b64": base64.b64encode(wav).decode(),
+            "audio_format": "wav", "sample_rate": rate, "timings": timing}
 
 
 @app.post("/api/ivr/turn/stream")
