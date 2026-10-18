@@ -36,6 +36,9 @@ const RUNS = new Map();
 let serverRuns = new Set(); // active hub tids per GET /api/runs (scheduler/other tabs)
 let trajCache = null;  // trajectory rows/totals for the current thread
 let trajVisible = false;
+// expanded trajectory rows (run_events seq): the live refresh rebuilds the
+// list every ~3 s during a run, which used to snap an opened row shut
+const trajOpen = new Set();
 
 // read-aloud state (which provider speaks is the server's CONFIG; we just
 // queue mp3 clips from /api/tts and play one at a time)
@@ -1436,6 +1439,7 @@ function applyTodosCollapsed() {
 function resetTrajView() {
   hideTodos();
   trajCache = null;
+  trajOpen.clear();
   $("#sb-totals").textContent = "";
   if (trajVisible) renderTraj();
 }
@@ -1641,8 +1645,7 @@ function renderTraj() {
       row.appendChild(trajCopyBtn(() => trajRowText(e), "copy this step as text"));
       if (q && !(label + " " + (e.name || "") + " " + preview).toLowerCase().includes(q))
         row.classList.add("hidden");
-      row.onclick = () => {
-        if (row._meta) { row._meta.remove(); row._meta = null; return; }
+      const open = () => {
         // meta pre is a SIBLING of the row — keep a direct ref to toggle it
         const json = JSON.stringify({ ...e, meta: m }, null, 2);
         row._meta = el("div", "traj-meta-wrap");
@@ -1652,7 +1655,13 @@ function renderTraj() {
         row._meta.append(b, el("pre", "traj-meta", json));
         row.after(row._meta);
       };
+      row.onclick = () => {
+        if (row._meta) { row._meta.remove(); row._meta = null; trajOpen.delete(e.seq); return; }
+        trajOpen.add(e.seq);
+        open();
+      };
       card.appendChild(row);
+      if (trajOpen.has(e.seq)) open();
     }
     body.appendChild(card);
   });
