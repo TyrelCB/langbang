@@ -77,6 +77,11 @@ DEFAULTS = {
     # (1x1 pixel color tests) -> on by default. Images re-prefill every turn,
     # so keep attachments small/few.
     "capabilities": {"vision": True},
+    # images per chat message. 4 was a guess (09-15); measured 10-17 on the
+    # vLLM Spark model: 48 in one request all read right, ~0.63 s and ~770
+    # prompt tokens per 1024x768 image (4x that at the 2048 px paste edge),
+    # repeats served from the prefix cache. Clamped to MAX_IMAGES_CAP.
+    "max_images": 16,
     # image shown on the empty NEW CHAT screen (absolute path, ~ ok; GIFs
     # animate). Lives outside the repo — served by GET /api/splash.
     "splash_image": "",

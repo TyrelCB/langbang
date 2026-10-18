@@ -20,7 +20,7 @@ let supportsVision = false;
 let pendingImages = []; // data URLs awaiting send
 let pendingFiles = []; // {file} non-image attachments, uploaded at send time
 let uploading = false; // blocks re-Enter while attachment bytes are in flight
-const MAX_IMAGES = 4;
+let maxImages = 16; // per message; CONFIG → MULTIMODAL, from /api/health
 const MAX_IMG_B64 = 7_000_000; // data-URL length cap, mirrors main.py MAX_IMG_B64
 // non-image attachments upload to data/uploads/ on send; caps mirror main.py
 const MAX_FILES = 6;
@@ -306,8 +306,8 @@ async function shrinkImage(file) {
 }
 async function addImage(file) {
   if (!file || !supportsVision) return;
-  if (pendingImages.length >= MAX_IMAGES) {
-    addMsg("error", `⚠ max ${MAX_IMAGES} images per message — ${file.name || "image"} dropped`);
+  if (pendingImages.length >= maxImages) {
+    addMsg("error", `⚠ max ${maxImages} images per message — ${file.name || "image"} dropped`);
     return;
   }
   try {
@@ -317,7 +317,7 @@ async function addImage(file) {
       url = await readDataURL(file);
     } else url = await shrinkImage(file);
     if (url.length > MAX_IMG_B64) throw new Error("still too large after resizing");
-    if (pendingImages.length >= MAX_IMAGES) return; // raced past the cap while decoding
+    if (pendingImages.length >= maxImages) return; // raced past the cap while decoding
     pendingImages.push(url);
     renderAttachStrip();
   } catch (e) {
@@ -2929,6 +2929,7 @@ async function openSettings() {
   renderSoundboard();
   sndStatusSweep();
   $("#set-vision").checked = !!(s.capabilities || {}).vision;
+  $("#set-max_images").value = s.max_images || 16;
   $("#set-splash_image").value = s.splash_image || "";
   $("#set-thinking").checked = !!s.enable_thinking;
   $("#set-reasoning_effort").value = s.reasoning_effort || "xhigh";
@@ -2995,6 +2996,7 @@ async function saveSettings() {
     max_react_iterations: parseInt($("#set-max_react_iterations").value),
     system_prompt: $("#set-system_prompt").value,
     capabilities: { vision: $("#set-vision").checked },
+    max_images: Math.max(1, Math.min(64, parseInt($("#set-max_images").value) || 16)),
     splash_image: $("#set-splash_image").value.trim(),
     enable_thinking: $("#set-thinking").checked,
     reasoning_effort: $("#set-reasoning_effort").value || "xhigh",
@@ -4513,6 +4515,7 @@ async function checkHealth() {
   el2.textContent = "LINK: " + (h.backend_up ? "ONLINE" : "OFFLINE");
   el2.className = "health " + (h.backend_up ? "up" : "down");
   defaultModel = { model: h.model, vision: !!h.supports_vision };
+  if (h.max_images) maxImages = h.max_images;
   if (!threadId) syncTModel(null); // a thread's tag/vision come from its override
   checkUiVersion(h.ui_version);
   // attach stays offered without vision: non-image files (and images as

@@ -97,6 +97,7 @@ async def health():
         "base_url": s["base_url"],
         "backend_up": up,
         "supports_vision": bool((s.get("capabilities") or {}).get("vision")),
+        "max_images": max_images(s),
         "ui_version": _ui_version(),
     }
 
@@ -1153,7 +1154,16 @@ async def fs_write(body: FsWriteIn):
 
 # ---- chat (SSE stream) ----
 
-MAX_IMAGES = 4
+MAX_IMAGES_CAP = 64  # hard ceiling on the max_images setting
+
+
+def max_images(s: dict) -> int:
+    try:
+        return max(1, min(MAX_IMAGES_CAP, int(s.get("max_images") or 16)))
+    except (TypeError, ValueError):
+        return 16
+
+
 MAX_IMG_B64 = 7_000_000  # ~5 MB decoded; images re-prefill every turn on Spark
 DATA_IMG_RE = re.compile(r"^data:image/(png|jpeg|webp|gif);base64,([A-Za-z0-9+/=\s]+)$")
 
@@ -1177,8 +1187,9 @@ async def chat(body: ChatIn):
             raise HTTPException(
                 400, "model does not support vision (enable it in CONFIG)"
             )
-        if len(body.images) > MAX_IMAGES:
-            raise HTTPException(400, f"max {MAX_IMAGES} images per message")
+        cap = max_images(s)
+        if len(body.images) > cap:
+            raise HTTPException(400, f"max {cap} images per message (CONFIG → MULTIMODAL)")
         for du in body.images:
             m = DATA_IMG_RE.match(du)
             if not m:
