@@ -17,11 +17,22 @@ CAST_TTL = 6 * 3600  # shares/devices entries expire after 6h
 ZONE_ID = "ZONE_ID_REDACTED"       # tyrel.cloud
 DOMAIN_SUFFIX = ".ai.tyrel.cloud"
 CERT = "/etc/caddy/certs/ai.tyrel.cloud"  # wildcard *.ai.tyrel.cloud
-# Shares resolve CNAME -> edge.example.com (AWS edge box, IaC-managed):
-# its Caddy terminates TLS and reverse-proxies back to this box over an autossh
-# reverse tunnel (systemd user unit autoshare-tunnel.service, :8443 -> :8338).
-# CNAME (not A) so EC2 redeploys/region moves don't touch share records.
-EDGE_CNAME = "edge.example.com."
+# Shares are served by the AWS edge box (IaC socks-proxy host): its Caddy
+# terminates TLS for *.ai.tyrel.cloud and reverse-proxies to se-edge-proxy.py,
+# which pulls StreamEast DIRECTLY — the house is out of the data path.
+# Records are plain A to the edge's CURRENT IP (resolved from its DNS name);
+# bin/se-edge-control.sh re-converges them after any EC2 redeploy.
+EDGE_DNS = "edge.example.com"
+
+
+def _edge_ip():
+    import subprocess
+    out = subprocess.run(["dig", "+short", EDGE_DNS, "@1.1.1.1"],
+                         capture_output=True, text=True, timeout=10).stdout
+    ips = [l for l in out.splitlines() if l and l[0].isdigit()]
+    if not ips:
+        raise RuntimeError(f"cannot resolve edge {EDGE_DNS}")
+    return ips[-1]
 
 _lock = threading.Lock()
 _shares = {}   # slug -> {created, url}
@@ -88,8 +99,8 @@ def _r53_upsert(name: str):
     r53 = boto3.client("route53")
     r53.change_resource_record_sets(HostedZoneId=ZONE_ID, ChangeBatch={"Changes": [{
         "Action": "UPSERT", "ResourceRecordSet": {
-            "Name": f"{name}{DOMAIN_SUFFIX}.", "Type": "CNAME", "TTL": 60,
-            "ResourceRecords": [{"Value": EDGE_CNAME}]}}]})
+            "Name": f"{name}{DOMAIN_SUFFIX}.", "Type": "A", "TTL": 60,
+            "ResourceRecords": [{"Value": _edge_ip()}]}}]})
 
 
 def share():
@@ -126,8 +137,8 @@ def unshare(slug: str):
         import boto3
         boto3.client("route53").change_resource_record_sets(HostedZoneId=ZONE_ID, ChangeBatch={"Changes": [{
             "Action": "DELETE", "ResourceRecordSet": {
-                "Name": f"{slug}{DOMAIN_SUFFIX}.", "Type": "CNAME", "TTL": 60,
-                "ResourceRecords": [{"Value": EDGE_CNAME}]}}]})
+                "Name": f"{slug}{DOMAIN_SUFFIX}.", "Type": "A", "TTL": 60,
+                "ResourceRecords": [{"Value": _edge_ip()}]}}]})
     except Exception:
         pass  # Caddy already gone; a stale record is harmless
     return {"ok": True}
