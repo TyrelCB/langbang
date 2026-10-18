@@ -41,6 +41,7 @@
         <button id="tab-traj" class="btn ghost tab" title="agent trajectory — steps, timing, sub-agents">≡ TRAJECTORY</button>
         <button id="btn-files" class="btn ghost" title="browse + edit text files on the server (Ctrl+S saves)">✎ FILES</button>
         <button id="btn-term" class="btn ghost" title="terminals on this box + SSH into the fleet (sessions survive closing the tab)">▮ TERM</button>
+      <button id="btn-watch" class="btn ghost" title="live video player — HLS (m3u8) streams and any direct URL, plays in-page">▶ WATCH</button>
         <button id="btn-recap" class="btn ghost" title="session recap — LLM summary of this thread for cold resume">✦ RECAP</button>
         <button id="btn-game" class="btn ghost" title="X-SIM platformer — G to open, ESC to bail back to chat">⚔ X-SIM</button>
         <button id="btn-tprompt" class="btn ghost" title="instructions for THIS thread only — appended to the system prompt on every run here (scheduled runs too)" disabled>✎ PROMPT</button>
@@ -717,6 +718,22 @@
     </div>
   </div>
 
+  <div id="watch-panel" class="hidden">
+    <div class="panel-inner watch-inner">
+      <div class="term-head">
+        <h2>WATCH</h2>
+        <input id="watch-url" type="text" autocomplete="off" spellcheck="false" placeholder="http://…/manifest or any .m3u8 / direct video URL — Enter to play">
+        <button id="btn-watch-play" class="btn accent sm" type="button">▶ PLAY</button>
+        <button id="btn-watch-close" class="btn ghost sm" type="button" title="hide — playback stops">CLOSE</button>
+      </div>
+      <div id="watch-stage">
+        <video id="watch-video" playsinline controls></video>
+        <div id="watch-empty" class="term-empty">NOTHING PLAYING — paste an HLS (m3u8) or direct stream URL above, or hit ▶ on a live-stream chip in a reply.</div>
+      </div>
+      <div id="watch-status" class="hint"></div>
+    </div>
+  </div>
+
   <!-- run notifications (outside #chat: search-jump keys off its children) -->
   <div id="toasts" aria-live="polite"></div>
 
@@ -740,6 +757,8 @@
 <script src="/static/vendor/xterm.js"></script>
 <script src="/static/vendor/addon-fit.js"></script>
 <script src="/static/vendor/addon-web-links.js"></script>
+<script src="/static/vendor/hls.min.js"></script>
+<script src="/static/watch.js"></script>
 <script src="/static/app.js"></script>
 <script src="/static/term.js"></script>
 </body>

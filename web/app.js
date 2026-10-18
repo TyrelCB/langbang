@@ -2432,6 +2432,17 @@ const MEDIA_KIND = (p) =>
 
 function mediafy(msg) {
   if (msg.querySelector(":scope > .media")) return; // idempotent
+  // live-stream chips: any http(s) m3u8/manifest URL in the answer gets a ▶
+  // chip that opens it in the WATCH panel (watch.js owns the player).
+  const sUrl = msg.textContent.match(/https?:\/\/[^\s<>"')\]]+?(?:\.m3u8(?:\?[^s<>"')\]]*)?|\/manifest(?:\?[^s<>"')\]]*)?)(?=[\s<>"')\]]|$)/i)?.[0];
+  if (sUrl && !msg.querySelector(".stream-chip")) {
+    const chipHost = el("div", "media");
+    const chip = el("button", "stream-chip", "▶ LIVE STREAM");
+    chip.title = sUrl;
+    chip.onclick = () => window.langbangWatch?.open(sUrl);
+    chipHost.append(chip);
+    msg.append(chipHost);
+  }
   const seen = new Set();
   const paths = [];
   const w = document.createTreeWalker(msg, NodeFilter.SHOW_TEXT, {

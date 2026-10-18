@@ -1274,3 +1274,24 @@ html[data-theme="light"] .spk-hud-phrase span.on { text-shadow: none; }
 .voice-tests .prov-test.ok { color: var(--cyan); }
 .voice-tests .prov-test.warn { color: var(--orange); }
 .voice-tests .prov-test.bad { color: var(--danger); }
+
+/* ---------- WATCH: in-page live stream player ---------- */
+#watch-panel { position: fixed; inset: 0; background: rgba(2,6,12,.85); display: flex;
+  align-items: center; justify-content: center; z-index: 46; }
+.watch-inner { width: min(1100px, 96vw); max-height: 94vh; max-height: 94dvh; display: flex;
+  flex-direction: column; gap: 8px; }
+#watch-url { flex: 1; min-width: 0; background: var(--bg2); border: 1px solid var(--line);
+  color: var(--text); font: inherit; font-size: 12px; padding: 6px 8px; border-radius: 4px; }
+#watch-url:focus { outline: none; border-color: var(--cyan); }
+#watch-stage { position: relative; background: #000; border: 1px solid var(--line);
+  border-radius: 6px; overflow: hidden; min-height: 200px; display: flex;
+  align-items: center; justify-content: center; }
+#watch-video { width: 100%; max-height: 74vh; max-height: 74dvh; background: #000; display: none; }
+#watch-panel.playing #watch-video { display: block; }
+#watch-panel.playing #watch-empty { display: none; }
+#watch-status { min-height: 16px; }
+/* live-stream chip (m3u8 URLs cited in answers) */
+.stream-chip { display: inline-flex; align-items: center; gap: 6px; margin: 4px 6px 0 0;
+  padding: 4px 10px; border: 1px solid var(--cyan); border-radius: 4px; background: var(--bg2);
+  color: var(--cyan); font-size: 11px; letter-spacing: 1px; cursor: pointer; }
+.stream-chip:hover { background: var(--panel); }
