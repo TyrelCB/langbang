@@ -112,6 +112,10 @@ async def init() -> None:
           orig TEXT);
         CREATE TABLE IF NOT EXISTS archived_messages(
           seq INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT, msg TEXT);
+        CREATE TABLE IF NOT EXISTS btw(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT NOT NULL,
+          ts REAL NOT NULL, q TEXT NOT NULL, answer TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS ix_btw_thread ON btw(thread_id, id);
         """
     )
     # threads.orig = the seed title (schedule name / first-message prefix) that
@@ -2424,6 +2428,7 @@ async def delete_thread(tid: str) -> None:
     async with _wt(_db):
         await _db.execute("DELETE FROM threads WHERE id=?", (tid,))
         await _db.execute("DELETE FROM archived_messages WHERE thread_id=?", (tid,))
+        await _db.execute("DELETE FROM btw WHERE thread_id=?", (tid,))
     async with _wt(_edb):
         await _edb.execute("DELETE FROM run_events WHERE thread_id=?", (tid,))
     # took the checkpoint tables with it (300+ leaked threads before this)
@@ -2642,27 +2647,54 @@ _BTW_INSTRUCTION = (
     "The user is asking a quick side question about the conversation below "
     "(the agent may still be working on it — the transcript can end mid-task). "
     "Answer briefly and concretely from the transcript only; if it doesn't say, "
-    "say so. Don't propose or start new work."
+    "say so. Don't propose or start new work. Earlier side questions and your "
+    "answers to them may follow the transcript — build on them for follow-ups."
 )
 
 
 async def btw(tid: str, question: str) -> dict | None:
     """/btw: a side question answered from the thread's transcript, without
-    touching the thread — nothing is saved, the running agent never sees it."""
+    touching the thread — the running agent never sees it. The exchange is
+    banked in the `btw` table (its own per-thread side log), and the last few
+    ride along as context so a follow-up side question can build on them."""
     cur = await _db.execute("SELECT title FROM threads WHERE id=?", (tid,))
     if not await cur.fetchone():
         return None
     msgs = await history(tid)
+    prior = (await btw_list(tid))[-_BTW_PRIOR:]
+    side = "".join(f"\n\nEARLIER SIDE QUESTION: {b['q']}\nYOUR ANSWER: {b['answer'][:1500]}"
+                   for b in prior)
     out = await _one_shot(config.load(), 900, 0.3).ainvoke([
         SystemMessage(content=_BTW_INSTRUCTION),
         HumanMessage(content=_flat_transcript(msgs, head=2, tail=80, cap=1200, args=300)
-                     + "\n\nSIDE QUESTION: " + question),
+                     + side + "\n\nSIDE QUESTION: " + question),
     ])
     text = _text_only(out.content).strip()
     if not text:
         raise RuntimeError("the model returned no text (finish: %s)"
                            % (out.response_metadata or {}).get("finish_reason"))
-    return {"answer": text, "ts": time.time()}
+    ts = time.time()
+    async with _wt(_db):
+        cur = await _db.execute("INSERT INTO btw(thread_id,ts,q,answer) VALUES(?,?,?,?)",
+                                (tid, ts, question, text))
+        bid = cur.lastrowid
+    return {"id": bid, "q": question, "answer": text, "ts": ts}
+
+
+_BTW_PRIOR = 5  # earlier side exchanges fed into a new /btw
+
+
+async def btw_list(tid: str) -> list[dict]:
+    """The thread's banked side questions, oldest first."""
+    cur = await _db.execute(
+        "SELECT id, ts, q, answer FROM btw WHERE thread_id=? ORDER BY id", (tid,))
+    return [{"id": r[0], "ts": r[1], "q": r[2], "answer": r[3]} for r in await cur.fetchall()]
+
+
+async def btw_delete(tid: str, bid: int) -> bool:
+    async with _wt(_db):
+        cur = await _db.execute("DELETE FROM btw WHERE thread_id=? AND id=?", (tid, bid))
+        return cur.rowcount > 0
 
 
 # ---- streaming runner ----

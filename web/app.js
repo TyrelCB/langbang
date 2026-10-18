@@ -732,8 +732,8 @@ const SLASH = [
       if (threadId && RUNS.has(threadId)) return steerRun(a, pendingImages);
       $("#input").value = a; return send(); // nothing running: it's just a message
     } },
-  { name: "btw", args: "<question>", desc: "side question about this thread — answered aside; nothing saved, the agent isn't interrupted",
-    run: (a) => a ? (slashThread() && openBtw(a)) : slashNote("usage: /btw <question>") },
+  { name: "btw", args: "[question]", desc: "side question or idea — answered aside and banked with this thread; the agent isn't interrupted. Bare /btw lists the bank",
+    run: (a) => slashThread() && openBtw(a) },
   { name: "recap", desc: "summary of this thread so far", run: () => slashThread() && openRecap() },
   { name: "fork", desc: "copy this whole thread into a new one", run: () => slashThread() && forkWhole() },
   { name: "plan", args: "[message]", desc: "toggle plan mode — or send one message in plan mode", run: (a) => {
@@ -822,15 +822,25 @@ async function forkWhole() {
   await refreshThreads();
   await openThread(r);
 }
-// /btw answer: the recap panel, retitled — nothing lands in the thread
+// /btw: the recap panel, retitled — the new answer on top, the thread's
+// banked side questions under it (newest first). Nothing lands in the thread.
 async function openBtw(q) {
   const tid = threadId;
   SFX.play("click");
   const body = $("#recap-body");
-  $("#recap-head").textContent = "BTW — " + (q.length > 80 ? q.slice(0, 79) + "…" : q);
+  $("#recap-head").textContent = q ? "BTW" : "BTW — BANKED SIDE QUESTIONS";
   $("#recap-ts").textContent = "";
-  body.innerHTML = "<p>⏳ THINKING ASIDE…</p>";
+  const now = el("div", "btw-now"), bank = el("div", "btw-bank");
+  body.replaceChildren(...(q ? [el("blockquote", "btw-ask", q)] : []), now, bank);
   $("#recap-panel").classList.remove("hidden");
+  const loadBank = async (skip) => {
+    const r = await fetch(`/api/threads/${tid}/btw`).then((r) => r.json()).catch(() => ({ items: [] }));
+    if (threadId !== tid) return;
+    btwBank(bank, tid, (r.items || []).filter((b) => b.id !== skip).reverse(), !q);
+  };
+  if (!q) { await loadBank(); return; }
+  now.innerHTML = "<p>⏳ THINKING ASIDE…</p>";
+  loadBank();
   if (recapAbort) recapAbort.abort();
   recapAbort = new AbortController();
   const timer = setTimeout(() => recapAbort.abort(), 90000);
@@ -842,16 +852,50 @@ async function openBtw(q) {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "HTTP " + r.status);
     const out = await r.json();
     if (threadId !== tid) return;
-    setMarkdown(body, out.answer);
-    $("#recap-ts").textContent = "ANSWERED " + new Date(out.ts * 1000).toLocaleTimeString() + " · not saved to the thread";
+    setMarkdown(now, out.answer);
+    $("#recap-ts").textContent = "ANSWERED " + new Date(out.ts * 1000).toLocaleTimeString() + " · banked with this thread, not sent to the agent";
     SFX.play("message_received");
+    loadBank(out.id);
   } catch (e) {
     if (threadId !== tid) return;
-    setMarkdown(body, e.name === "AbortError" ? "✕ timed out (90 s) — the model may be busy; try again."
+    setMarkdown(now, e.name === "AbortError" ? "✕ timed out (90 s) — the model may be busy; try again."
       : "✕ side question failed: " + e.message);
     SFX.play("error");
   } finally {
     clearTimeout(timer);
+  }
+}
+// banked /btw rows: question (click to expand the answer), ↳ puts the
+// question in the composer for when the run is done, ✕ forgets it
+function btwBank(box, tid, items, open) {
+  box.replaceChildren();
+  if (!items.length) {
+    if (open) box.append(el("p", "btw-empty", "Nothing banked yet. Ask with /btw <question> — mid-run is fine."));
+    return;
+  }
+  box.append(el("div", "btw-bank-head", (open ? "" : "EARLIER · ") + items.length + " BANKED"));
+  for (const b of items) {
+    const d = el("details", "btw-item");
+    const sum = el("summary");
+    sum.append(el("span", "btw-q", b.q), el("span", "btw-when", new Date(b.ts * 1000).toLocaleString()));
+    const ans = el("div", "btw-a msg");
+    d.addEventListener("toggle", () => { if (d.open && !ans.childNodes.length) setMarkdown(ans, b.answer); }, { once: false });
+    const acts = el("div", "btw-acts");
+    const use = el("button", "btn ghost", "↳ TO COMPOSER");
+    use.title = "put this question in the message box (sends nothing)";
+    use.onclick = () => {
+      const inp = $("#input");
+      inp.value = inp.value.trim() ? inp.value.trimEnd() + "\n\n" + b.q : b.q;
+      closeRecap(); inp.focus();
+    };
+    const del = el("button", "btn ghost", "✕ FORGET");
+    del.onclick = async () => {
+      const r = await fetch(`/api/threads/${tid}/btw/${b.id}`, { method: "DELETE" }).catch(() => null);
+      if (r && r.ok) { d.remove(); SFX.play("click"); }
+    };
+    acts.append(use, del);
+    d.append(sum, ans, acts);
+    box.append(d);
   }
 }
 

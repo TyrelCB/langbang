@@ -402,7 +402,7 @@ class BtwIn(BaseModel):
 
 @app.post("/api/threads/{tid}/btw")
 async def thread_btw(tid: str, body: BtwIn):
-    """/btw side question: answered from the transcript, nothing saved."""
+    """/btw side question: answered from the transcript, banked per thread."""
     if not body.q.strip():
         raise HTTPException(400, "empty question")
     try:
@@ -412,6 +412,19 @@ async def thread_btw(tid: str, body: BtwIn):
     if out is None:
         raise HTTPException(404, "no such thread")
     return out
+
+
+@app.get("/api/threads/{tid}/btw")
+async def thread_btw_list(tid: str):
+    """The thread's banked /btw exchanges, oldest first."""
+    return {"items": await agent.btw_list(tid)}
+
+
+@app.delete("/api/threads/{tid}/btw/{bid}")
+async def thread_btw_delete(tid: str, bid: int):
+    if not await agent.btw_delete(tid, bid):
+        raise HTTPException(404, "no such side question")
+    return {"ok": True}
 
 
 # ---- scheduled tasks ----
