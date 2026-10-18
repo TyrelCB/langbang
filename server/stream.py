@@ -38,18 +38,33 @@ _lock = threading.Lock()
 _shares = {}   # slug -> {created, url}
 
 
+def _close(ccs, browser):
+    """Disconnect every Chromecast BEFORE stopping discovery. A connected
+    cast's socket thread outlives stop_discovery() and, with zeroconf gone,
+    retries in a tight loop logging a 25-line traceback each time
+    (2026-10-18: 440k of them, an 11 GB /tmp/langbang.log in an hour)."""
+    for cc in ccs:
+        try:
+            cc.disconnect(timeout=3)
+        except Exception:
+            pass
+    browser.stop_discovery()
+
+
 def _discover(timeout=6):
     import pychromecast
     ccs, browser = pychromecast.get_chromecasts(timeout=timeout)
     out = []
-    for cc in ccs:
-        try:
-            cc.wait(timeout=3)
-            out.append({"name": cc.name, "model": getattr(cc.model_name, "model_name", "") or "",
-                        "app": cc.app_display_name or ""})
-        except Exception:
-            out.append({"name": cc.name, "model": "", "app": ""})
-    browser.stop_discovery()
+    try:
+        for cc in ccs:
+            try:
+                cc.wait(timeout=3)
+                out.append({"name": cc.name, "model": getattr(cc.model_name, "model_name", "") or "",
+                            "app": cc.app_display_name or ""})
+            except Exception:
+                out.append({"name": cc.name, "model": "", "app": ""})
+    finally:
+        _close(ccs, browser)
     return out
 
 
@@ -77,7 +92,7 @@ def cast(name: str, url: str, title: str = "LangBang stream"):
                 return {"ok": True, "device": name, "state": "PLAYING"}
         return {"ok": True, "device": name, "state": mc.status.player_state}
     finally:
-        browser.stop_discovery()
+        _close(ccs, browser)
 
 
 def stop_cast(name: str):
@@ -91,7 +106,7 @@ def stop_cast(name: str):
                 return {"ok": True, "device": name}
         raise ValueError(f"no device named {name!r}")
     finally:
-        browser.stop_discovery()
+        _close(ccs, browser)
 
 
 def _r53_upsert(name: str):
