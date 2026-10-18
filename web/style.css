@@ -1280,8 +1280,13 @@ html[data-theme="light"] .spk-hud-phrase span.on { text-shadow: none; }
   align-items: center; justify-content: center; z-index: 46; }
 .watch-inner { width: min(1100px, 96vw); max-height: 94vh; max-height: 94dvh; display: flex;
   flex-direction: column; gap: 8px; }
-#watch-url { flex: 1; min-width: 0; background: var(--bg2); border: 1px solid var(--line);
+.watch-inner .term-head { flex-wrap: wrap; }
+#watch-url { flex: 1 1 auto; min-width: 220px; background: var(--bg2); border: 1px solid var(--line);
   color: var(--text); font: inherit; font-size: 12px; padding: 6px 8px; border-radius: 4px; }
+/* cast picker: device names are long — cap it and ellipsize so it never
+   starves the URL box (native select sizes itself to the widest option) */
+#watch-cast { flex: 0 1 auto; max-width: 15em; text-overflow: ellipsis; white-space: nowrap;
+  overflow: hidden; }
 #watch-url:focus { outline: none; border-color: var(--cyan); }
 #watch-stage { position: relative; background: #000; border: 1px solid var(--line);
   border-radius: 6px; overflow: hidden; min-height: 200px; display: flex;
