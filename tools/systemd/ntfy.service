@@ -2,6 +2,7 @@
 # The container is owned by this unit (docker run --rm in the foreground), not
 # by a docker restart policy, so it starts only once tailscale0 has its IP —
 # the TAILNET_IP port bind fails if docker races tailscaled at boot.
+# TAILNET_IP: this box's tailscale IPv4 (`tailscale ip -4`) — fill in on install.
 # Data/config persist in the bind mounts under ~/.local/share/ntfy.
 [Unit]
 Description=ntfy push server (docker, 127.0.0.1 + tailnet :2586)

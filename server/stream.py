@@ -14,7 +14,14 @@ import uuid
 
 PROXY_PORT = 8338
 CAST_TTL = 6 * 3600  # shares/devices entries expire after 6h
-ZONE_ID = "ZONE_ID_REDACTED"       # tyrel.cloud
+
+from . import config
+
+
+def _zone_id():  # Route53 hosted zone of DOMAIN_SUFFIX (settings.json private.zone_id)
+    return config.private("zone_id", "LANGBANG_ZONE_ID")
+
+
 DOMAIN_SUFFIX = ".ai.tyrel.cloud"
 CERT = "/etc/caddy/certs/ai.tyrel.cloud"  # wildcard *.ai.tyrel.cloud
 # Shares are served by the AWS edge box (IaC socks-proxy host): its Caddy
@@ -22,16 +29,16 @@ CERT = "/etc/caddy/certs/ai.tyrel.cloud"  # wildcard *.ai.tyrel.cloud
 # which pulls StreamEast DIRECTLY — the house is out of the data path.
 # Records are plain A to the edge's CURRENT IP (resolved from its DNS name);
 # bin/se-edge-control.sh re-converges them after any EC2 redeploy.
-EDGE_DNS = "edge.example.com"
-
-
 def _edge_ip():
     import subprocess
-    out = subprocess.run(["dig", "+short", EDGE_DNS, "@1.1.1.1"],
+    edge = config.private("edge_dns", "LANGBANG_EDGE_DNS")
+    if not edge:
+        raise RuntimeError("share edge host not configured (settings.json private.edge_dns)")
+    out = subprocess.run(["dig", "+short", edge, "@1.1.1.1"],
                          capture_output=True, text=True, timeout=10).stdout
     ips = [l for l in out.splitlines() if l and l[0].isdigit()]
     if not ips:
-        raise RuntimeError(f"cannot resolve edge {EDGE_DNS}")
+        raise RuntimeError(f"cannot resolve edge {edge}")
     return ips[-1]
 
 _lock = threading.Lock()
@@ -112,7 +119,7 @@ def stop_cast(name: str):
 def _r53_upsert(name: str):
     import boto3
     r53 = boto3.client("route53")
-    r53.change_resource_record_sets(HostedZoneId=ZONE_ID, ChangeBatch={"Changes": [{
+    r53.change_resource_record_sets(HostedZoneId=_zone_id(), ChangeBatch={"Changes": [{
         "Action": "UPSERT", "ResourceRecordSet": {
             "Name": f"{name}{DOMAIN_SUFFIX}.", "Type": "A", "TTL": 60,
             "ResourceRecords": [{"Value": _edge_ip()}]}}]})
@@ -150,7 +157,7 @@ def unshare(slug: str):
     subprocess.run(["sudo", "-n", "systemctl", "reload", "caddy"])
     try:
         import boto3
-        boto3.client("route53").change_resource_record_sets(HostedZoneId=ZONE_ID, ChangeBatch={"Changes": [{
+        boto3.client("route53").change_resource_record_sets(HostedZoneId=_zone_id(), ChangeBatch={"Changes": [{
             "Action": "DELETE", "ResourceRecordSet": {
                 "Name": f"{slug}{DOMAIN_SUFFIX}.", "Type": "A", "TTL": 60,
                 "ResourceRecords": [{"Value": _edge_ip()}]}}]})

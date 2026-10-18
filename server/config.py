@@ -336,6 +336,13 @@ def _backfill(merged: dict) -> dict:
     return effective(merged)
 
 
+def private(key: str, env: str = "", default: str = "") -> str:
+    """Deployment-specific values that must stay out of the PUBLIC repo
+    (business hostnames, AWS zone ids): env var first, then settings.json
+    "private" (data/ is gitignored), then `default`."""
+    return (env and os.environ.get(env)) or str((load().get("private") or {}).get(key) or default)
+
+
 def load() -> dict:
     with _lock:
         try:
