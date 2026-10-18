@@ -716,10 +716,157 @@ async function steerRun(text, images) {
   syncComposerHint();
 }
 
+// ---------- slash commands ----------
+// `/name args` typed in the composer runs a command instead of sending —
+// only for the names below: "/home/tyrel/x.txt summarize" is still a message,
+// and "//text" sends "/text" literally. Typing "/" opens a picker.
+const slashThread = () => threadId || (slashNote("open a thread first"), null);
+const SLASH = [
+  { name: "help", desc: "list these commands", run: () => { $("#input").value = "/"; slashRender(); } },
+  { name: "new", desc: "start a new chat", run: () => newThread() },
+  { name: "stop", desc: "stop this thread's run", run: () =>
+      RUNS.has(threadId) ? stopGeneration() : slashNote("nothing is running in this thread") },
+  { name: "steer", args: "<message>", desc: "steer the running agent (plain Enter does this while it runs)",
+    run: (a) => {
+      if (!a) return slashNote("usage: /steer <message>");
+      if (threadId && RUNS.has(threadId)) return steerRun(a, pendingImages);
+      $("#input").value = a; return send(); // nothing running: it's just a message
+    } },
+  { name: "btw", args: "<question>", desc: "side question about this thread — answered aside; nothing saved, the agent isn't interrupted",
+    run: (a) => a ? (slashThread() && openBtw(a)) : slashNote("usage: /btw <question>") },
+  { name: "recap", desc: "summary of this thread so far", run: () => slashThread() && openRecap() },
+  { name: "fork", desc: "copy this whole thread into a new one", run: () => slashThread() && forkWhole() },
+  { name: "plan", args: "[message]", desc: "toggle plan mode — or send one message in plan mode", run: (a) => {
+      if (!a) { setPlan(!planOn()); return slashNote("plan mode " + (planOn() ? "ON" : "off")); }
+      setPlan(true); $("#input").value = a; return send();
+    } },
+  { name: "model", args: "[model]", desc: "this thread's model and provider", run: async (a) => {
+      await openTModel();
+      if (a) $("#tmodel-model").value = a;
+    } },
+  { name: "prompt", args: "[text]", desc: "view or set this thread's prompt (its standing instructions)",
+    run: (a) => { if (!slashThread()) return; if (a) return saveTPrompt(a).then(() => slashNote("thread prompt set")); openTPrompt(); } },
+  { name: "remember", args: "<fact>", desc: "have the agent save a memory for future chats",
+    run: (a) => {
+      if (!a) return slashNote("usage: /remember <fact>");
+      $("#input").value = "Save this as a memory for future chats (use the remember tool), then just confirm: " + a;
+      return send();
+    } },
+  { name: "traj", desc: "show the trajectory tab", run: () => showTab("traj") },
+  { name: "chat", desc: "show the chat tab", run: () => showTab("chat") },
+];
+function parseSlash(text) {
+  const m = /^\/([a-z]+)(?:\s+([\s\S]*))?$/i.exec(text);
+  const cmd = m && SLASH.find((c) => c.name === m[1].toLowerCase());
+  return cmd ? { cmd, arg: (m[2] || "").trim() } : null;
+}
+let slashSel = 0, slashNoteT = 0;
+function slashMatches() {
+  const v = $("#input").value;
+  const m = /^\/([a-z]*)$/i.exec(v); // still typing the name
+  return m ? SLASH.filter((c) => c.name.startsWith(m[1].toLowerCase())) : [];
+}
+function slashHide() { $("#slash-pop").classList.add("hidden"); }
+function slashRender() {
+  const pop = $("#slash-pop");
+  const list = slashMatches();
+  if (!list.length) return slashHide();
+  slashSel = Math.min(slashSel, list.length - 1);
+  pop.replaceChildren(...list.map((c, i) => {
+    const row = el("div", "slash-row" + (i === slashSel ? " sel" : ""));
+    row.append(el("span", "slash-name", "/" + c.name + (c.args ? " " + c.args : "")), el("span", "slash-desc", c.desc));
+    row.onmousedown = (e) => { e.preventDefault(); slashPick(c); };
+    return row;
+  }));
+  pop.classList.remove("hidden");
+}
+function slashPick(c) {
+  if (c.args) { $("#input").value = "/" + c.name + " "; slashHide(); $("#input").focus(); }
+  else { $("#input").value = ""; slashHide(); c.run(""); }
+}
+function slashNote(msg) {
+  const pop = $("#slash-pop");
+  pop.replaceChildren(el("div", "slash-note", msg));
+  pop.classList.remove("hidden");
+  clearTimeout(slashNoteT);
+  slashNoteT = setTimeout(slashHide, 3000);
+  return null;
+}
+// keys while the picker is open: ↑/↓ move, Tab/Enter take the highlighted
+// command (Enter on a complete argument-less name just runs it), Esc closes
+function slashKey(e) {
+  const list = slashMatches();
+  if (!list.length || $("#slash-pop").classList.contains("hidden")) return false;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    slashSel = (slashSel + (e.key === "ArrowDown" ? 1 : list.length - 1)) % list.length;
+    slashRender();
+  } else if (e.key === "Enter" && !e.shiftKey && $("#input").value.trim().toLowerCase() === "/" + list[slashSel].name
+             && !(list[slashSel].args || "").startsWith("<")) {
+    const c = list[slashSel]; // a complete name whose argument is optional: run it bare
+    $("#input").value = ""; slashHide(); c.run("");
+  } else if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+    slashPick(list[slashSel]);
+  } else if (e.key === "Escape") {
+    slashHide();
+  } else return false;
+  e.preventDefault();
+  return true;
+}
+async function forkWhole() {
+  if (RUNS.has(threadId)) return slashNote("this thread is running — fork it when the run finishes");
+  const hist = await api.messages(threadId);
+  const at = hist.map((m, i) => (m.role === "ai" && textOf(m.content).trim() ? i : -1)).filter((i) => i >= 0).pop();
+  if (at == null) return slashNote("nothing to fork yet — no answer in this thread");
+  const r = await api.forkThread(threadId, { at }).catch((e) => ({ detail: String(e) }));
+  if (!r || !r.id) return slashNote("fork failed: " + ((r && r.detail) || "error"));
+  await refreshThreads();
+  await openThread(r);
+}
+// /btw answer: the recap panel, retitled — nothing lands in the thread
+async function openBtw(q) {
+  const tid = threadId;
+  SFX.play("click");
+  const body = $("#recap-body");
+  $("#recap-head").textContent = "BTW — " + (q.length > 80 ? q.slice(0, 79) + "…" : q);
+  $("#recap-ts").textContent = "";
+  body.innerHTML = "<p>⏳ THINKING ASIDE…</p>";
+  $("#recap-panel").classList.remove("hidden");
+  if (recapAbort) recapAbort.abort();
+  recapAbort = new AbortController();
+  const timer = setTimeout(() => recapAbort.abort(), 90000);
+  try {
+    const r = await fetch(`/api/threads/${tid}/btw`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ q }), signal: recapAbort.signal });
+    if (threadId !== tid) return;
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "HTTP " + r.status);
+    const out = await r.json();
+    if (threadId !== tid) return;
+    setMarkdown(body, out.answer);
+    $("#recap-ts").textContent = "ANSWERED " + new Date(out.ts * 1000).toLocaleTimeString() + " · not saved to the thread";
+    SFX.play("message_received");
+  } catch (e) {
+    if (threadId !== tid) return;
+    setMarkdown(body, e.name === "AbortError" ? "✕ timed out (90 s) — the model may be busy; try again."
+      : "✕ side question failed: " + e.message);
+    SFX.play("error");
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function send() {
-  const text = $("#input").value.trim();
+  let text = $("#input").value.trim();
   const images = pendingImages;
   if ((!text && !images.length && !pendingFiles.length) || uploading) return;
+  const sc = !pendingFiles.length && parseSlash(text);
+  if (sc) {
+    $("#input").value = "";
+    slashHide();
+    await sc.cmd.run(sc.arg);
+    return;
+  }
+  if (text.startsWith("//")) text = text.slice(1); // escaped: a literal leading "/"
   // per-thread gate: only a run IN THIS THREAD blocks sending here — other
   // threads run concurrently (the SEND button reads STOP only for this one)
   if (threadId && RUNS.has(threadId)) return steerRun(text, images);
@@ -910,12 +1057,20 @@ function runPipeline(run) {
     if (asstMsg) setMarkdown(asstMsg, asstRaw);
   };
 
+  // events up to the join header's `head` are backlog (a thread opened
+  // mid-run, a reconnect): they render, but silently
   function handleEvent(ev) {
+    SFX.hush(run.replayEnd != null && run.seen < run.replayEnd && ev.type !== "join");
+    try { handleEvent0(ev); } finally { SFX.hush(false); }
+  }
+
+  function handleEvent0(ev) {
     // join/gap are FOLLOWER-transport frames, not model output: they must
     // NOT count as the "first sign of life" that retires the AWAITING MODEL
     // card — the join header arrives milliseconds after SEND, and the card's
     // live WAITED timer is exactly what long prefill (big CTX) needs shown.
     if (ev.type === "join") {
+      if (run.attached || run.zombie === false) run.replayEnd = ev.head;
       // a FRESH join (seen=0) landing on an already-done hub means the full
       // transcript is in /messages — dropping the replay and repainting
       // beats double-painting it
@@ -4609,8 +4764,11 @@ $("#cfg-confirm-keep").onclick = () => { SFX.play("click"); $("#cfg-confirm").cl
 // (mcp/soundboard subtrees are excluded inside cfgDirtyCompute)
 for (const t of ["input", "change"]) $("#settings-panel").addEventListener(t, cfgDirtyCompute);
 $("#input").addEventListener("keydown", (e) => {
+  if (slashKey(e)) return;
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
 });
+$("#input").addEventListener("input", () => { slashSel = 0; slashRender(); });
+$("#input").addEventListener("blur", () => setTimeout(slashHide, 150));
 // image paste / attach (only meaningful when supportsVision; server still enforces)
 $("#input").addEventListener("paste", (e) => {
   if (!supportsVision) return;

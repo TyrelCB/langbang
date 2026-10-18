@@ -1302,3 +1302,17 @@ html[data-theme="light"] .spk-hud-phrase span.on { text-shadow: none; }
 .stream-chip:hover { background: var(--panel); }
 /* mid-run steer (agent._Steer): the user's own words, landed between steps */
 .steer-strip { color: var(--orange); }
+/* slash-command picker (type "/" in the composer) */
+#composer { position: relative; }
+#slash-pop { position: absolute; left: 16px; right: 16px; bottom: calc(100% + 4px); z-index: 30;
+  background: var(--bg2); border: 1px solid var(--cyan); max-height: 50vh; overflow-y: auto;
+  font-size: 13px; box-shadow: 0 -4px 18px rgba(0,0,0,.35); }
+.slash-row { display: flex; gap: 12px; padding: 7px 12px; cursor: pointer; align-items: baseline; }
+.slash-row.sel, .slash-row:hover { background: var(--bg3, rgba(0,200,255,.08)); }
+.slash-name { color: var(--cyan); white-space: nowrap; }
+.slash-desc { color: var(--muted, #8a9bb0); overflow: hidden; text-overflow: ellipsis; }
+.slash-note { padding: 7px 12px; color: var(--orange); }
+@media (max-width: 640px) {
+  #slash-pop { left: 8px; right: 8px; }
+  .slash-row { flex-direction: column; gap: 2px; }
+}

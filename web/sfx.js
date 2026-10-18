@@ -32,8 +32,12 @@ const SFX = (() => {
 
   // play("click") obeys the ♪ SOUND toggle; play("click", true) always sounds
   // (the CONFIG soundboard auditions cues with the toggle off)
+  // hush(true) while a run's backlog is replayed (thread opened mid-run,
+  // phone reconnect): those events happened already — no cue burst
+  let hushed = false;
+  const hush = (on) => { hushed = !!on; };
   async function play(name, force) {
-    if (!enabled() && !force) return;
+    if ((!enabled() || hushed) && !force) return;
     const file = manifest && manifest[name] && manifest[name].file;
     if (!file || String(file).startsWith("TODO")) return;
     try {
@@ -60,5 +64,5 @@ const SFX = (() => {
   function reload(name) { cache.delete(name); }
 
   loadManifest();
-  return { play, reload, get _ctx() { return ctx; } }; // _ctx for CDP assertions
+  return { play, reload, hush, get _ctx() { return ctx; } }; // _ctx for CDP assertions
 })();

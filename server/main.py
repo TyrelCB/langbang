@@ -396,6 +396,24 @@ async def recap_thread(tid: str):
     return out
 
 
+class BtwIn(BaseModel):
+    q: str
+
+
+@app.post("/api/threads/{tid}/btw")
+async def thread_btw(tid: str, body: BtwIn):
+    """/btw side question: answered from the transcript, nothing saved."""
+    if not body.q.strip():
+        raise HTTPException(400, "empty question")
+    try:
+        out = await agent.btw(tid, body.q.strip()[:4000])
+    except Exception as e:
+        raise HTTPException(502, f"side question failed: {e}")
+    if out is None:
+        raise HTTPException(404, "no such thread")
+    return out
+
+
 # ---- scheduled tasks ----
 
 

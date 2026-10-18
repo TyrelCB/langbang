@@ -168,7 +168,9 @@ async def follow(hub: Hub, since: int = 0) -> AsyncIterator[str]:
     # join header (does NOT advance the offset): a fresh follower that joins
     # a hub already DONE is racing a finished run — the client discards it
     # and repaints from /messages instead of double-painting the replay.
-    yield _sse({"type": "join", "done": hub.done})
+    # `head` = events already buffered: the client replays up to there
+    # silently (a thread opened mid-run used to fire every past cue at once)
+    yield _sse({"type": "join", "done": hub.done, "head": hub.dropped + len(hub.events)})
     while True:
         async with hub.cond:
             try:

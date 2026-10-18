@@ -2508,9 +2508,11 @@ def _one_shot(s: dict, max_tokens: int, temperature: float) -> SGlangChatOpenAI:
     )
 
 
-def _flat_transcript(msgs: list[dict], head: int, tail: int, cap: int = 350) -> str:
+def _flat_transcript(msgs: list[dict], head: int, tail: int, cap: int = 350,
+                     args: int = 0) -> str:
     """history()-style dicts → compact text for one-shot LLM calls. First
-    `head` + last `tail` messages; tool noise folded to the tool name."""
+    `head` + last `tail` messages; tool noise folded to the tool name (plus
+    the first `args` chars of its arguments when args > 0)."""
     sel = msgs if len(msgs) <= head + tail else msgs[:head] + msgs[-tail:]
     lines = []
     for m in sel:
@@ -2521,7 +2523,8 @@ def _flat_transcript(msgs: list[dict], head: int, tail: int, cap: int = 350) -> 
         if role == "system":
             continue
         text = _text_only(m.get("content") or "").strip()[:cap]
-        calls = ", ".join(tc["name"] for tc in (m.get("tool_calls") or []))
+        calls = ", ".join(tc["name"] + (" " + json.dumps(tc.get("args"), ensure_ascii=False)[:args]
+                                        if args else "") for tc in (m.get("tool_calls") or []))
         if calls:
             text = (text + " " if text else "") + f"[called: {calls}]"
         lines.append(f"{role.upper()}: {text}")
@@ -2633,6 +2636,33 @@ async def recap_thread(tid: str) -> dict | None:
         raise RuntimeError("the model returned no text (finish: %s)"
                            % (summary.response_metadata or {}).get("finish_reason"))
     return {"title": row[0], "summary": text, "ts": time.time()}
+
+
+_BTW_INSTRUCTION = (
+    "The user is asking a quick side question about the conversation below "
+    "(the agent may still be working on it — the transcript can end mid-task). "
+    "Answer briefly and concretely from the transcript only; if it doesn't say, "
+    "say so. Don't propose or start new work."
+)
+
+
+async def btw(tid: str, question: str) -> dict | None:
+    """/btw: a side question answered from the thread's transcript, without
+    touching the thread — nothing is saved, the running agent never sees it."""
+    cur = await _db.execute("SELECT title FROM threads WHERE id=?", (tid,))
+    if not await cur.fetchone():
+        return None
+    msgs = await history(tid)
+    out = await _one_shot(config.load(), 900, 0.3).ainvoke([
+        SystemMessage(content=_BTW_INSTRUCTION),
+        HumanMessage(content=_flat_transcript(msgs, head=2, tail=80, cap=1200, args=300)
+                     + "\n\nSIDE QUESTION: " + question),
+    ])
+    text = _text_only(out.content).strip()
+    if not text:
+        raise RuntimeError("the model returned no text (finish: %s)"
+                           % (out.response_metadata or {}).get("finish_reason"))
+    return {"answer": text, "ts": time.time()}
 
 
 # ---- streaming runner ----
