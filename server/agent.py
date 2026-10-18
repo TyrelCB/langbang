@@ -406,7 +406,25 @@ class SGlangChatOpenAI(ChatOpenAI):
         payload = self._reasoning_payload(input_, stop=stop, **kwargs)
         for m in payload.get("messages") or []:
             defang_message(m)
+        self._resume_payload(input_, payload)
         return payload
+
+    def _resume_payload(self, input_, payload) -> None:
+        """A trailing AIMessage carrying `lb_resume` (see _EmptyAnswerRetry)
+        becomes an OPEN assistant turn — "<think>\n" + the cut thinking —
+        that the server continues (vLLM continue_final_message) instead of
+        starting a new reply. Added after defang: this <think> is meant real."""
+        msgs = payload.get("messages") or []
+        last = self._convert_input(input_).to_messages()[-1:] if msgs else []
+        carry = (last[0].additional_kwargs or {}).get("lb_resume") \
+            if last and isinstance(last[0], AIMessage) else None
+        if not carry or msgs[-1].get("role") != "assistant":
+            return
+        for k in ("reasoning_content", "tool_calls"):
+            msgs[-1].pop(k, None)
+        msgs[-1]["content"] = "<think>\n" + defang(carry)
+        payload["extra_body"] = {**(payload.get("extra_body") or {}),
+                                 "continue_final_message": True, "add_generation_prompt": False}
 
     def _reasoning_payload(self, input_, *, stop=None, **kwargs):  # noqa: ANN001
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
@@ -782,6 +800,14 @@ class _EmptyAnswerRetry(AgentMiddleware):
     Innermost in the chain so the other middlewares see the good answer."""
 
     MAX = 2
+    # A cut thought is RESUMED, not re-asked (2026-10-18, thread 32d984e9d567:
+    # five turns ended empty on topics like llama.cpp special-token decoding;
+    # neither the WARN nor the thread prompt stops a model reasoning ABOUT the
+    # markers from typing one, and a re-ask walks the same path into the same
+    # token). The thinking goes back as an open assistant turn with the marker
+    # spelled safely, and the model carries on from there.
+    MAX_RESUME = 4
+    CUT = f"<{_WJ}|im_end|>"  # the stop token that ended it (EOS: vLLM reports no id)
     NOTE = ("[runtime] Your previous reply ended mid-thought with no answer and no "
             "tool call. Cause: you typed a chat control token verbatim (the "
             "message-start or message-end marker — angle bracket, pipe, im_start / "
@@ -828,6 +854,7 @@ class _EmptyAnswerRetry(AgentMiddleware):
     def __init__(self):
         super().__init__()
         self._retries = 0
+        self._resumes = 0
 
     def _on_topic(self, messages) -> bool:
         for m in messages:
@@ -856,13 +883,29 @@ class _EmptyAnswerRetry(AgentMiddleware):
             request = request.override(
                 system_message=append_to_system_message(request.system_message, self.WARN))
         resp = await handler(request)
-        while self._retries < self.MAX:
+        while True:
             ai = _final_ai(resp)
             if ai is None or ai.tool_calls:
                 return resp
+            think = str((ai.additional_kwargs or {}).get("reasoning_content") or "")
+            empty = not _text_only(ai.content or "").strip()
+            if empty and think.strip() and self._resumes < self.MAX_RESUME:
+                self._resumes += 1
+                carry = think + self.CUT
+                logger.warning("empty-answer: thinking cut by a control token, resuming %d/%d",
+                               self._resumes, self.MAX_RESUME)
+                resp = await handler(request.override(messages=[
+                    *request.messages, AIMessage(content="", additional_kwargs={"lb_resume": carry})]))
+                ai2 = _final_ai(resp)
+                if ai2 is not None:
+                    more = str((ai2.additional_kwargs or {}).get("reasoning_content") or "")
+                    ai2.additional_kwargs["reasoning_content"] = carry + more
+                continue
+            if self._retries >= self.MAX:
+                return resp
             if self.spilled(ai):
                 note, why = self.SPILL_NOTE, "thinking spilled into the answer (verbatim </think>)"
-            elif not _text_only(ai.content or "").strip():
+            elif empty:
                 note, why = self.NOTE, "model step returned nothing"
             else:
                 return resp
@@ -870,7 +913,6 @@ class _EmptyAnswerRetry(AgentMiddleware):
             logger.warning("empty-answer: %s, retry %d/%d", why, self._retries, self.MAX)
             resp = await handler(request.override(
                 messages=[*request.messages, HumanMessage(content=note)]))
-        return resp
 
 
 class _TodoReconcile(AgentMiddleware):
