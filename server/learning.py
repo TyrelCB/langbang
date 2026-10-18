@@ -332,7 +332,7 @@ def _turn(msgs: list) -> tuple[list, HumanMessage | None]:
     in the compaction note (quoted as CURRENT REQUEST), so start there."""
     for i in range(len(msgs) - 1, -1, -1):
         m = msgs[i]
-        if isinstance(m, HumanMessage):
+        if isinstance(m, HumanMessage) and not (m.additional_kwargs or {}).get("lb_steer"):
             return msgs[i:], m
     return msgs, None
 

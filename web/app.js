@@ -488,6 +488,10 @@ function textOf(content) {
   return typeof content === "string" ? content : JSON.stringify(content);
 }
 
+// a message typed while the run was going (server: agent._Steer) — the
+// strip lives inside the bubble, same 1:1 #chat-children rule as schedStrip
+const steerStrip = () => el("div", "sched-strip steer-strip", "↳ STEERED MID-RUN");
+
 function schedStrip(s) {
   // run stamp for a scheduled turn (server attaches lb_sched kwargs to the
   // HumanMessage — see schedule._fire). The strip lives INSIDE the user
@@ -626,6 +630,7 @@ function renderHistoryMsg(m, curSched) {
     if (m.role === "human") {
       const b = addMsg("user", textOf(m.content), imagesOf(m.content));
       if (m.sched) b.prepend(schedStrip(m.sched));
+      if (m.steer) b.prepend(steerStrip());
       if (m.prefetch) attachPf(b, m.prefetch);
       curSched = m.sched || null;
     } else if (m.role === "ai") {
@@ -679,13 +684,42 @@ function renderHistoryMsg(m, curSched) {
 }
 
 // ---------- chat ----------
+// Enter while this thread's run is going: queue the text as a steer — the
+// agent reads it before its next model call (after the current tool ends)
+// and its bubble appears where it landed (`steer` event). STOP still halts.
+async function steerRun(text, images) {
+  if (images.length || pendingFiles.length) {
+    addMsg("error", "⚠ attachments can't join a running turn — send them when it finishes (or STOP)");
+    return;
+  }
+  if (!text) return;
+  if (text.startsWith("!")) {
+    addMsg("error", "⚠ shell commands wait for the run to finish (or STOP it first)");
+    return;
+  }
+  const run = RUNS.get(threadId);
+  try {
+    const r = await fetch(`/api/threads/${threadId}/steer`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "HTTP " + r.status);
+  } catch (e) {
+    addMsg("error", "⚠ steer not delivered: " + e.message);
+    return;
+  }
+  $("#input").value = "";
+  if (run) run.steerPending = (run.steerPending || 0) + 1;
+  SFX.play("message_sent");
+  syncComposerHint();
+}
+
 async function send() {
   const text = $("#input").value.trim();
   const images = pendingImages;
   if ((!text && !images.length && !pendingFiles.length) || uploading) return;
   // per-thread gate: only a run IN THIS THREAD blocks sending here — other
   // threads run concurrently (the SEND button reads STOP only for this one)
-  if (threadId && RUNS.has(threadId)) return;
+  if (threadId && RUNS.has(threadId)) return steerRun(text, images);
   // `!cmd` = shell mode (Claude Code style): run on the server, no model call
   if (!images.length && !pendingFiles.length && text.startsWith("!")) {
     const cmd = text.slice(1).trim();
@@ -1002,6 +1036,22 @@ function runPipeline(run) {
       // the to-do panel shows the OPEN thread's list — a parked run must not
       // paint over another thread's; replayTodos() redraws ours on switch-back
       if (run.viewing) renderTodos(ev.todos);
+    } else if (ev.type === "steer") {
+      // the user's mid-run message reached the agent: it lands HERE, between
+      // the step that just finished and the one about to start
+      sealThinking(true);
+      if (asstMsg) {
+        flushRender();
+        asstMsg.classList.remove("cursor");
+        attachSpeak(asstMsg, asstRaw);
+        if (asstRaw.trim()) run.lastBubble = { msg: asstMsg, raw: asstRaw };
+        asstMsg = null;
+      }
+      const b = put(addMsg("user", ev.text, null, CH()));
+      b.prepend(steerStrip());
+      run.steerPending = 0;
+      SFX.play("message_received");
+      if (run.viewing) syncComposerHint();
     } else if (ev.type === "compacted") {
       const b = put(addBlock("compact", compactLabel(ev), CH()));
       b.querySelector("pre").textContent = ev.summary || "";
@@ -1185,6 +1235,9 @@ async function rejoinRun(run) {
 // this thread's button a normal SEND
 function syncSendBtn() {
   setBusy(!!(threadId && RUNS.get(threadId)) || uploading);
+  // running → "Enter steers" hint; idle → the normal one (try: an early call
+  // during boot would hit INPUT_HINT's temporal dead zone)
+  try { syncComposerHint(); } catch {}
 }
 
 // the glue between the server's run registry and the sidebar/UI: which
@@ -4992,8 +5045,11 @@ function syncComposerHint() {
   $("#btn-plan").textContent = on ? "◆ PLAN: ON" : "◇ PLAN";
   $("#composer").classList.toggle("plan-mode", on);
   const waiting = !!document.querySelector("#chat .gate:not(.sealed)");
+  const run = threadId && RUNS.get(threadId);
   $("#input").placeholder = waiting
     ? "The agent is waiting on you — answer in the card above, or type a reply here…"
+    : run && run.steerPending ? "↳ steer queued — it lands after the current step. Type more to add to it…"
+    : run ? "Run in progress — Enter steers it (read after the current step) · ■ STOP halts…"
     : on ? "PLAN MODE — the agent investigates read-only, asks what it needs, and proposes a plan for your approval (Shift+Tab toggles)…"
     : INPUT_HINT;
 }

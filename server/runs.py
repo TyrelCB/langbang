@@ -51,6 +51,7 @@ class Hub:
         self.t0 = time.time()
         self.cond = asyncio.Condition()
         self.task: asyncio.Task | None = None
+        self.shell = False  # a `!cmd` hub: nothing to steer
 
     async def append(self, ev: dict) -> None:
         async with self.cond:

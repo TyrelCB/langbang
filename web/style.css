@@ -1300,3 +1300,5 @@ html[data-theme="light"] .spk-hud-phrase span.on { text-shadow: none; }
   padding: 4px 10px; border: 1px solid var(--cyan); border-radius: 4px; background: var(--bg2);
   color: var(--cyan); font-size: 11px; letter-spacing: 1px; cursor: pointer; }
 .stream-chip:hover { background: var(--panel); }
+/* mid-run steer (agent._Steer): the user's own words, landed between steps */
+.steer-strip { color: var(--orange); }

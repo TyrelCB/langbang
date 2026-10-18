@@ -1313,6 +1313,25 @@ async def thread_stream(tid: str, since: int = 0):
     return _sse(runs.follow(hub, max(0, since)))
 
 
+class SteerIn(BaseModel):
+    text: str
+
+
+@app.post("/api/threads/{tid}/steer")
+async def thread_steer(tid: str, body: SteerIn):
+    """A message typed while the thread's run is going: queued, and delivered
+    to the agent as a user message before its next model call (agent._Steer)."""
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(400, "empty message")
+    hub = runs.get(tid)
+    if not hub or hub.done:
+        raise HTTPException(409, "not running — send it as a normal message")
+    if hub.shell:
+        raise HTTPException(409, "a shell command is running — there is no agent to steer")
+    return {"queued": agent.steer_put(tid, text[:20000])}
+
+
 @app.post("/api/threads/{tid}/cancel")
 async def thread_cancel(tid: str):
     """STOP, the real way: cancels the detached task (a dropped SSE stream is
@@ -1596,6 +1615,7 @@ async def shell(body: ShellIn):
     # seals its card from the shell_result event whenever it arrives)
     try:
         hub = runs.start(body.thread_id, runs.shell_events(body.thread_id, cmd))
+        hub.shell = True  # no model to steer
     except runs.Busy as e:
         raise HTTPException(409, str(e))
     except runs.TooMany as e:

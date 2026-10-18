@@ -436,7 +436,7 @@ class SGlangChatOpenAI(ChatOpenAI):
         start = 0
         if self.keep_reasoning == "turn":  # only steps after the latest user message
             for i in range(len(msgs) - 1, -1, -1):
-                if isinstance(msgs[i], HumanMessage):
+                if _turn_start(msgs[i]):
                     start = i
                     break
         for i in range(start, len(msgs)):
@@ -700,10 +700,10 @@ def _compaction_hook(s: dict):
             return None
         # cutting INSIDE the current turn folds away the user's own request —
         # carry it verbatim so the agent can't lose its task
-        current = next((m for m in reversed(msgs[: split + 1]) if isinstance(m, HumanMessage)
+        current = next((m for m in reversed(msgs[: split + 1]) if _turn_start(m)
                         and not (m.additional_kwargs or {}).get("lb_compacted")), None)
         in_turn = current is not None and current in head and not any(
-            isinstance(m, HumanMessage) for m in tail)
+            _turn_start(m) for m in tail)
         before, body_ratio = _ctx_model(msgs)
         t_sum = time.time()
         # tagged so run_chat doesn't log/stream it as an ordinary model step
@@ -772,6 +772,51 @@ class _CompactionMiddleware(AgentMiddleware):
 
     async def abefore_model(self, state, runtime):  # noqa: ANN001, ARG002
         return await self._hook(state)
+
+
+# ---- steering: messages typed while a run is going ----
+# POST /api/threads/{tid}/steer queues text here; _Steer delivers it as a real
+# user message right before the run's next model call (after the current tool
+# finishes), and run_chat gives it one more round if it lands after the
+# model's last step. Never a hidden note: it is the user talking, saved in the
+# thread where it landed.
+_STEERS: dict[str, list[str]] = {}
+
+
+def steer_put(thread_id: str, text: str) -> int:
+    q = _STEERS.setdefault(thread_id, [])
+    q.append(text)
+    return len(q)
+
+
+def steer_take(thread_id: str) -> list[str]:
+    return _STEERS.pop(thread_id, None) or []
+
+
+def _steer_msg(texts: list[str]) -> HumanMessage:
+    return HumanMessage(content="\n\n".join(texts), additional_kwargs={"lb_steer": True})
+
+
+def _turn_start(m) -> bool:
+    """A HumanMessage that begins a user turn — a mid-run steer doesn't
+    (it belongs to the turn it was typed into)."""
+    return isinstance(m, HumanMessage) and not (m.additional_kwargs or {}).get("lb_steer")
+
+
+class _Steer(AgentMiddleware):
+    """Delivers queued steers before each main-agent model call."""
+
+    async def abefore_model(self, state, runtime):  # noqa: ANN001, ARG002
+        tid = ((get_config() or {}).get("configurable") or {}).get("thread_id")
+        texts = steer_take(tid) if tid else []
+        if not texts:
+            return None
+        m = _steer_msg(texts)
+        try:  # → run_chat: trajectory USER row + the bubble where it landed
+            await adispatch_custom_event("lb_steer", {"text": m.content})
+        except Exception:  # noqa: BLE001 - outside a traced run (offline tests)
+            pass
+        return {"messages": [m]}
 
 
 def _final_ai(resp):
@@ -965,7 +1010,7 @@ class _TodoReconcile(AgentMiddleware):
             if isinstance(m, ToolMessage):
                 if (getattr(m, "name", None) or "") != "write_todos":
                     n += 1
-            elif isinstance(m, HumanMessage):
+            elif _turn_start(m):
                 break
         return n
 
@@ -1047,7 +1092,7 @@ class _TodoReconcile(AgentMiddleware):
                 if (getattr(m, "name", None) or "") == "write_todos":
                     break
                 n += 1
-            elif isinstance(m, HumanMessage):
+            elif _turn_start(m):
                 break
         return n
 
@@ -1747,6 +1792,7 @@ async def build_agent(s: dict, checkpointer=None, thread_prompt: str = ""):
         mw = [TodoListMiddleware()]  # write_todos planning tool
         if s.get("compact_enabled", True):
             mw.append(_CompactionMiddleware(s))
+        mw.append(_Steer())  # messages typed mid-run → before the next model call
         mw.append(_TodoReconcile())  # deterministic finish-line gate
         mw.append(_FileArgAlias())  # repair path->file_path arg drift pre-validation
         mw.append(_MediaReadGuard())  # audio/video base64 never reaches the model
@@ -1878,6 +1924,8 @@ def _msg_dict(m) -> dict:
     sched = (m.additional_kwargs or {}).get("lb_sched")
     if sched:
         d["sched"] = sched  # UI stamps the bubble ⏰ SCHEDULED RUN (see schedule._fire)
+    if (m.additional_kwargs or {}).get("lb_steer"):
+        d["steer"] = True
     pf = (m.additional_kwargs or {}).get("lb_prefetch")
     if pf:
         d["prefetch"] = {k: v for k, v in pf.items() if k != "note"}  # ⌕ AUTO-SEARCH strip
@@ -2606,6 +2654,7 @@ async def run_chat(
     post-done refresh always sees what the client was already shown)."""
     turn_id = uuid.uuid4().hex[:12]
     t_run0 = time.time()
+    steer_take(thread_id)  # nothing queued for a run that is over carries into this one
     try:
         await _touch(thread_id, user_text or "[image]")
         pf_task = None
@@ -2687,189 +2736,206 @@ async def run_chat(
                 ]
             }
         )
-        async for ev in agent.astream_events(graph_in, cfg, version="v2"):
-            kind = ev["event"]
-            if kind == "on_tool_start" and ev["name"] == "task":
-                sub_runs.add(str(ev["run_id"]))
-            elif kind == "on_tool_end" and str(ev["run_id"]) in sub_runs:
-                sub_runs.discard(str(ev["run_id"]))
-            in_sub = bool(sub_runs & {str(p) for p in ev.get("parent_ids") or ()})
-            # Innermost live `task` this event belongs to. parent_ids is
-            # ordered root -> immediate parent, so scan reversed for the
-            # innermost match. The `task` tool's OWN events don't carry its
-            # run_id in parent_ids, so they correctly resolve to None (or to
-            # the enclosing task for a nested task) — the UI renders those
-            # as the sub card itself.
-            sub_id = next(
-                (
-                    p
-                    for p in reversed([str(x) for x in (ev.get("parent_ids") or ())])
-                    if p in sub_runs
-                ),
-                None,
-            )
-            if kind.startswith("on_chat_model") and COMPACTION_TAG in (ev.get("tags") or ()):
-                continue  # the summarizer: reported once, via lb_compacted below
-            if kind == "on_custom_event" and ev.get("name") == "lb_compacted" and not in_sub:
-                d = ev.get("data") or {}
-                await _log(
-                    thread_id, turn_id, "compact", name=s.get("model"), dur=d.get("dur"),
-                    tok_in=d.get("tok_in"), tok_out=d.get("tok_out"),
-                    meta={k: d.get(k) for k in ("count", "kept", "before", "after", "in_turn")}
-                    | {"text": _cap(d.get("summary") or "", 500)},
+        while True:
+            async for ev in agent.astream_events(graph_in, cfg, version="v2"):
+                kind = ev["event"]
+                if kind == "on_tool_start" and ev["name"] == "task":
+                    sub_runs.add(str(ev["run_id"]))
+                elif kind == "on_tool_end" and str(ev["run_id"]) in sub_runs:
+                    sub_runs.discard(str(ev["run_id"]))
+                in_sub = bool(sub_runs & {str(p) for p in ev.get("parent_ids") or ()})
+                # Innermost live `task` this event belongs to. parent_ids is
+                # ordered root -> immediate parent, so scan reversed for the
+                # innermost match. The `task` tool's OWN events don't carry its
+                # run_id in parent_ids, so they correctly resolve to None (or to
+                # the enclosing task for a nested task) — the UI renders those
+                # as the sub card itself.
+                sub_id = next(
+                    (
+                        p
+                        for p in reversed([str(x) for x in (ev.get("parent_ids") or ())])
+                        if p in sub_runs
+                    ),
+                    None,
                 )
-                yield {"type": "compacted", **{k: d.get(k) for k in
-                       ("count", "kept", "before", "after", "in_turn", "dur", "summary")}}
-                continue
-            if kind == "on_chat_model_start":
-                if not in_sub:
-                    t0, t_first = time.time(), None
-                else:
-                    sub_m_t0[str(ev["run_id"])] = time.time()
-            elif kind == "on_chat_model_stream":
-                if in_sub:
+                if kind.startswith("on_chat_model") and COMPACTION_TAG in (ev.get("tags") or ()):
+                    continue  # the summarizer: reported once, via lb_compacted below
+                if kind == "on_custom_event" and ev.get("name") == "lb_steer" and not in_sub:
+                    txt = (ev.get("data") or {}).get("text") or ""
+                    await _log(thread_id, turn_id, "user", meta={"text": _cap(txt, 800), "steer": True})
+                    yield {"type": "steer", "text": txt}
                     continue
-                if t0 is not None and t_first is None:
-                    t_first = time.time()  # includes prefill + first-token latency
-                chunk = ev["data"]["chunk"]
-                text = chunk.content
-                # reasoning BEFORE content: vLLM's parser can put the last
-                # reasoning "\n" and the first answer text in ONE delta —
-                # token-first opened a stray empty ◈ THINKING card under the answer
-                reasoning = (chunk.additional_kwargs or {}).get("reasoning_content")
-                if reasoning:
-                    # Belt & braces: with thinking off we explicitly asked the
-                    # backend not to emit any; if one ignores that, keep the
-                    # text in the visible stream rather than a card the
-                    # REASONING toggle would strand.
-                    yield (
-                        {"type": "thinking", "text": reasoning}
-                        if s.get("enable_thinking")
-                        else {"type": "token", "text": reasoning}
-                    )
-                if isinstance(text, str) and text:
-                    yield {"type": "token", "text": text}
-            elif kind == "on_chat_model_end":
-                # stream_usage=True makes sglang append a final usage chunk;
-                # langchain merges it into the assembled message's usage_metadata.
-                um = getattr(ev["data"].get("output"), "usage_metadata", None) or {}
-                inp = int(um.get("input_tokens") or 0)
-                outp = int(um.get("output_tokens") or 0)
-                # sglang only reports cache_read with --enable-cache-report;
-                # absent/0 until then, and the UI hides the chip accordingly.
-                cache = (um.get("input_token_details") or {}).get("cache_read")
-                out_text = _cap(
-                    _text_only(getattr(ev["data"].get("output"), "content", "")), 500
-                )
-                if in_sub:
-                    # Persisted (so LLM seconds include sub-agent thinking),
-                    # but its stream stays suppressed from the UI.
-                    st = sub_m_t0.pop(str(ev["run_id"]), None)
+                if kind == "on_custom_event" and ev.get("name") == "lb_compacted" and not in_sub:
+                    d = ev.get("data") or {}
                     await _log(
-                        thread_id, turn_id, "model", name=s.get("model"),
-                        dur=round(time.time() - st, 3) if st else None,
-                        tok_in=inp or None, tok_out=outp or None, cache_read=cache,
-                        meta={"text": out_text, "sub": sub_id},
+                        thread_id, turn_id, "compact", name=s.get("model"), dur=d.get("dur"),
+                        tok_in=d.get("tok_in"), tok_out=d.get("tok_out"),
+                        meta={k: d.get(k) for k in ("count", "kept", "before", "after", "in_turn")}
+                        | {"text": _cap(d.get("summary") or "", 500)},
                     )
+                    yield {"type": "compacted", **{k: d.get(k) for k in
+                           ("count", "kept", "before", "after", "in_turn", "dur", "summary")}}
                     continue
-                if t0 is not None:
-                    now = time.time()
-                    ttft = (t_first if t_first else now) - t0
-                    decode = max(now - (t_first if t_first else now), 1e-3)
-                    await _log(
-                        thread_id, turn_id, "model", name=s.get("model"),
-                        dur=round(now - t0, 3),
-                        tok_in=inp or None, tok_out=outp or None,
-                        cache_read=cache, ttft=round(ttft, 3),
-                        meta={"text": out_text, "sub": None},
+                if kind == "on_chat_model_start":
+                    if not in_sub:
+                        t0, t_first = time.time(), None
+                    else:
+                        sub_m_t0[str(ev["run_id"])] = time.time()
+                elif kind == "on_chat_model_stream":
+                    if in_sub:
+                        continue
+                    if t0 is not None and t_first is None:
+                        t_first = time.time()  # includes prefill + first-token latency
+                    chunk = ev["data"]["chunk"]
+                    text = chunk.content
+                    # reasoning BEFORE content: vLLM's parser can put the last
+                    # reasoning "\n" and the first answer text in ONE delta —
+                    # token-first opened a stray empty ◈ THINKING card under the answer
+                    reasoning = (chunk.additional_kwargs or {}).get("reasoning_content")
+                    if reasoning:
+                        # Belt & braces: with thinking off we explicitly asked the
+                        # backend not to emit any; if one ignores that, keep the
+                        # text in the visible stream rather than a card the
+                        # REASONING toggle would strand.
+                        yield (
+                            {"type": "thinking", "text": reasoning}
+                            if s.get("enable_thinking")
+                            else {"type": "token", "text": reasoning}
+                        )
+                    if isinstance(text, str) and text:
+                        yield {"type": "token", "text": text}
+                elif kind == "on_chat_model_end":
+                    # stream_usage=True makes sglang append a final usage chunk;
+                    # langchain merges it into the assembled message's usage_metadata.
+                    um = getattr(ev["data"].get("output"), "usage_metadata", None) or {}
+                    inp = int(um.get("input_tokens") or 0)
+                    outp = int(um.get("output_tokens") or 0)
+                    # sglang only reports cache_read with --enable-cache-report;
+                    # absent/0 until then, and the UI hides the chip accordingly.
+                    cache = (um.get("input_token_details") or {}).get("cache_read")
+                    out_text = _cap(
+                        _text_only(getattr(ev["data"].get("output"), "content", "")), 500
                     )
-                    if inp or outp:
-                        yield {
-                            "type": "usage",
-                            "input": inp,
-                            "output": outp,
-                            "ttft": round(ttft, 2),
-                            "prefill_tps": round(inp / max(ttft, 1e-3)),
-                            "decode_tps": round(outp / decode, 1),
-                            "seconds": round(now - t0, 1),
-                        }
-                t0, t_first = None, None
-            elif kind == "on_tool_start":
-                rid = str(ev["run_id"])
-                tool_t0[rid] = (time.time(), sub_id, ev["data"].get("input"))
-                yield {
-                    "type": "tool_start",
-                    "name": ev["name"],
-                    "input": _safe(ev["data"].get("input")),
-                    "run_id": rid,
-                    "sub": sub_id,
-                }
-                if ev["name"] == "write_todos":
-                    todos = (ev["data"].get("input") or {}).get("todos")
-                    if isinstance(todos, list):
-                        # UI renders the TO-DOS panel from this; the raw
-                        # tool card still streams too.
-                        yield {"type": "todos", "todos": todos}
-                if ev["name"] == "task":
-                    d = ev["data"].get("input") or {}
+                    if in_sub:
+                        # Persisted (so LLM seconds include sub-agent thinking),
+                        # but its stream stays suppressed from the UI.
+                        st = sub_m_t0.pop(str(ev["run_id"]), None)
+                        await _log(
+                            thread_id, turn_id, "model", name=s.get("model"),
+                            dur=round(time.time() - st, 3) if st else None,
+                            tok_in=inp or None, tok_out=outp or None, cache_read=cache,
+                            meta={"text": out_text, "sub": sub_id},
+                        )
+                        continue
+                    if t0 is not None:
+                        now = time.time()
+                        ttft = (t_first if t_first else now) - t0
+                        decode = max(now - (t_first if t_first else now), 1e-3)
+                        await _log(
+                            thread_id, turn_id, "model", name=s.get("model"),
+                            dur=round(now - t0, 3),
+                            tok_in=inp or None, tok_out=outp or None,
+                            cache_read=cache, ttft=round(ttft, 3),
+                            meta={"text": out_text, "sub": None},
+                        )
+                        if inp or outp:
+                            yield {
+                                "type": "usage",
+                                "input": inp,
+                                "output": outp,
+                                "ttft": round(ttft, 2),
+                                "prefill_tps": round(inp / max(ttft, 1e-3)),
+                                "decode_tps": round(outp / decode, 1),
+                                "seconds": round(now - t0, 1),
+                            }
+                    t0, t_first = None, None
+                elif kind == "on_tool_start":
+                    rid = str(ev["run_id"])
+                    tool_t0[rid] = (time.time(), sub_id, ev["data"].get("input"))
                     yield {
-                        "type": "sub",
-                        "state": "start",
-                        "sub_id": rid,
-                        "desc": str(d.get("description") or "")[:120],
-                        "subagent_type": d.get("subagent_type"),
+                        "type": "tool_start",
+                        "name": ev["name"],
+                        "input": _safe(ev["data"].get("input")),
+                        "run_id": rid,
+                        "sub": sub_id,
                     }
-            elif kind == "on_tool_end":
-                rid = str(ev["run_id"])
-                out_text = _tool_text(ev["data"].get("output"))
-                st0, sub0, inp0 = tool_t0.pop(rid, (None, sub_id, None))
-                dur = round(time.time() - st0, 3) if st0 else None
-                meta = {"in": _cap(inp0, 2000), "out": _cap(out_text, 2000), "sub": sub0}
-                if ev["name"] == "task":
-                    # The task row IS the sub-agent span: dur = whole
-                    # delegation, meta carries what was delegated.
-                    d = inp0 if isinstance(inp0, dict) else {}
-                    meta["desc"] = str(d.get("description") or "")[:120]
-                    meta["subagent_type"] = d.get("subagent_type")
-                await _log(thread_id, turn_id, "tool", name=ev["name"], dur=dur, meta=meta)
-                yield {
-                    "type": "tool_end",
-                    "name": ev["name"],
-                    "output": out_text,
-                    "run_id": rid,
-                    "sub": sub0,
-                    "dur": dur,
-                }
-                if ev["name"] == "task":
-                    yield {"type": "sub", "state": "end", "sub_id": rid, "dur": dur}
-            elif kind == "on_tool_error" and isinstance(ev["data"].get("error"), GraphInterrupt):
-                # a human gate pausing (ask_user / exit_plan_mode) is not a
-                # failure: drop the timing entry; the `gate` event after the
-                # stream renders it, and the resumed run re-emits the tool
-                tool_t0.pop(str(ev["run_id"]), None)
-            elif kind == "on_tool_error":
-                # Validation/invocation failure (e.g. the model emitted a
-                # tool call with empty or wrong-schema args — sglang drops
-                # giant tool-call JSON now and then). The tool never ran:
-                # without this branch the card sat "running" forever and
-                # the trajectory had no row for the attempt at all.
-                rid = str(ev["run_id"])
-                sub_runs.discard(rid)
-                st0, sub0, inp0 = tool_t0.pop(rid, (None, sub_id, None))
-                dur = round(time.time() - st0, 3) if st0 else None
-                err = str(ev["data"].get("error") or "tool error")[:500]
-                await _log(
-                    thread_id, turn_id, "tool", name=ev["name"], dur=dur,
-                    meta={"in": _cap(inp0, 2000), "err": err, "sub": sub0},
-                )
-                yield {
-                    "type": "tool_error",
-                    "name": ev["name"],
-                    "error": err,
-                    "run_id": rid,
-                    "sub": sub0,
-                    "dur": dur,
-                }
+                    if ev["name"] == "write_todos":
+                        todos = (ev["data"].get("input") or {}).get("todos")
+                        if isinstance(todos, list):
+                            # UI renders the TO-DOS panel from this; the raw
+                            # tool card still streams too.
+                            yield {"type": "todos", "todos": todos}
+                    if ev["name"] == "task":
+                        d = ev["data"].get("input") or {}
+                        yield {
+                            "type": "sub",
+                            "state": "start",
+                            "sub_id": rid,
+                            "desc": str(d.get("description") or "")[:120],
+                            "subagent_type": d.get("subagent_type"),
+                        }
+                elif kind == "on_tool_end":
+                    rid = str(ev["run_id"])
+                    out_text = _tool_text(ev["data"].get("output"))
+                    st0, sub0, inp0 = tool_t0.pop(rid, (None, sub_id, None))
+                    dur = round(time.time() - st0, 3) if st0 else None
+                    meta = {"in": _cap(inp0, 2000), "out": _cap(out_text, 2000), "sub": sub0}
+                    if ev["name"] == "task":
+                        # The task row IS the sub-agent span: dur = whole
+                        # delegation, meta carries what was delegated.
+                        d = inp0 if isinstance(inp0, dict) else {}
+                        meta["desc"] = str(d.get("description") or "")[:120]
+                        meta["subagent_type"] = d.get("subagent_type")
+                    await _log(thread_id, turn_id, "tool", name=ev["name"], dur=dur, meta=meta)
+                    yield {
+                        "type": "tool_end",
+                        "name": ev["name"],
+                        "output": out_text,
+                        "run_id": rid,
+                        "sub": sub0,
+                        "dur": dur,
+                    }
+                    if ev["name"] == "task":
+                        yield {"type": "sub", "state": "end", "sub_id": rid, "dur": dur}
+                elif kind == "on_tool_error" and isinstance(ev["data"].get("error"), GraphInterrupt):
+                    # a human gate pausing (ask_user / exit_plan_mode) is not a
+                    # failure: drop the timing entry; the `gate` event after the
+                    # stream renders it, and the resumed run re-emits the tool
+                    tool_t0.pop(str(ev["run_id"]), None)
+                elif kind == "on_tool_error":
+                    # Validation/invocation failure (e.g. the model emitted a
+                    # tool call with empty or wrong-schema args — sglang drops
+                    # giant tool-call JSON now and then). The tool never ran:
+                    # without this branch the card sat "running" forever and
+                    # the trajectory had no row for the attempt at all.
+                    rid = str(ev["run_id"])
+                    sub_runs.discard(rid)
+                    st0, sub0, inp0 = tool_t0.pop(rid, (None, sub_id, None))
+                    dur = round(time.time() - st0, 3) if st0 else None
+                    err = str(ev["data"].get("error") or "tool error")[:500]
+                    await _log(
+                        thread_id, turn_id, "tool", name=ev["name"], dur=dur,
+                        meta={"in": _cap(inp0, 2000), "err": err, "sub": sub0},
+                    )
+                    yield {
+                        "type": "tool_error",
+                        "name": ev["name"],
+                        "error": err,
+                        "run_id": rid,
+                        "sub": sub0,
+                        "dur": dur,
+                    }
+            # a steer that landed after the model's last step: the graph has
+            # ended without seeing it — one more round in this same run
+            if await pending_gates(thread_id):
+                break
+            left = steer_take(thread_id)
+            if not left:
+                break
+            m_st = _steer_msg(left)
+            await _log(thread_id, turn_id, "user", meta={"text": _cap(m_st.content, 800), "steer": True})
+            yield {"type": "steer", "text": m_st.content}
+            graph_in = {"messages": [m_st]}
         # an interrupt() ends the stream quietly — the pause lives in the
         # checkpoint; surface it so the UI can render the question / plan
         for g in await pending_gates(thread_id):
