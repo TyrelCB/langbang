@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -405,13 +406,39 @@ class SGlangChatOpenAI(ChatOpenAI):
     """
 
     keep_reasoning: str = "off"
+    # the main agent's system prompt (build_agent): a request that starts with
+    # it is the thread's own model view and is kept for /btw (_capture)
+    lb_main_prompt: str = ""
 
     def _get_request_payload(self, input_, *, stop=None, **kwargs):  # noqa: ANN001
         payload = self._reasoning_payload(input_, stop=stop, **kwargs)
         for m in payload.get("messages") or []:
             defang_message(m)
         self._resume_payload(input_, payload)
+        if self.lb_main_prompt:
+            self._capture(input_, payload)
         return payload
+
+    def _capture(self, input_, payload) -> None:
+        """Keep the main agent's latest request per thread: /btw replays it
+        with the side question appended, so it sees exactly what the agent
+        sees AND shares its prefix in vLLM's cache. Sub-agents ride the same
+        model object but carry their own system prompt, so they're skipped."""
+        msgs = payload.get("messages") or []
+        if not msgs or msgs[0].get("role") != "system" \
+                or not _text_only(msgs[0].get("content") or "").startswith(self.lb_main_prompt):
+            return
+        try:
+            tid = (get_config().get("configurable") or {}).get("thread_id")
+        except RuntimeError:  # outside a graph run (btw's own fallback build)
+            return
+        if not tid:
+            return
+        last = next((m.id for m in reversed(self._convert_input(input_).to_messages()) if m.id), None)
+        _VIEWS[tid] = {"payload": payload, "last_id": last, "client": self.root_async_client,
+                       "ts": time.time()}
+        while len(_VIEWS) > 8:
+            _VIEWS.pop(next(iter(_VIEWS)))
 
     def _resume_payload(self, input_, payload) -> None:
         """A trailing AIMessage carrying `lb_resume` (see _EmptyAnswerRetry)
@@ -504,6 +531,7 @@ class SGlangChatOpenAI(ChatOpenAI):
 
 
 _REJECTS_KWARGS: set[str] = set()  # base_urls that 400'd on chat_template_kwargs
+_VIEWS: dict[str, dict] = {}  # thread → its agent's latest model request (/btw)
 
 
 def no_think(s: dict) -> dict:
@@ -1817,8 +1845,10 @@ async def build_agent(s: dict, checkpointer=None, thread_prompt: str = ""):
             perms = [FilesystemPermission(
                 operations=["write"], paths=[hermes + "/**"], mode="deny")]
         mw.append(_EmptyAnswerRetry())  # last = innermost, right around the model
+        main = model(s)
+        main.lb_main_prompt = prompt  # → _capture (/btw replays this view)
         return create_deep_agent(
-            model(s),
+            main,
             tools,
             system_prompt=prompt + DEEP_NOTE,
             middleware=mw,
@@ -2644,44 +2674,210 @@ async def recap_thread(tid: str) -> dict | None:
 
 
 _BTW_INSTRUCTION = (
-    "The user is asking a quick side question about the conversation below "
-    "(the agent may still be working on it — the transcript can end mid-task). "
-    "Answer briefly and concretely from the transcript only; if it doesn't say, "
-    "say so. Don't propose or start new work. Earlier side questions and your "
-    "answers to them may follow the transcript — build on them for follow-ups."
+    "[/btw — SIDE QUESTION, not a new task] The user is asking you a side "
+    "question about this thread while the work goes on. Answer it briefly and "
+    "concretely from everything above, plus the excerpts below from the "
+    "thread's compacted (summarized-away) history. Do NOT call tools, do not "
+    "continue or change the task, and don't propose new work unless asked — "
+    "this exchange is not added to the thread. If the thread really doesn't "
+    "say, say so plainly."
 )
+_BTW_PRIOR = 5  # earlier side exchanges fed into a new /btw
+_BTW_STOP = set("""the and for are was were that this with from what which when where who how why
+does did have has had not but you your our its it's can could would should will about into than then
+them they there their been being any all just like also only some more most very much many such
+used use using last first one two out yes no""".split())
+
+
+def _btw_terms(q: str) -> list[str]:
+    """Search terms from a side question: words of 3+ letters, plus short
+    tokens holding a digit (v3, 32, t27 — exactly what these threads hinge on)."""
+    out = []
+    for w in re.findall(r"[a-z0-9][a-z0-9_.\-]*", q.lower()):
+        w = w.strip(".-")
+        if w and w not in _BTW_STOP and w not in out and (len(w) >= 3 or re.search(r"\d", w)):
+            out.append(w)
+    return out[:24]
+
+
+def _btw_excerpts(q: str, rows: list[tuple[int, str]], budget: int = 12000) -> str:
+    """Compacted-history passages for a side question: archived messages
+    matching 2+ question terms (whole words), scored by summed idf (digit
+    terms count 1.5x — v3/32/t27 are what these threads hinge on) times the
+    share of terms hit; best few shown as a window around their rarest
+    hit, in thread order. Ties go to the later message."""
+    terms = _btw_terms(q)
+    if not terms or not rows:
+        return ""
+    low = [t.lower() for _, t in rows]
+    pat = {w: re.compile(r"(?<![a-z0-9])" + re.escape(w) + r"(?![a-z0-9])") for w in terms}
+    df = {w: sum(1 for t in low if pat[w].search(t)) for w in terms}
+    idf = {w: math.log((len(rows) + 1) / (df[w] + 0.5)) * (1.5 if re.search(r"\d", w) else 1)
+           for w in terms if df[w]}
+    need = min(2, len(idf))
+    scored = []
+    for k, t in enumerate(low):
+        hit = [w for w in idf if pat[w].search(t)]
+        if hit and len(hit) >= need:
+            scored.append((sum(idf[w] for w in hit) * len(hit) / len(idf), k,
+                           min(hit, key=lambda w: df[w])))
+    picked, used = [], 0
+    for _, k, rare in sorted(scored, reverse=True)[:12]:
+        text = rows[k][1]
+        at = pat[rare].search(text.lower()).start()
+        lo = max(0, at - 700)
+        snip = ("…" if lo else "") + text[lo:lo + 1600] + ("…" if lo + 1600 < len(text) else "")
+        if used + len(snip) > budget:
+            break
+        picked.append((k, snip))
+        used += len(snip)
+    return "\n\n".join(f"[earlier message {rows[k][0]}] {snip}" for k, snip in sorted(picked))
+
+
+async def _btw_turns(q: str, tid: str) -> str:
+    """Semantic hits among this thread's indexed turns (rag source=thread:
+    user message + final answer), its ⑂ ancestors' too — a fork's early
+    history was indexed under the thread it came from. Best effort."""
+    from . import rag
+    tids, cur_t = [tid], tid
+    for _ in range(3):
+        row = await (await _db.execute("SELECT parent FROM threads WHERE id=?", (cur_t,))).fetchone()
+        try:
+            cur_t = json.loads(row[0])["tid"] if row and row[0] else None
+        except (ValueError, KeyError, TypeError):
+            cur_t = None
+        if not cur_t:
+            break
+        tids.append(cur_t)
+    hits = []
+    for t in tids:
+        try:
+            r = await asyncio.to_thread(rag.search, q, source="thread", scope="local", top_k=3,
+                                        path_prefix=f"lb-thread:{t}/", timeout=6)
+            hits += (r or {}).get("results") or []
+        except Exception as e:  # noqa: BLE001 - a hint, never a failure
+            logger.warning("btw turn search %s: %s", t, e)
+            break
+    hits.sort(key=lambda h: -(h.get("score") or 0))
+    return "\n\n".join(f"[earlier turn] {(h.get('text') or '')[:1500]}" for h in hits[:3])
+
+
+def _archive_rows(raw: list[str]) -> list[tuple[int, str]]:
+    rows = []
+    for n, r in enumerate(raw):
+        try:
+            m = json.loads(r)
+        except ValueError:
+            continue
+        role = m.get("role") or m.get("type") or "?"
+        text = _text_only(m.get("content") or "")
+        calls = " ".join(json.dumps(tc.get("args"), ensure_ascii=False)[:600]
+                         for tc in (m.get("tool_calls") or []))
+        body = (text + (" [called] " + calls if calls else "")).strip()
+        if body:
+            rows.append((n, f"{str(role).upper()}: {body}"))
+    return rows
+
+
+def _btw_text_view(lm: list, vision: bool) -> list:
+    """Live messages as a model request when there's no captured view
+    (thread hasn't run since the server started): media blocks become a
+    placeholder unless they're images on a vision model."""
+    out = []
+    for m in lm:
+        c = m.content
+        if isinstance(c, list):
+            keep = []
+            for b in c:
+                if not isinstance(b, dict) or b.get("type") == "text":
+                    keep.append(b)
+                elif vision and b.get("type") in ("image", "image_url"):
+                    keep.append(b)
+                else:
+                    keep.append({"type": "text", "text": f"[{b.get('type')} omitted]"})
+            m = m.model_copy(update={"content": keep})
+        out.append(m)
+    return out
 
 
 async def btw(tid: str, question: str) -> dict | None:
-    """/btw: a side question answered from the thread's transcript, without
-    touching the thread — the running agent never sees it. The exchange is
-    banked in the `btw` table (its own per-thread side log), and the last few
-    ride along as context so a follow-up side question can build on them."""
+    """/btw: a side question answered from the thread's own model view,
+    without touching the thread — the running agent never sees it.
+
+    The view is the agent's latest request (captured by _capture): same
+    system prompt, tools and messages, so vLLM's prefix cache already holds
+    nearly all of it, plus any messages since. With no capture (server
+    restarted since the thread last ran) it's rebuilt from live state. What
+    compaction summarized away is searched for the question's terms and the
+    best passages ride along. The exchange is banked in the `btw` table and
+    the last few are included, so a follow-up can build on them."""
     cur = await _db.execute("SELECT title FROM threads WHERE id=?", (tid,))
     if not await cur.fetchone():
         return None
-    msgs = await history(tid)
+    s = config.effective(config.load(), await get_thread_model(tid))
+    live = await _live_messages(tid)
+    view = _VIEWS.get(tid)
+    m = model(s)
+    if view:
+        payload = {**view["payload"], "messages": list(view["payload"]["messages"])}
+        ids = [x.id for x in live]
+        if view["last_id"] in ids:  # tool results etc. since that model call
+            newer = live[ids.index(view["last_id"]) + 1:]
+            if newer:
+                payload["messages"] += m._get_request_payload(newer)["messages"]
+        client = view["client"]
+    else:
+        prompt = s["system_prompt"] + learning.thread_note(await learning.get_thread_prompt(_db, tid))
+        payload = m._get_request_payload(
+            [SystemMessage(content=prompt)]
+            + _btw_text_view(live, bool((s.get("capabilities") or {}).get("vision"))))
+        client = m.root_async_client
+    cur = await _db.execute("SELECT msg FROM archived_messages WHERE thread_id=? ORDER BY seq", (tid,))
+    excerpts = _btw_excerpts(question, _archive_rows([r[0] for r in await cur.fetchall()]))
+    turns = await _btw_turns(question, tid)
     prior = (await btw_list(tid))[-_BTW_PRIOR:]
-    side = "".join(f"\n\nEARLIER SIDE QUESTION: {b['q']}\nYOUR ANSWER: {b['answer'][:1500]}"
-                   for b in prior)
-    out = await _one_shot(config.load(), 900, 0.3).ainvoke([
-        SystemMessage(content=_BTW_INSTRUCTION),
-        HumanMessage(content=_flat_transcript(msgs, head=2, tail=80, cap=1200, args=300)
-                     + side + "\n\nSIDE QUESTION: " + question),
-    ])
-    text = _text_only(out.content).strip()
+    ask = _BTW_INSTRUCTION
+    if excerpts:
+        ask += "\n\nEXCERPTS FROM THE COMPACTED HISTORY (matched on the question's terms):\n" + excerpts
+    if turns:
+        ask += "\n\nEARLIER TURNS OF THIS THREAD (semantic match; may repeat what's above):\n" + turns
+    for b in prior:
+        ask += f"\n\nEARLIER SIDE QUESTION: {b['q']}\nYOUR ANSWER: {b['answer'][:1500]}"
+    ask += "\n\nSIDE QUESTION: " + question
+    payload["messages"].append({"role": "user", "content": ask})
+    payload.pop("stream_options", None)
+    payload.update(stream=False, temperature=0.3)
+    payload.pop("max_completion_tokens", None)
+    payload["max_tokens"] = 4000
+    if payload.get("tools"):
+        payload["tool_choice"] = "none"  # tools stay listed: they're part of the cached prefix
+    eb = dict(payload.pop("extra_body", None) or {})
+    if eb.pop("continue_final_message", None):  # captured mid-resume: drop the open turn
+        eb.pop("add_generation_prompt", None)
+        payload["messages"].pop(-2)
+    kw = dict(eb.get("chat_template_kwargs") or {})
+    if kw.get("enable_thinking"):
+        kw["reasoning_effort"] = "low"  # a side answer, not a work step
+        eb["chat_template_kwargs"] = kw
+    t0 = time.time()
+    resp = await client.chat.completions.create(**payload, extra_body=eb or None, timeout=170)
+    ch = resp.choices[0]
+    text = _text_only(ch.message.content or "")
+    text = text.split("</think>")[-1].strip()  # a provider without a reasoning parser
     if not text:
-        raise RuntimeError("the model returned no text (finish: %s)"
-                           % (out.response_metadata or {}).get("finish_reason"))
+        raise RuntimeError("the model returned no text (finish: %s)" % ch.finish_reason)
+    u = resp.usage
+    det = getattr(u, "prompt_tokens_details", None) if u else None
     ts = time.time()
     async with _wt(_db):
         cur = await _db.execute("INSERT INTO btw(thread_id,ts,q,answer) VALUES(?,?,?,?)",
                                 (tid, ts, question, text))
         bid = cur.lastrowid
-    return {"id": bid, "q": question, "answer": text, "ts": ts}
-
-
-_BTW_PRIOR = 5  # earlier side exchanges fed into a new /btw
+    return {"id": bid, "q": question, "answer": text, "ts": ts,
+            "ctx": u.prompt_tokens if u else None,
+            "cached": getattr(det, "cached_tokens", None) if det else None,
+            "secs": round(ts - t0, 1), "view": "agent" if view else "rebuilt",
+            "excerpts": excerpts.count("[earlier message ") + turns.count("[earlier turn]")}
 
 
 async def btw_list(tid: str) -> list[dict]:

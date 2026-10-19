@@ -843,7 +843,7 @@ async function openBtw(q) {
   loadBank();
   if (recapAbort) recapAbort.abort();
   recapAbort = new AbortController();
-  const timer = setTimeout(() => recapAbort.abort(), 90000);
+  const timer = setTimeout(() => recapAbort.abort(), 180000); // a cold 120k-token view is a long prefill
   try {
     const r = await fetch(`/api/threads/${tid}/btw`, {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -853,12 +853,16 @@ async function openBtw(q) {
     const out = await r.json();
     if (threadId !== tid) return;
     setMarkdown(now, out.answer);
-    $("#recap-ts").textContent = "ANSWERED " + new Date(out.ts * 1000).toLocaleTimeString() + " · banked with this thread, not sent to the agent";
+    const k = (n) => n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
+    $("#recap-ts").textContent = "ANSWERED " + new Date(out.ts * 1000).toLocaleTimeString()
+      + (out.ctx ? ` · saw ${k(out.ctx)} tokens` + (out.cached ? ` (${k(out.cached)} cached)` : "") : "")
+      + (out.excerpts ? ` + ${out.excerpts} earlier passages` : "")
+      + (out.secs != null ? ` · ${out.secs}s` : "") + " · banked, not sent to the agent";
     SFX.play("message_received");
     loadBank(out.id);
   } catch (e) {
     if (threadId !== tid) return;
-    setMarkdown(now, e.name === "AbortError" ? "✕ timed out (90 s) — the model may be busy; try again."
+    setMarkdown(now, e.name === "AbortError" ? "✕ timed out (180 s) — the model may be busy; try again."
       : "✕ side question failed: " + e.message);
     SFX.play("error");
   } finally {
