@@ -1325,6 +1325,9 @@ html[data-theme="light"] .spk-hud-phrase span.on { text-shadow: none; }
 .btw-a { max-width: 100%; background: none; border: none; padding: 8px 0 0; }
 .btw-acts { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
 .btw-empty { color: var(--muted); }
+.merge-strip { color: var(--green); cursor: pointer; }
+.merge-note { width: 100%; box-sizing: border-box; min-height: 40vh; background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); padding: 10px; font: inherit; font-size: 13px; resize: vertical; }
 @media (max-width: 640px) {
   #slash-pop { left: 8px; right: 8px; }
   .slash-row { flex-direction: column; gap: 2px; }

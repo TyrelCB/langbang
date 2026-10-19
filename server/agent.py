@@ -117,6 +117,10 @@ async def init() -> None:
           id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT NOT NULL,
           ts REAL NOT NULL, q TEXT NOT NULL, answer TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS ix_btw_thread ON btw(thread_id, id);
+        CREATE TABLE IF NOT EXISTS arch_base(
+          tid TEXT PRIMARY KEY, base TEXT NOT NULL, n INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS ix_arch_base ON arch_base(base);
+        CREATE INDEX IF NOT EXISTS ix_archived_thread ON archived_messages(thread_id, seq);
         """
     )
     # threads.orig = the seed title (schedule name / first-message prefix) that
@@ -151,6 +155,7 @@ async def init() -> None:
     )
     await _edb.commit()
     await _migrate_run_events()
+    await _share_fork_archives()
     await _startup_maintenance()
 
 
@@ -1960,6 +1965,9 @@ def _msg_dict(m) -> dict:
         d["sched"] = sched  # UI stamps the bubble ⏰ SCHEDULED RUN (see schedule._fire)
     if (m.additional_kwargs or {}).get("lb_steer"):
         d["steer"] = True
+    merge = (m.additional_kwargs or {}).get("lb_merge")
+    if merge:
+        d["merge"] = merge  # UI stamps the bubble ⤴ MERGED FROM ⑂ (see merge_deliver)
     pf = (m.additional_kwargs or {}).get("lb_prefetch")
     if pf:
         d["prefetch"] = {k: v for k, v in pf.items() if k != "note"}  # ⌕ AUTO-SEARCH strip
@@ -2045,6 +2053,93 @@ def _slim(d: dict) -> dict:
     return out
 
 
+# ---- archived (compacted-away) messages, shared across ⑂ forks ----
+# A fork doesn't copy its source's archive: arch_base says "my archive starts
+# with the first n rows of <base>'s" and archived_messages holds only the
+# rows compacted in the fork itself. Archives only ever grow at the end, so
+# a prefix never changes under a fork. A deleted thread whose rows a fork
+# still uses keeps them (and its own arch_base row) until the last user goes.
+
+async def _arch_raw(tid: str, n: int | None = None, _depth: int = 0) -> list[str]:
+    """A thread's archived message JSON, oldest first (base prefix + own rows),
+    or just its first n."""
+    out: list[str] = []
+    b = await (await _db.execute("SELECT base,n FROM arch_base WHERE tid=?", (tid,))).fetchone()
+    if b and _depth < 64:
+        out = await _arch_raw(b[0], b[1], _depth + 1)
+    if n is not None and len(out) >= n:
+        return out[:n]
+    sql = "SELECT msg FROM archived_messages WHERE thread_id=? ORDER BY seq"
+    args: tuple = (tid,)
+    if n is not None:
+        sql += " LIMIT ?"
+        args = (tid, n - len(out))
+    out += [r[0] for r in await (await _db.execute(sql, args)).fetchall()]
+    return out
+
+
+async def _arch_flatten(tid: str, n: int) -> tuple[str, int]:
+    """Point at the thread that actually holds rows: a prefix lying wholly
+    inside tid's own base belongs to that base (short chains, and a middle
+    fork can be deleted without pinning anything)."""
+    for _ in range(64):
+        b = await (await _db.execute("SELECT base,n FROM arch_base WHERE tid=?", (tid,))).fetchone()
+        if not b or n > b[1]:
+            break
+        tid = b[0]
+    return tid, n
+
+
+async def _arch_gc(tid: str) -> None:
+    """Drop a deleted thread's archive unless a fork still reads it, then
+    walk up its bases: a ghost (deleted, kept for forks) with no users left
+    goes too. Runs inside the caller's _wt transaction."""
+    for _ in range(64):
+        if await (await _db.execute("SELECT 1 FROM threads WHERE id=?", (tid,))).fetchone():
+            return  # still a live thread
+        if await (await _db.execute("SELECT 1 FROM arch_base WHERE base=? LIMIT 1", (tid,))).fetchone():
+            return  # a fork reads its rows: keep them as a ghost
+        b = await (await _db.execute("SELECT base FROM arch_base WHERE tid=?", (tid,))).fetchone()
+        await _db.execute("DELETE FROM archived_messages WHERE thread_id=?", (tid,))
+        await _db.execute("DELETE FROM arch_base WHERE tid=?", (tid,))
+        if not b:
+            return
+        tid = b[0]
+
+
+async def _share_fork_archives() -> None:
+    """One-time per fork (forks made before arch_base copied the archive):
+    the leading rows identical to the source's archive become a shared
+    prefix and the copies are deleted. Freed pages are reused by SQLite,
+    the file itself doesn't shrink without a VACUUM."""
+    cur = await _db.execute(
+        "SELECT id, parent FROM threads WHERE parent IS NOT NULL "
+        "AND id NOT IN (SELECT tid FROM arch_base)")
+    for tid, parent in await cur.fetchall():
+        try:
+            src = json.loads(parent)["tid"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        if not await (await _db.execute("SELECT 1 FROM threads WHERE id=?", (src,))).fetchone():
+            continue
+        own = await (await _db.execute(
+            "SELECT seq, msg FROM archived_messages WHERE thread_id=? ORDER BY seq", (tid,))).fetchall()
+        if not own:
+            continue
+        theirs = await _arch_raw(src, len(own))
+        k = 0
+        while k < len(own) and k < len(theirs) and own[k][1] == theirs[k]:
+            k += 1
+        if not k:
+            continue
+        base, n = await _arch_flatten(src, k)
+        async with _wt(_db):
+            await _db.execute("INSERT INTO arch_base(tid,base,n) VALUES(?,?,?)", (tid, base, n))
+            await _db.execute("DELETE FROM archived_messages WHERE thread_id=? AND seq<=?",
+                              (tid, own[k - 1][0]))
+        logger.warning("fork %s now shares %d archived rows with %s", tid, k, base)
+
+
 async def history(thread_id: str) -> list:
     live = []
     for m in await _live_messages(thread_id):
@@ -2054,11 +2149,7 @@ async def history(thread_id: str) -> list:
         live.append(_slim(d))
     # Pre-compaction originals were dropped from graph state; replay them so
     # the UI still shows the full transcript while the model sees the summary.
-    cur = await _db.execute(
-        "SELECT msg FROM archived_messages WHERE thread_id=? ORDER BY seq",
-        (thread_id,),
-    )
-    archived = [_slim(json.loads(r[0])) for r in await cur.fetchall()]
+    archived = [_slim(json.loads(r)) for r in await _arch_raw(thread_id)]
     return archived + live
 
 
@@ -2371,8 +2462,7 @@ async def fork_thread(tid: str, at: int | None = None, role: str = "", text: str
     row = await cur.fetchone()
     if row is None:
         raise LookupError("no such thread")
-    cur = await _db.execute("SELECT msg FROM archived_messages WHERE thread_id=? ORDER BY seq", (tid,))
-    arch_raw = [r[0] for r in await cur.fetchall()]
+    arch_raw = await _arch_raw(tid)
     arch = [json.loads(m) for m in arch_raw]
     live = await _live_messages(tid)
     hist = arch + [_msg_dict(m) for m in live]  # index-aligned with history()
@@ -2431,9 +2521,10 @@ async def fork_thread(tid: str, at: int | None = None, role: str = "", text: str
             "INSERT INTO threads(id,title,created_at,updated_at,orig,prompt,model,parent) "
             "VALUES(?,?,?,?,?,?,?,?)",
             (new, title, now, now, title, row[1], row[2],
-             json.dumps({"tid": tid, "title": row[0], "at": i}, ensure_ascii=False)))
-        for m in keep_arch:
-            await _db.execute("INSERT INTO archived_messages(thread_id,msg) VALUES(?,?)", (new, m))
+             json.dumps({"tid": tid, "title": row[0], "at": i, "kept": cut}, ensure_ascii=False)))
+        if keep_arch:  # shared with the source, not copied (_arch_raw)
+            base, n = await _arch_flatten(tid, len(keep_arch))
+            await _db.execute("INSERT INTO arch_base(tid,base,n) VALUES(?,?,?)", (new, base, n))
     if seed or todos:
         upd = {"messages": seed}
         if todos:
@@ -2457,8 +2548,8 @@ async def search_text(m: dict) -> str:
 async def delete_thread(tid: str) -> None:
     async with _wt(_db):
         await _db.execute("DELETE FROM threads WHERE id=?", (tid,))
-        await _db.execute("DELETE FROM archived_messages WHERE thread_id=?", (tid,))
         await _db.execute("DELETE FROM btw WHERE thread_id=?", (tid,))
+        await _arch_gc(tid)
     async with _wt(_edb):
         await _edb.execute("DELETE FROM run_events WHERE thread_id=?", (tid,))
     # took the checkpoint tables with it (300+ leaked threads before this)
@@ -2800,20 +2891,14 @@ def _btw_text_view(lm: list, vision: bool) -> list:
     return out
 
 
-async def btw(tid: str, question: str) -> dict | None:
-    """/btw: a side question answered from the thread's own model view,
-    without touching the thread — the running agent never sees it.
+async def _ask_view(tid: str, ask: str, max_tokens: int) -> tuple[str, dict]:
+    """One answer from the thread's own model view, with `ask` appended as a
+    user message — nothing is written to the thread (/btw, ⤴ merge).
 
     The view is the agent's latest request (captured by _capture): same
     system prompt, tools and messages, so vLLM's prefix cache already holds
     nearly all of it, plus any messages since. With no capture (server
-    restarted since the thread last ran) it's rebuilt from live state. What
-    compaction summarized away is searched for the question's terms and the
-    best passages ride along. The exchange is banked in the `btw` table and
-    the last few are included, so a follow-up can build on them."""
-    cur = await _db.execute("SELECT title FROM threads WHERE id=?", (tid,))
-    if not await cur.fetchone():
-        return None
+    restarted since the thread last ran) it's rebuilt from live state."""
     s = config.effective(config.load(), await get_thread_model(tid))
     live = await _live_messages(tid)
     view = _VIEWS.get(tid)
@@ -2832,23 +2917,11 @@ async def btw(tid: str, question: str) -> dict | None:
             [SystemMessage(content=prompt)]
             + _btw_text_view(live, bool((s.get("capabilities") or {}).get("vision"))))
         client = m.root_async_client
-    cur = await _db.execute("SELECT msg FROM archived_messages WHERE thread_id=? ORDER BY seq", (tid,))
-    excerpts = _btw_excerpts(question, _archive_rows([r[0] for r in await cur.fetchall()]))
-    turns = await _btw_turns(question, tid)
-    prior = (await btw_list(tid))[-_BTW_PRIOR:]
-    ask = _BTW_INSTRUCTION
-    if excerpts:
-        ask += "\n\nEXCERPTS FROM THE COMPACTED HISTORY (matched on the question's terms):\n" + excerpts
-    if turns:
-        ask += "\n\nEARLIER TURNS OF THIS THREAD (semantic match; may repeat what's above):\n" + turns
-    for b in prior:
-        ask += f"\n\nEARLIER SIDE QUESTION: {b['q']}\nYOUR ANSWER: {b['answer'][:1500]}"
-    ask += "\n\nSIDE QUESTION: " + question
     payload["messages"].append({"role": "user", "content": ask})
     payload.pop("stream_options", None)
     payload.update(stream=False, temperature=0.3)
     payload.pop("max_completion_tokens", None)
-    payload["max_tokens"] = 4000
+    payload["max_tokens"] = max_tokens
     if payload.get("tools"):
         payload["tool_choice"] = "none"  # tools stay listed: they're part of the cached prefix
     eb = dict(payload.pop("extra_body", None) or {})
@@ -2857,7 +2930,7 @@ async def btw(tid: str, question: str) -> dict | None:
         payload["messages"].pop(-2)
     kw = dict(eb.get("chat_template_kwargs") or {})
     if kw.get("enable_thinking"):
-        kw["reasoning_effort"] = "low"  # a side answer, not a work step
+        kw["reasoning_effort"] = "low"  # an aside, not a work step
         eb["chat_template_kwargs"] = kw
     t0 = time.time()
     resp = await client.chat.completions.create(**payload, extra_body=eb or None, timeout=170)
@@ -2868,16 +2941,122 @@ async def btw(tid: str, question: str) -> dict | None:
         raise RuntimeError("the model returned no text (finish: %s)" % ch.finish_reason)
     u = resp.usage
     det = getattr(u, "prompt_tokens_details", None) if u else None
+    return text, {"ctx": u.prompt_tokens if u else None,
+                  "cached": getattr(det, "cached_tokens", None) if det else None,
+                  "secs": round(time.time() - t0, 1), "view": "agent" if view else "rebuilt"}
+
+
+async def btw(tid: str, question: str) -> dict | None:
+    """/btw: a side question answered from the thread's own model view
+    (_ask_view), without touching the thread — the running agent never sees
+    it. What compaction summarized away is searched for the question's terms
+    and the best passages ride along. The exchange is banked in the `btw`
+    table and the last few are included, so a follow-up can build on them."""
+    cur = await _db.execute("SELECT title FROM threads WHERE id=?", (tid,))
+    if not await cur.fetchone():
+        return None
+    excerpts = _btw_excerpts(question, _archive_rows(await _arch_raw(tid)))
+    turns = await _btw_turns(question, tid)
+    prior = (await btw_list(tid))[-_BTW_PRIOR:]
+    ask = _BTW_INSTRUCTION
+    if excerpts:
+        ask += "\n\nEXCERPTS FROM THE COMPACTED HISTORY (matched on the question's terms):\n" + excerpts
+    if turns:
+        ask += "\n\nEARLIER TURNS OF THIS THREAD (semantic match; may repeat what's above):\n" + turns
+    for b in prior:
+        ask += f"\n\nEARLIER SIDE QUESTION: {b['q']}\nYOUR ANSWER: {b['answer'][:1500]}"
+    ask += "\n\nSIDE QUESTION: " + question
+    text, meta = await _ask_view(tid, ask, 4000)
     ts = time.time()
     async with _wt(_db):
         cur = await _db.execute("INSERT INTO btw(thread_id,ts,q,answer) VALUES(?,?,?,?)",
                                 (tid, ts, question, text))
         bid = cur.lastrowid
-    return {"id": bid, "q": question, "answer": text, "ts": ts,
-            "ctx": u.prompt_tokens if u else None,
-            "cached": getattr(det, "cached_tokens", None) if det else None,
-            "secs": round(ts - t0, 1), "view": "agent" if view else "rebuilt",
+    return {"id": bid, "q": question, "answer": text, "ts": ts, **meta,
             "excerpts": excerpts.count("[earlier message ") + turns.count("[earlier turn]")}
+
+
+# ---- ⤴ merge: a ⑂ branch hands what it learned back to its parent ----
+_MERGE_INSTRUCTION = (
+    "[⤴ MERGE — write a hand-off note, not a new task] This thread is a ⑂ branch "
+    "of the thread “{ptitle}”. The branch's own work {since} begins at the user "
+    "message quoted below; everything before that point the parent already has. "
+    "Write a hand-off note for the parent thread's agent about ONLY the branch's "
+    "own work: what was found or decided (with the evidence/numbers), what changed "
+    "on disk (exact paths), commands or services that matter and their state, "
+    "and what is still open. Dense markdown, no preamble, no sign-off. Do NOT "
+    "call tools.\n\nTHE BRANCH'S OWN WORK STARTS AT:\n{start}"
+)
+
+
+async def _branch_info(tid: str) -> tuple[dict, str]:
+    row = await (await _db.execute("SELECT title,parent FROM threads WHERE id=?", (tid,))).fetchone()
+    if row is None:
+        raise LookupError("no such thread")
+    try:
+        p = json.loads(row[1]) if row[1] else None
+    except ValueError:
+        p = None
+    if not p or not p.get("tid"):
+        raise ValueError("this thread isn't a ⑂ fork — there is no parent to merge into")
+    if not await (await _db.execute("SELECT 1 FROM threads WHERE id=?", (p["tid"],))).fetchone():
+        raise ValueError(f"the parent thread “{p.get('title')}” was deleted")
+    return p, row[0]
+
+
+async def merge_preview(tid: str) -> dict:
+    """Draft the hand-off note (the branch's own model view, _ask_view) for
+    the user to read/edit before merge_deliver sends it."""
+    p, title = await _branch_info(tid)
+    hist = await history(tid)
+    merged = p.get("merged_upto")
+    start = merged if merged is not None else p.get("kept", p.get("at", -1) + 1)
+    own = hist[start:]
+    if not any(d.get("role") == "ai" and _ui_text(d.get("content", "")).strip() for d in own):
+        raise ValueError("nothing new on this branch since the "
+                         + ("last merge" if merged is not None else "fork"))
+    first = next((d for d in own if d.get("role") == "human" and not d.get("shell")
+                  and not d.get("compacted")), None)
+    quote = _ui_text(first.get("content", ""))[:1500] if first else "(the first message after the fork)"
+    ask = _MERGE_INSTRUCTION.format(
+        ptitle=p.get("title") or "parent",
+        since="since its last merge" if merged is not None else "since the fork", start=quote)
+    note, meta = await _ask_view(tid, ask, 2500)
+    return {"note": note, "parent": {"tid": p["tid"], "title": p.get("title")},
+            "upto": len(hist), "again": merged is not None, **meta}
+
+
+async def merge_deliver(tid: str, note: str, upto: int, parent_running: bool) -> dict:
+    """Send the (possibly edited) hand-off to the parent: mid-run it lands as
+    a steer before the parent's next step, otherwise it's appended to the
+    parent's state like a !cmd card (the agent reads it next turn). The
+    branch remembers how far it has merged, so a later merge only covers
+    what came after."""
+    p, title = await _branch_info(tid)
+    note = note.strip()
+    if not note:
+        raise ValueError("empty hand-off note")
+    ptid = p["tid"]
+    text = f"⤴ Merged from ⑂ branch “{title}”:\n\n{note}"
+    turn_id = uuid.uuid4().hex[:12]
+    await _log(ptid, turn_id, "user", meta={"text": _cap(text, 800), "merge": tid})
+    if parent_running:
+        steer_put(ptid, text)
+        how = "steer"
+    else:
+        g = await _read_agent()
+        await g.aupdate_state(
+            {"configurable": {"thread_id": ptid}},
+            {"messages": [HumanMessage(content=text, additional_kwargs={
+                "lb_merge": {"tid": tid, "title": title, "ts": time.time()}})]},
+            as_node="__start__")
+        how = "appended"
+    p = {**p, "merged": time.time(), "merged_upto": int(upto)}
+    async with _wt(_db):
+        await _db.execute("UPDATE threads SET parent=? WHERE id=?",
+                          (json.dumps(p, ensure_ascii=False), tid))
+        await _db.execute("UPDATE threads SET updated_at=? WHERE id=?", (time.time(), ptid))
+    return {"parent": {"tid": ptid, "title": p.get("title")}, "how": how}
 
 
 async def btw_list(tid: str) -> list[dict]:

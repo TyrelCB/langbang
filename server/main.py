@@ -427,6 +427,38 @@ async def thread_btw_delete(tid: str, bid: int):
     return {"ok": True}
 
 
+@app.post("/api/threads/{tid}/merge/preview")
+async def thread_merge_preview(tid: str):
+    """⤴ draft of what this ⑂ branch hands back to its parent (not sent)."""
+    try:
+        return await agent.merge_preview(tid)
+    except LookupError:
+        raise HTTPException(404, "no such thread")
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"hand-off draft failed: {e}")
+
+
+class MergeIn(BaseModel):
+    note: str
+    upto: int
+
+
+@app.post("/api/threads/{tid}/merge")
+async def thread_merge(tid: str, body: MergeIn):
+    """⤴ send the (edited) hand-off note into the parent thread."""
+    try:
+        p, _ = await agent._branch_info(tid)
+        hub = runs.get(p["tid"])
+        live = bool(hub and not hub.done and not hub.shell)
+        return await agent.merge_deliver(tid, body.note[:40000], body.upto, live)
+    except LookupError:
+        raise HTTPException(404, "no such thread")
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+
 # ---- scheduled tasks ----
 
 

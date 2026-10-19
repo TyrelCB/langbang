@@ -494,6 +494,13 @@ function textOf(content) {
 // a message typed while the run was going (server: agent._Steer) — the
 // strip lives inside the bubble, same 1:1 #chat-children rule as schedStrip
 const steerStrip = () => el("div", "sched-strip steer-strip", "↳ STEERED MID-RUN");
+// a ⑂ branch's hand-off (agent.merge_deliver): click opens the branch
+function mergeStrip(mg) {
+  const d = el("div", "sched-strip merge-strip", `⤴ MERGED FROM ⑂ ${mg.title || "branch"}`);
+  d.title = "open the branch";
+  d.onclick = () => { const t = threads.find((x) => x.id === mg.tid); if (t) openThread(t); };
+  return d;
+}
 
 function schedStrip(s) {
   // run stamp for a scheduled turn (server attaches lb_sched kwargs to the
@@ -634,6 +641,7 @@ function renderHistoryMsg(m, curSched) {
       const b = addMsg("user", textOf(m.content), imagesOf(m.content));
       if (m.sched) b.prepend(schedStrip(m.sched));
       if (m.steer) b.prepend(steerStrip());
+      if (m.merge) b.prepend(mergeStrip(m.merge));
       if (m.prefetch) attachPf(b, m.prefetch);
       curSched = m.sched || null;
     } else if (m.role === "ai") {
@@ -732,10 +740,12 @@ const SLASH = [
       if (threadId && RUNS.has(threadId)) return steerRun(a, pendingImages);
       $("#input").value = a; return send(); // nothing running: it's just a message
     } },
+  { name: "merge", args: "", desc: "⑂ branch → its parent: draft a hand-off note of what this branch found, review/edit, then send",
+    run: () => slashThread() && openMerge() },
   { name: "btw", args: "[question]", desc: "side question or idea — answered aside and banked with this thread; the agent isn't interrupted. Bare /btw lists the bank",
     run: (a) => slashThread() && openBtw(a) },
   { name: "recap", desc: "summary of this thread so far", run: () => slashThread() && openRecap() },
-  { name: "fork", desc: "copy this whole thread into a new one", run: () => slashThread() && forkWhole() },
+  { name: "fork", desc: "branch this whole thread into a new one (history shared, not copied; /merge brings results back)", run: () => slashThread() && forkWhole() },
   { name: "plan", args: "[message]", desc: "toggle plan mode — or send one message in plan mode", run: (a) => {
       if (!a) { setPlan(!planOn()); return slashNote("plan mode " + (planOn() ? "ON" : "off")); }
       setPlan(true); $("#input").value = a; return send();
@@ -821,6 +831,7 @@ async function forkWhole() {
   if (!r || !r.id) return slashNote("fork failed: " + ((r && r.detail) || "error"));
   await refreshThreads();
   await openThread(r);
+  return r;
 }
 // /btw: the recap panel, retitled — the new answer on top, the thread's
 // banked side questions under it (newest first). Nothing lands in the thread.
@@ -853,6 +864,9 @@ async function openBtw(q) {
     const out = await r.json();
     if (threadId !== tid) return;
     setMarkdown(now, out.answer);
+    const na = el("div", "btw-acts");
+    na.append(btwForkBtn(out));
+    now.append(na);
     const k = (n) => n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
     $("#recap-ts").textContent = "ANSWERED " + new Date(out.ts * 1000).toLocaleTimeString()
       + (out.ctx ? ` · saw ${k(out.ctx)} tokens` + (out.cached ? ` (${k(out.cached)} cached)` : "") : "")
@@ -869,6 +883,87 @@ async function openBtw(q) {
     clearTimeout(timer);
   }
 }
+// ⑂ an idea into its own branch: fork the whole thread (archive shared, not
+// copied) and leave the side question + answer in the new composer
+function btwForkBtn(b) {
+  const f = el("button", "btn ghost", "⑂ FORK WITH THIS");
+  f.title = "new branch of this thread with this idea ready to send (⤴ /merge brings results back)";
+  f.onclick = async () => {
+    closeRecap();
+    const t = await forkWhole();
+    if (!t || threadId !== t.id) return;
+    $("#input").value = `Side idea from the parent thread — let's explore it here.\n\nQ: ${b.q}\n\nWhat you said then: ${b.answer}`;
+    $("#input").dispatchEvent(new Event("input"));
+    $("#input").focus();
+  };
+  return f;
+}
+
+// ⤴ /merge: the branch drafts a hand-off from its own view (server side),
+// shown editable in the recap panel; SEND puts it in the parent thread
+async function openMerge() {
+  const tid = threadId;
+  const t = threads.find((x) => x.id === tid);
+  if (!t || !t.parent) return slashNote("not a ⑂ fork — nothing to merge into");
+  SFX.play("click");
+  const body = $("#recap-body");
+  $("#recap-head").textContent = `⤴ MERGE INTO “${t.parent.title}”`;
+  $("#recap-ts").textContent = "";
+  body.innerHTML = "<p>⏳ DRAFTING THE HAND-OFF FROM THIS BRANCH…</p>";
+  $("#recap-panel").classList.remove("hidden");
+  if (recapAbort) recapAbort.abort();
+  recapAbort = new AbortController();
+  const timer = setTimeout(() => recapAbort.abort(), 180000);
+  let out;
+  try {
+    const r = await fetch(`/api/threads/${tid}/merge/preview`, { method: "POST", signal: recapAbort.signal });
+    out = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(out.detail || "HTTP " + r.status);
+  } catch (e) {
+    if (threadId === tid) setMarkdown(body, e.name === "AbortError" ? "✕ timed out (180 s) — try again." : "✕ " + e.message);
+    SFX.play("error");
+    return;
+  } finally {
+    clearTimeout(timer);
+  }
+  if (threadId !== tid) return;
+  const ta = el("textarea", "merge-note");
+  ta.value = out.note;
+  ta.rows = 16;
+  const acts = el("div", "btw-acts");
+  const send = el("button", "btn", "⤴ SEND TO PARENT");
+  const redo = el("button", "btn ghost", "↻ REDRAFT");
+  redo.onclick = () => openMerge();
+  send.onclick = async () => {
+    send.disabled = true;
+    send.textContent = "SENDING…";
+    const r = await fetch(`/api/threads/${tid}/merge`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note: ta.value, upto: out.upto }) }).catch(() => null);
+    const res = r ? await r.json().catch(() => ({})) : {};
+    if (!r || !r.ok) {
+      send.disabled = false; send.textContent = "⤴ SEND TO PARENT";
+      $("#recap-ts").textContent = "✕ " + (res.detail || "send failed");
+      SFX.play("error");
+      return;
+    }
+    SFX.play("message_received");
+    const open = el("button", "btn", "OPEN PARENT →");
+    open.onclick = () => { const p = threads.find((x) => x.id === res.parent.tid); closeRecap(); if (p) openThread(p); };
+    acts.replaceChildren(open);
+    ta.readOnly = true;
+    $("#recap-ts").textContent = res.how === "steer"
+      ? "SENT — the parent is mid-run: it reads this before its next step"
+      : "SENT — added to the parent thread; its agent reads it on the next turn";
+    refreshThreads();
+  };
+  acts.append(redo, send);
+  const hint = el("p", "btw-empty", (out.again ? "Covers only what happened since the last merge. " : "")
+    + "Edit freely — this exact text goes to the parent.");
+  body.replaceChildren(hint, ta, acts);
+  $("#recap-ts").textContent = `drafted from ${out.ctx ? Math.round(out.ctx / 1000) + "k tokens of this branch" : "this branch"} · ${out.secs}s`;
+}
+
 // banked /btw rows: question (click to expand the answer), ↳ puts the
 // question in the composer for when the run is done, ✕ forgets it
 function btwBank(box, tid, items, open) {
@@ -897,7 +992,7 @@ function btwBank(box, tid, items, open) {
       const r = await fetch(`/api/threads/${tid}/btw/${b.id}`, { method: "DELETE" }).catch(() => null);
       if (r && r.ok) { d.remove(); SFX.play("click"); }
     };
-    acts.append(use, del);
+    acts.append(use, btwForkBtn(b), del);
     d.append(sum, ans, acts);
     box.append(d);
   }
@@ -1950,6 +2045,16 @@ async function refreshThreads() {
       refreshThreads();
     };
     d.appendChild(pin);
+    if (t.parent) {
+      const mg = el("span", "a", "⤴");
+      mg.title = `Merge into “${t.parent.title}” — drafts a hand-off note to review first`;
+      mg.onclick = async (e) => {
+        e.stopPropagation();
+        if (t.id !== threadId) await openThread(t);
+        openMerge();
+      };
+      d.appendChild(mg);
+    }
     const x = el("span", "x", "✕");
     x.title = "Delete thread";
     if (armedTid === t.id) {  // repaint mid-confirm: re-apply the armed look
