@@ -121,6 +121,13 @@ async def init() -> None:
           tid TEXT PRIMARY KEY, base TEXT NOT NULL, n INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS ix_arch_base ON arch_base(base);
         CREATE INDEX IF NOT EXISTS ix_archived_thread ON archived_messages(thread_id, seq);
+        CREATE TABLE IF NOT EXISTS procs(   -- ⚙ background processes (procs.py)
+          id TEXT PRIMARY KEY, thread_id TEXT, name TEXT NOT NULL, cmd TEXT NOT NULL,
+          started REAL NOT NULL, ended REAL, exit INTEGER,
+          state TEXT NOT NULL,              -- running | exited | stopped | lost
+          wake TEXT NOT NULL,               -- exit | match | none
+          wake_match TEXT, woke REAL, log_off INTEGER DEFAULT 0);
+        CREATE INDEX IF NOT EXISTS ix_procs_thread ON procs(thread_id, started);
         """
     )
     # threads.orig = the seed title (schedule name / first-message prefix) that
@@ -1820,11 +1827,14 @@ async def build_agent(s: dict, checkpointer=None, thread_prompt: str = ""):
     ] + await mcp.get_tools(s.get("mcp_servers") or {})
     if s.get("memory_enabled", True):
         tools += learning.MEMORY_TOOLS
+    from . import procs  # imports agent: deferred
+    bg = [t for t in procs.TOOLS if enabled.get(t.name, True)]
+    tools += bg
     cp = checkpointer or _checkpointer
     # built per run: memory edits and thread-prompt changes apply next turn
     # (also keeps the system prompt stable — and prefix-cached — mid-run)
     prompt = (s["system_prompt"] + learning.thread_note(thread_prompt)
-              + local_tools.TOOLS_NOTE + learning.memory_note(s))
+              + local_tools.TOOLS_NOTE + (procs.NOTE if bg else "") + learning.memory_note(s))
     if deep:
         mw = [TodoListMiddleware()]  # write_todos planning tool
         if s.get("compact_enabled", True):
@@ -1965,6 +1975,9 @@ def _msg_dict(m) -> dict:
         d["sched"] = sched  # UI stamps the bubble ⏰ SCHEDULED RUN (see schedule._fire)
     if (m.additional_kwargs or {}).get("lb_steer"):
         d["steer"] = True
+    wk = (m.additional_kwargs or {}).get("lb_wake")
+    if wk:
+        d["wake"] = wk  # UI stamps the bubble ⚙ WOKEN BY (see procs._wake)
     merge = (m.additional_kwargs or {}).get("lb_merge")
     if merge:
         d["merge"] = merge  # UI stamps the bubble ⤴ MERGED FROM ⑂ (see merge_deliver)
@@ -2549,6 +2562,7 @@ async def delete_thread(tid: str) -> None:
     async with _wt(_db):
         await _db.execute("DELETE FROM threads WHERE id=?", (tid,))
         await _db.execute("DELETE FROM btw WHERE thread_id=?", (tid,))
+        await _db.execute("UPDATE procs SET thread_id=NULL, wake='none' WHERE thread_id=?", (tid,))
         await _arch_gc(tid)
     async with _wt(_edb):
         await _edb.execute("DELETE FROM run_events WHERE thread_id=?", (tid,))
@@ -3082,6 +3096,7 @@ async def run_chat(
     sched: dict | None = None,
     resume: dict | None = None,
     plan: bool = False,
+    wake: dict | None = None,
 ) -> AsyncIterator[dict]:
     """Yield SSE-ready dicts: token | thinking | tool_start | tool_end |
     todos | sub | usage | gate | done | error. `resume` = {id, value}
@@ -3127,6 +3142,8 @@ async def run_chat(
         else:
             content = user_text
         h_kwargs = {"lb_sched": sched} if sched else {}
+        if wake:
+            h_kwargs["lb_wake"] = {**wake, "ts": time.time()}  # ⚙ procs._wake
         if pf_task is not None:
             pf = None
             try:

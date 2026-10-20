@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from . import agent, audioart, backup, comfy, config, decide, fileassist, ivr, learning, mcp, notify, rag, runs, schedule, sfxgen, term, ttsjobs, voice
+from . import agent, audioart, backup, comfy, config, decide, fileassist, ivr, learning, mcp, notify, procs, rag, runs, schedule, sfxgen, term, ttsjobs, voice
 from .ivr_hub import router as ivr_hub_router
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
@@ -46,6 +46,7 @@ async def _startup():
     await schedule.init()
     schedule.start_loop()
     agent.start_sweeper()  # hourly: delete abandoned empty "New chat"s
+    procs.start_poller()  # ⚙ background processes: exits, log caps, thread wakes
     _prune_tts_cache()     # TTS disk cache is a replay aid, not an archive
     # Pocket TTS active → load model + voice off the event loop now, so the
     # first 🔊 after a restart doesn't wait ~7 s (no-op for other providers)
@@ -457,6 +458,30 @@ async def thread_merge(tid: str, body: MergeIn):
         raise HTTPException(404, "no such thread")
     except ValueError as e:
         raise HTTPException(409, str(e))
+
+
+# ---- ⚙ background processes (procs.py) ----
+
+
+@app.get("/api/procs")
+async def procs_list(thread_id: str = ""):
+    return {"procs": await procs.list_procs(thread_id or None)}
+
+
+@app.get("/api/procs/{pid}")
+async def procs_get(pid: str, lines: int = 200):
+    p = await procs.get(pid)
+    if not p:
+        raise HTTPException(404, "no such process")
+    return {**p, "log": procs.tail(pid, max(1, min(lines, 2000)), 512 * 1024)}
+
+
+@app.post("/api/procs/{pid}/stop")
+async def procs_stop(pid: str):
+    p = await procs.stop(pid)
+    if not p:
+        raise HTTPException(404, "no such process")
+    return p
 
 
 # ---- scheduled tasks ----

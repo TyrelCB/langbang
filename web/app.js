@@ -642,6 +642,7 @@ function renderHistoryMsg(m, curSched) {
       if (m.sched) b.prepend(schedStrip(m.sched));
       if (m.steer) b.prepend(steerStrip());
       if (m.merge) b.prepend(mergeStrip(m.merge));
+      if (m.wake) b.prepend(el("div", "sched-strip wake-strip", `⚙ WOKEN BY “${m.wake.name}” — ${m.wake.what}`));
       if (m.prefetch) attachPf(b, m.prefetch);
       curSched = m.sched || null;
     } else if (m.role === "ai") {
@@ -740,6 +741,8 @@ const SLASH = [
       if (threadId && RUNS.has(threadId)) return steerRun(a, pendingImages);
       $("#input").value = a; return send(); // nothing running: it's just a message
     } },
+  { name: "ps", args: "", desc: "⚙ background processes across all threads (bg_start) — status, logs, stop",
+    run: () => openPs() },
   { name: "merge", args: "", desc: "⑂ branch → its parent: draft a hand-off note of what this branch found, review/edit, then send",
     run: () => slashThread() && openMerge() },
   { name: "btw", args: "[question]", desc: "side question or idea — answered aside and banked with this thread; the agent isn't interrupted. Bare /btw lists the bank",
@@ -1562,6 +1565,7 @@ async function pollRuns() {
   } else if (threadId && serverRuns.has(threadId)) {
     attachRun(threadId, 0); // scheduler run / other tab / post-reload
   }
+  await pollProcs();
   refreshThreads(); // repaint the ◉ running dots
   pollNotify();
 }
@@ -1690,6 +1694,150 @@ function tickRun(run) {
   }
 }
 
+// ⚙ PROCESSES — background processes the agent started with bg_start
+// (server/procs.py): their own systemd user units, so they outlive runs and
+// LangBang restarts. One /api/procs fetch per poll feeds both this bar (the
+// open thread's processes) and the sidebar's ⚙ "waiting, not hung" marks.
+let PROCS = [];
+const PROC_WAIT = new Map(); // thread id → running processes that will wake it
+const procOpen = new Set(); // rows whose log is expanded
+let procArm = null;
+const procPanel = (() => {
+  const p = el("div", "hidden");
+  p.id = "proc-panel";
+  const head = el("div");
+  head.id = "proc-head";
+  head.append(el("span", null, "⚙ PROCESSES"), el("span", "todo-caret", "▾"));
+  head.onclick = () => {
+    SFX.play("click");
+    try { localStorage.setItem("lb-procs-collapsed", localStorage.getItem("lb-procs-collapsed") === "on" ? "off" : "on"); } catch {}
+    renderProcs();
+  };
+  const list = el("div");
+  list.id = "proc-list";
+  p.append(head, list);
+  $("#todo-panel").after(p);
+  return p;
+})();
+
+async function pollProcs() {
+  try {
+    PROCS = (await (await fetch("/api/procs")).json()).procs || [];
+  } catch { return; }
+  PROC_WAIT.clear();
+  for (const p of PROCS)
+    if (p.state === "running" && p.thread_id && p.wake !== "none" && !p.woke)
+      PROC_WAIT.set(p.thread_id, (PROC_WAIT.get(p.thread_id) || 0) + 1);
+  renderProcs();
+  renderPs();
+}
+
+const procIcon = (p) => p.state === "running" ? "⚙" : p.state === "stopped" ? "■"
+  : p.state === "exited" && p.exit === 0 ? "✓" : "✕";
+const procState = (p) => p.state === "running" ? "RUNNING" : p.state === "stopped" ? "STOPPED"
+  : p.state === "lost" ? "KILLED (no exit code)" : `EXIT ${p.exit}`;
+const procWake = (p) => p.wake === "none" ? "" : p.woke ? " · woke the thread"
+  : p.wake === "exit" ? " · wakes the thread on exit" : ` · wakes on /${p.wake_match}/`;
+
+function procRow(p, showThread) {
+  const row = el("div", "proc-item " + p.state + (p.state === "exited" && p.exit !== 0 ? " bad" : ""));
+  const top = el("div", "proc-top");
+  const ic = el("span", "proc-ic" + (p.state === "running" ? " spin" : ""), procIcon(p));
+  const nm = el("span", "proc-name", p.name);
+  nm.title = p.cmd;
+  const secs = p.state === "running" ? (Date.now() / 1000 - p.started) : p.secs;
+  const meta = el("span", "proc-meta", `${procState(p)} · ${fmtClock(secs)}${procWake(p)}`);
+  top.append(ic, nm, meta);
+  if (showThread && p.thread_id) {
+    const t = threads.find((x) => x.id === p.thread_id);
+    if (t) {
+      const go = el("button", "btn ghost proc-btn", "→ " + t.title.slice(0, 30));
+      go.onclick = () => { closeRecap(); openThread(t); };
+      top.append(go);
+    }
+  }
+  const logb = el("button", "btn ghost proc-btn", procOpen.has(p.id) ? "▴ LOG" : "▾ LOG");
+  logb.onclick = (e) => {
+    e.stopPropagation();
+    procOpen.has(p.id) ? procOpen.delete(p.id) : procOpen.add(p.id);
+    rerender();
+  };
+  top.append(logb);
+  if (p.state === "running") {
+    const st = el("button", "btn ghost proc-btn" + (procArm === p.id ? " arm" : ""), procArm === p.id ? "⚠ CONFIRM" : "■ STOP");
+    st.title = "kill this process and everything it started";
+    st.onclick = async (e) => {
+      e.stopPropagation();
+      if (procArm !== p.id) { procArm = p.id; setTimeout(() => { if (procArm === p.id) { procArm = null; rerender(); } }, 4000); return rerender(); }
+      procArm = null;
+      st.textContent = "…";
+      await fetch(`/api/procs/${p.id}/stop`, { method: "POST" }).catch(() => null);
+      SFX.play("click");
+      await pollProcs();
+      rerender();
+    };
+    top.append(st);
+  }
+  row.append(top);
+  if (p.last && !procOpen.has(p.id)) row.append(el("div", "proc-last", p.last));
+  if (procOpen.has(p.id)) {
+    const pre = el("pre", "proc-log", "…");
+    row.append(pre);
+    fetch(`/api/procs/${p.id}?lines=200`).then((r) => r.json()).then((d) => {
+      pre.textContent = d.log || "(no output yet)";
+      pre.scrollTop = pre.scrollHeight;
+    }).catch(() => { pre.textContent = "(log unavailable)"; });
+  }
+  const rerender = () => (showThread ? renderPs() : renderProcs());
+  return row;
+}
+
+function renderProcs() {
+  const mine = PROCS.filter((p) => p.thread_id && p.thread_id === threadId)
+    .filter((p, i) => p.state === "running" || i < 6);
+  if (!mine.length) { procPanel.classList.add("hidden"); return; }
+  const run = mine.filter((p) => p.state === "running").length;
+  procPanel.querySelector("#proc-head span").textContent =
+    `⚙ PROCESSES — ${run} RUNNING · ${mine.length - run} FINISHED`
+    + (PROC_WAIT.has(threadId) && !RUNS.has(threadId) && !serverRuns.has(threadId) ? " · THREAD IS WAITING, NOT HUNG" : "");
+  const list = $("#proc-list");
+  const collapsed = (() => { try { return localStorage.getItem("lb-procs-collapsed") === "on"; } catch { return false; } })();
+  list.classList.toggle("hidden", collapsed);
+  if (!collapsed && !list.querySelector(".proc-log")) list.replaceChildren(...mine.map((p) => procRow(p, false)));
+  else if (!collapsed) {  // an open log: refresh the rows without losing its scroll
+    const keep = new Map([...list.querySelectorAll(".proc-item")].map((n, i) => [mine[i] && mine[i].id, n]));
+    list.replaceChildren(...mine.map((p) => {
+      const r = procRow(p, false);
+      const old = keep.get(p.id);
+      const ol = old && old.querySelector(".proc-log"), nl = r.querySelector(".proc-log");
+      if (ol && nl) { nl.textContent = ol.textContent; requestAnimationFrame(() => { nl.scrollTop = ol.scrollTop; }); }
+      return r;
+    }));
+  }
+  procPanel.classList.remove("hidden");
+}
+
+// /ps: every thread's processes in the recap panel
+let psOpen = false;
+async function openPs() {
+  SFX.play("click");
+  $("#recap-head").textContent = "⚙ BACKGROUND PROCESSES";
+  $("#recap-ts").textContent = "";
+  $("#recap-panel").classList.remove("hidden");
+  psOpen = true;
+  await pollProcs();
+  renderPs();
+}
+function renderPs() {
+  if (!psOpen || $("#recap-panel").classList.contains("hidden")) { psOpen = false; return; }
+  const body = $("#recap-body");
+  if (!PROCS.length) { body.replaceChildren(el("p", "btw-empty", "No background processes yet — the agent starts them with bg_start.")); return; }
+  const box = el("div", "proc-ps");
+  box.append(...PROCS.map((p) => procRow(p, true)));
+  body.replaceChildren(box);
+  $("#recap-ts").textContent = `${PROCS.filter((p) => p.state === "running").length} running · ${PROCS.length} shown`;
+}
+
 function renderTodos(todos) {
   if (!Array.isArray(todos) || !todos.length) return hideTodos();
   const head = (n, s) => n + " " + s;
@@ -1736,6 +1884,8 @@ function applyTodosCollapsed() {
 
 function resetTrajView() {
   hideTodos();
+  procOpen.clear();
+  renderProcs(); // the bar follows the open thread
   trajCache = null;
   trajOpen.clear();
   $("#sb-totals").textContent = "";
@@ -2001,11 +2151,13 @@ async function refreshThreads() {
     // (another tab, a phone, or a cron-scheduled run we know nothing about)
     const busy = RUNS.has(t.id) || serverRuns.has(t.id);
     const d = el("div", "thread" + (t.id === threadId ? " active" : "")
-                 + (busy ? " running" : "") + (t.pinned ? " pinned" : ""));
+                 + (busy ? " running" : "") + (t.pinned ? " pinned" : "")
+                 + (!busy && PROC_WAIT.has(t.id) ? " waiting" : ""));
     d.dataset.tid = t.id;
     d.appendChild(el("span", "ctx", t.context_tokens != null ? fmtTok(t.context_tokens) : ""));
     const name = el("span", "t-name", t.title);
-    name.title = t.title + (t.parent ? `\n⑂ forked from “${t.parent.title}”` : "");
+    name.title = t.title + (t.parent ? `\n⑂ forked from “${t.parent.title}”` : "")
+      + (PROC_WAIT.has(t.id) ? `\n⚙ waiting on ${PROC_WAIT.get(t.id)} background process(es) — not hung` : "");
     d.appendChild(name);
     // one-click title ops; ✎ (manual) is handled as inline edit below
     const act = (txt, tip, fn) => {
