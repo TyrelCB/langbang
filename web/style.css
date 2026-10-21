@@ -497,7 +497,7 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
 /* ⚙ background processes (procs.py) — bar under the to-dos, /ps list */
 #proc-panel { flex-shrink: 0; max-height: 40vh; overflow-y: auto; padding: 8px 16px;
   background: var(--bg2); border-top: 1px solid var(--line); }
-#proc-head { display: flex; justify-content: space-between; align-items: baseline; cursor: pointer;
+#proc-head { display: flex; flex-wrap: wrap; row-gap: 4px; justify-content: space-between; align-items: center; cursor: pointer;
   user-select: none; color: var(--orange); letter-spacing: 2px; font-size: 12px; }
 #proc-list { margin-top: 6px; display: flex; flex-direction: column; gap: 6px; }
 .proc-item { font-size: 12px; }
@@ -515,6 +515,13 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
 .proc-log { margin: 4px 0 0 22px; max-height: 30vh; overflow: auto; background: var(--bg); border: 1px solid var(--line);
   padding: 6px 8px; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .proc-ps { display: flex; flex-direction: column; gap: 10px; }
+.proc-label { flex: 1; min-width: 0; }
+.proc-tabs { display: inline-flex; gap: 4px; margin: 0 8px; }
+.proc-tab { background: none; border: 1px solid var(--line); color: var(--muted); font: inherit; font-size: 11px;
+  letter-spacing: .08em; padding: 2px 8px; cursor: pointer; }
+.proc-tab.on { color: var(--orange); border-color: var(--orange); }
+#recap-body > .proc-tabs { margin: 0 0 10px; }
+.proc-none { color: var(--muted); font-size: 12px; }
 .wake-strip { color: var(--orange); }
 /* waiting: no run, but a background process will wake it — not hung */
 .thread.waiting { border-left-color: var(--orange); }

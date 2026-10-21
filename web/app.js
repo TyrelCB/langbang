@@ -1702,12 +1702,35 @@ let PROCS = [];
 const PROC_WAIT = new Map(); // thread id → running processes that will wake it
 const procOpen = new Set(); // rows whose log is expanded
 let procArm = null;
+// RUNNING | FINISHED tab, shared by the bar and /ps; finished jobs pile up,
+// so the default view is only what's live
+let procTab = (() => { try { return localStorage.getItem("lb-procs-tab") || "running"; } catch { return "running"; } })();
+const PROC_FINISHED_MAX = 30;
+function procTabs(run, fin, rerender) {
+  const box = el("span", "proc-tabs");
+  for (const [k, label] of [["running", `RUNNING ${run}`], ["finished", `FINISHED ${fin}`]]) {
+    const b = el("button", "proc-tab" + (procTab === k ? " on" : ""), label);
+    b.onclick = (e) => {
+      e.stopPropagation();
+      procTab = k;
+      try { localStorage.setItem("lb-procs-tab", k); localStorage.setItem("lb-procs-collapsed", "off"); } catch {}
+      SFX.play("click");
+      rerender();
+    };
+    box.append(b);
+  }
+  return box;
+}
+const procPick = (ps) => procTab === "running" ? ps.filter((p) => p.state === "running")
+  : ps.filter((p) => p.state !== "running").slice(0, PROC_FINISHED_MAX);
+const procNone = () => el("div", "proc-none", procTab === "running"
+  ? "Nothing running. Finished jobs are under FINISHED." : "Nothing finished yet.");
 const procPanel = (() => {
   const p = el("div", "hidden");
   p.id = "proc-panel";
   const head = el("div");
   head.id = "proc-head";
-  head.append(el("span", null, "⚙ PROCESSES"), el("span", "todo-caret", "▾"));
+  head.append(el("span", "proc-label", "⚙ PROCESSES"), el("span", "proc-tabs"), el("span", "todo-caret", "▾"));
   head.onclick = () => {
     SFX.play("click");
     try { localStorage.setItem("lb-procs-collapsed", localStorage.getItem("lb-procs-collapsed") === "on" ? "off" : "on"); } catch {}
@@ -1793,17 +1816,18 @@ function procRow(p, showThread) {
 }
 
 function renderProcs() {
-  const mine = PROCS.filter((p) => p.thread_id && p.thread_id === threadId)
-    .filter((p, i) => p.state === "running" || i < 6);
-  if (!mine.length) { procPanel.classList.add("hidden"); return; }
-  const run = mine.filter((p) => p.state === "running").length;
-  procPanel.querySelector("#proc-head span").textContent =
-    `⚙ PROCESSES — ${run} RUNNING · ${mine.length - run} FINISHED`
+  const all = PROCS.filter((p) => p.thread_id && p.thread_id === threadId);
+  if (!all.length) { procPanel.classList.add("hidden"); return; }
+  const run = all.filter((p) => p.state === "running").length;
+  const mine = procPick(all);
+  procPanel.querySelector(".proc-label").textContent = "⚙ PROCESSES"
     + (PROC_WAIT.has(threadId) && !RUNS.has(threadId) && !serverRuns.has(threadId) ? " · THREAD IS WAITING, NOT HUNG" : "");
+  procPanel.querySelector(".proc-tabs").replaceWith(procTabs(run, all.length - run, renderProcs));
   const list = $("#proc-list");
   const collapsed = (() => { try { return localStorage.getItem("lb-procs-collapsed") === "on"; } catch { return false; } })();
   list.classList.toggle("hidden", collapsed);
-  if (!collapsed && !list.querySelector(".proc-log")) list.replaceChildren(...mine.map((p) => procRow(p, false)));
+  if (!collapsed && !mine.length) list.replaceChildren(procNone());
+  else if (!collapsed && !list.querySelector(".proc-log")) list.replaceChildren(...mine.map((p) => procRow(p, false)));
   else if (!collapsed) {  // an open log: refresh the rows without losing its scroll
     const keep = new Map([...list.querySelectorAll(".proc-item")].map((n, i) => [mine[i] && mine[i].id, n]));
     list.replaceChildren(...mine.map((p) => {
@@ -1832,10 +1856,12 @@ function renderPs() {
   if (!psOpen || $("#recap-panel").classList.contains("hidden")) { psOpen = false; return; }
   const body = $("#recap-body");
   if (!PROCS.length) { body.replaceChildren(el("p", "btw-empty", "No background processes yet — the agent starts them with bg_start.")); return; }
+  const run = PROCS.filter((p) => p.state === "running").length;
+  const shown = procPick(PROCS);
   const box = el("div", "proc-ps");
-  box.append(...PROCS.map((p) => procRow(p, true)));
-  body.replaceChildren(box);
-  $("#recap-ts").textContent = `${PROCS.filter((p) => p.state === "running").length} running · ${PROCS.length} shown`;
+  box.append(...(shown.length ? shown.map((p) => procRow(p, true)) : [procNone()]));
+  body.replaceChildren(procTabs(run, PROCS.length - run, renderPs), box);
+  $("#recap-ts").textContent = `${run} running · ${PROCS.length - run} finished`;
 }
 
 function renderTodos(todos) {

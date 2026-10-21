@@ -5,6 +5,7 @@ server beyond localhost/LAN."""
 import concurrent.futures
 import json
 import os
+import re
 import subprocess
 import time
 import urllib.request
@@ -12,7 +13,7 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
-from . import comfy, rag, schedule  # cycle-safe: only used at call time
+from . import comfy, config, rag, schedule  # cycle-safe: only used at call time
 
 HOME = Path.home()
 MAX_OUT = 12_000  # chars — keep tool output off Spark's prefill budget
@@ -31,10 +32,51 @@ def _resolve(path: str) -> Path:
     return p if p.is_absolute() else (HOME / p)
 
 
+# Waits longer than this belong in bg_start (procs.py). Agents sleep-polled
+# 28 h/week inside run_bash (`sleep 290; check`), each poll re-sending the
+# whole context and letting other threads evict this one's prefix cache.
+SLEEP_CAP = 120
+_SLEEP = re.compile(r"\bsleep\s+(\d+(?:\.\d+)?)([smhd]?)\b")
+_LOOP = re.compile(r"\b(while|until|for)\b[^;]*;\s*do\b")
+
+
+def _sleep_refusal(command: str, timeout: int) -> str | None:
+    """Why this command is a long wait, or None. Literal sleeps are summed;
+    a loop that sleeps is a poll, refused only when given more than SLEEP_CAP."""
+    mult = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+    total = sum(float(n) * mult[u] for n, u in _SLEEP.findall(command))
+    if total >= SLEEP_CAP:
+        return f"it sleeps {total:.0f}s"
+    if total and _LOOP.search(command) and int(timeout) > SLEEP_CAP:
+        return f"it is a sleep-poll loop with timeout={int(timeout)}s"
+    return None
+
+
+def _bg_enabled() -> bool:
+    try:
+        return (config.load().get("local_tools") or {}).get("bg_start", True)
+    except Exception:  # noqa: BLE001 - settings trouble must not block the shell
+        return False
+
+
 @tool
 def run_bash(command: str, timeout: int = 60) -> str:
     """Execute a bash command in the user's home directory. Returns exit code,
-    stdout and stderr. Non-interactive commands only; hard cap 300s."""
+    stdout and stderr. Non-interactive commands only; hard cap 300s. Not for
+    waiting: sleeps of 120s+ are refused, use bg_start instead."""
+    why = _sleep_refusal(command, timeout)
+    if why and _bg_enabled():
+        return (
+            f"NOT RUN: {why}. Don't wait inside run_bash. Start the job (or a "
+            "watcher that exits when the condition holds) with bg_start, tell "
+            "the user what you started, and end your turn; LangBang wakes this "
+            "thread with the result. For a quick check, drop the sleep."
+        )
+    return bash(command, timeout)
+
+
+def bash(command: str, timeout: int = 60) -> str:
+    """run_bash without the wait guard (the user's own `!cmd`)."""
     try:
         r = subprocess.run(
             ["bash", "-lc", command],

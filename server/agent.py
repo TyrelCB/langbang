@@ -3459,7 +3459,7 @@ async def run_user_shell(thread_id: str, command: str) -> dict:
     # same code path/format as the agent's own tool call (incl. the MAX_OUT
     # trim, so model context cost of a `!cmd` equals the agent running it)
     out = await asyncio.to_thread(
-        local_tools.run_bash.invoke, {"command": command, "timeout": SHELL_TIMEOUT}
+        local_tools.bash, command, SHELL_TIMEOUT
     )
     dur = round(time.time() - t0, 3)
     m = re.match(r"exit=(-?\d+)", out)
