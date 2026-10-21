@@ -1368,3 +1368,11 @@ html[data-theme="light"] .spk-hud-phrase span.on { text-shadow: none; }
   .slash-row { flex-direction: column; gap: 2px; }
   .btw-item summary { flex-direction: column; gap: 2px; }
 }
+/* 📘/🧠 skills + memories the agent read this turn (consultStrip in app.js) */
+.block.tool.consult > summary { color: var(--orange); }
+.consult-strip { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px;
+  padding-top: 6px; border-top: 1px dashed var(--line); font-size: 10px; letter-spacing: 1px; }
+.consult-k { color: var(--cyan); opacity: .7; }
+.consult-chip { border: 1px solid var(--line); padding: 1px 6px; color: var(--text); }
+.consult-chip.skill { border-color: var(--orange); }
+.consult-chip.memory { border-color: var(--cyan-dim); }

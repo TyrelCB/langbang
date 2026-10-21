@@ -167,6 +167,46 @@ def list_memories(s: dict | None = None) -> list[dict]:
     return out
 
 
+# ---- consulted: which skills/memories a tool call touched (UI chips) ----
+
+# a path token inside a tool call's args (read_file file_path, or a run_bash
+# `cat`/`sed -n`/`head` of the file); quotes/backticks end it
+_PATH_TOK = re.compile(r"""(?:~|/)[^\s'"`;|&<>()]+""")
+_READERS = {"read_file", "run_bash", "bash", "grep", "glob"}
+
+
+def consulted(tool: str, args, s: dict | None = None) -> list[dict]:
+    """[{kind: skill|memory, name, src, act}] for one tool call — a read of
+    a SKILL.md under a skill source or of a memory file, or remember/forget.
+    It's how a skill gets "used" here (the prompt lists skills by name and
+    the agent read_file's the one it wants), so the trace is the evidence.
+    Display-only and cheap: string matching, no filesystem access."""
+    s = s or config.load()
+    if tool in ("remember", "forget"):
+        name = _slug(str((args or {}).get("name") or "")) if isinstance(args, dict) else ""
+        return [{"kind": "memory", "name": name, "src": "LangBang",
+                 "act": "saved" if tool == "remember" else "forgot"}] if name else []
+    if tool not in _READERS or not args:
+        return []
+    blob = args if isinstance(args, str) else json.dumps(args, ensure_ascii=False)
+    home = os.path.expanduser("~")
+    hermes = os.path.expanduser(s.get("skills_hermes_dir") or "~/.hermes/skills").rstrip("/") + "/"
+    own = _skills_dir(s).rstrip("/") + "/"
+    mem = os.path.expanduser(s.get("memory_dir") or "~/.langbang/memory").rstrip("/") + "/"
+    out, seen = [], set()
+    for tok in _PATH_TOK.findall(blob):
+        p = home + tok[1:] if tok.startswith("~") else tok
+        hit = None
+        if p.endswith("/SKILL.md") and (p.startswith(hermes) or p.startswith(own)):
+            hit = ("skill", p.rsplit("/", 2)[-2], "Hermes" if p.startswith(hermes) else "LangBang")
+        elif p.startswith(mem) and p.endswith(".md") and "/" not in p[len(mem):]:
+            hit = ("memory", p[len(mem):-3], "LangBang")
+        if hit and hit not in seen:
+            seen.add(hit)
+            out.append({"kind": hit[0], "name": hit[1], "src": hit[2], "act": "read"})
+    return out
+
+
 def write_memory(name: str, description: str, content: str, type_: str = "project",
                  s: dict | None = None) -> dict:
     slug = _slug(name)

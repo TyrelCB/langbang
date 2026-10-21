@@ -2163,7 +2163,14 @@ async def history(thread_id: str) -> list:
     # Pre-compaction originals were dropped from graph state; replay them so
     # the UI still shows the full transcript while the model sees the summary.
     archived = [_slim(json.loads(r)) for r in await _arch_raw(thread_id)]
-    return archived + live
+    out = archived + live
+    s = config.load()
+    for d in out:  # 📘/🧠 chips on replayed tool cards (learning.consulted)
+        for tc in d.get("tool_calls") or ():
+            c = learning.consulted(tc.get("name") or "", tc.get("args"), s)
+            if c:
+                tc["consult"] = c
+    return out
 
 
 # ---- run trajectory (agentic visibility) ----
@@ -3306,12 +3313,14 @@ async def run_chat(
                 elif kind == "on_tool_start":
                     rid = str(ev["run_id"])
                     tool_t0[rid] = (time.time(), sub_id, ev["data"].get("input"))
+                    consult = learning.consulted(ev["name"], ev["data"].get("input"), s)
                     yield {
                         "type": "tool_start",
                         "name": ev["name"],
                         "input": _safe(ev["data"].get("input")),
                         "run_id": rid,
                         "sub": sub_id,
+                        **({"consult": consult} if consult else {}),
                     }
                     if ev["name"] == "write_todos":
                         todos = (ev["data"].get("input") or {}).get("todos")

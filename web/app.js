@@ -502,6 +502,37 @@ function mergeStrip(mg) {
   return d;
 }
 
+// 📘 / 🧠 — the skills and memories a tool call read (server tags it:
+// learning.consulted). Each card says so in its label; the turn's final
+// answer bubble gets a CONSULTED strip (inside the bubble — #chat children
+// stay 1:1 with messages, see schedStrip).
+const CONSULT_ICON = { skill: "📘", memory: "🧠" };
+function consultLabel(cs) {
+  return cs.map((c) => `${CONSULT_ICON[c.kind] || "•"} ${c.act === "read" ? "" : c.act.toUpperCase() + " "}` +
+    `${c.kind.toUpperCase()} ${c.name}${c.src === "Hermes" ? " · HERMES" : ""}`).join("  ");
+}
+function consultStrip(list) {
+  const seen = new Set();
+  const d = el("div", "consult-strip");
+  d.appendChild(el("span", "consult-k", "CONSULTED"));
+  for (const c of list) {
+    const k = `${c.kind}:${c.name}:${c.act}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const chip = el("span", "consult-chip " + c.kind,
+      `${CONSULT_ICON[c.kind] || "•"} ${c.act === "read" ? "" : c.act + " "}${c.name}`);
+    chip.title = `${c.kind} · ${c.src}${c.act === "read" ? " — the agent read it this turn" : ""}`;
+    d.appendChild(chip);
+  }
+  return d;
+}
+// history replay: a turn's consulted list → its last answer bubble
+const histConsult = { list: [], bubble: null };
+function flushHistConsult() {
+  if (histConsult.list.length && histConsult.bubble) histConsult.bubble.appendChild(consultStrip(histConsult.list));
+  histConsult.list = []; histConsult.bubble = null;
+}
+
 function schedStrip(s) {
   // run stamp for a scheduled turn (server attaches lb_sched kwargs to the
   // HumanMessage — see schedule._fire). The strip lives INSIDE the user
@@ -553,6 +584,7 @@ function renderHistoryInner(msgs) {
   // chat (even inside a schedule's thread) and ends the segment. Survives
   // compaction — archived heads keep their sched stamps in their JSON.
   let curSched = null;
+  histConsult.list = []; histConsult.bubble = null;
   for (const [i, m] of msgs.entries()) {
     histIdx = i; // addMsg stamps it: ⑂ then names its exact /messages index
     // one malformed step must never truncate the rest of the transcript —
@@ -567,6 +599,7 @@ function renderHistoryInner(msgs) {
     }
   }
   histIdx = null;
+  flushHistConsult();
 }
 
 // ⑂ FORK — a new thread with this conversation up to this bubble (the
@@ -638,6 +671,7 @@ function renderHistoryMsg(m, curSched) {
       return curSched;
     }
     if (m.role === "human") {
+      if (!m.steer) flushHistConsult(); // a steer is still the same turn
       const b = addMsg("user", textOf(m.content), imagesOf(m.content));
       if (m.sched) b.prepend(schedStrip(m.sched));
       if (m.steer) b.prepend(steerStrip());
@@ -655,6 +689,7 @@ function renderHistoryMsg(m, curSched) {
         const b = addMsg("assistant", textOf(m.content));
         if (curSched) b.prepend(runChip(curSched));
         attachSpeak(b, textOf(m.content));
+        histConsult.bubble = b;
       }
       for (const tc of m.tool_calls || []) {
         if (tc.name === "ask_user") {
@@ -669,7 +704,8 @@ function renderHistoryMsg(m, curSched) {
           b.querySelector("pre").textContent = tc.args?.plan || "";
           continue;
         }
-        const b = addBlock("tool", `⚙ ${tc.name}`);
+        const b = addBlock(tc.consult ? "tool consult" : "tool", tc.consult ? consultLabel(tc.consult) : `⚙ ${tc.name}`);
+        if (tc.consult) histConsult.list.push(...tc.consult);
         b.querySelector("pre").textContent = "→ " + JSON.stringify(tc.args, null, 2);
         edLink(b, tc.args);
       }
@@ -1274,7 +1310,12 @@ function runPipeline(run) {
         card.appendChild(body);
         run.subs.set(ev.run_id, { card, body, t0: Date.now() });
       } else {
-        card = buildToolCard(`⚙ ${ev.name} …`, ev.input);
+        card = buildToolCard(`${ev.consult ? consultLabel(ev.consult) : "⚙ " + ev.name} …`, ev.input);
+        if (ev.consult) {
+          card._label = consultLabel(ev.consult);
+          card.classList.add("consult");
+          (run.consult ||= []).push(...ev.consult);
+        }
         edLink(card, ev.input);
         if (ev.sub && run.subs.get(ev.sub)) host = run.subs.get(ev.sub).body;
       }
@@ -1298,7 +1339,7 @@ function runPipeline(run) {
         run.subs.delete(ev.run_id);
       } else {
         card.querySelector("summary").textContent =
-          `⚙ ${ev.name}${typeof ev.dur === "number" ? " · " + fmtShort(ev.dur) : ""}`;
+          `${card._label || "⚙ " + ev.name}${typeof ev.dur === "number" ? " · " + fmtShort(ev.dur) : ""}`;
         card.querySelector("pre").textContent += "\n← " + JSON.stringify(ev.output, null, 2);
         card.open = false;
       }
@@ -1391,6 +1432,11 @@ function runPipeline(run) {
       // card shows a mid-run snapshot; say so (model finished, bookkeeping
       // didn't follow — e.g. a resumed run that dove straight back to work)
       if (run.viewing && !run.todosTouched) markTodosStale();
+      if (run.consult?.length) {
+        flushRender(); // a pending render would wipe the appended strip
+        const fin = asstMsg && asstRaw.trim() ? asstMsg : run.lastBubble?.msg;
+        if (fin) fin.appendChild(consultStrip(run.consult));
+      }
       // read the FINAL answer bubble only — mid-run "let me check…" bubbles
       // keep their manual 🔊 (auto-reading play-by-play is filler audio)
       // The todo gate can deliver the answer that streamed BEFORE its
