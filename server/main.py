@@ -198,6 +198,20 @@ class ThreadForkIn(BaseModel):
     text: str = ""
 
 
+class ThreadArchiveIn(BaseModel):
+    archived: bool = True
+
+
+@app.put("/api/threads/{tid}/archive")
+async def archive_thread(tid: str, body: ThreadArchiveIn):
+    """Archived = read-only (a ⤴ merge archives its branch); ↺ unarchive."""
+    if body.archived and tid in runs.active_map()["runs"]:
+        raise HTTPException(409, "this thread is running — archive it when the run finishes")
+    if not await agent.archive_thread(tid, body.archived):
+        raise HTTPException(404, "no such thread")
+    return {"archived": body.archived}
+
+
 @app.post("/api/threads/{tid}/fork")
 async def fork_thread(tid: str, body: ThreadForkIn):
     # a run mid-flight is still writing the state we'd copy
@@ -1269,6 +1283,9 @@ async def chat(body: ChatIn):
     text = body.text.strip()
     if not text and not body.images:
         raise HTTPException(400, "empty message")
+    why = await agent.archived_why(body.thread_id)
+    if why:
+        raise HTTPException(409, why)
     if body.images:
         eff = config.effective(s, await agent.get_thread_model(body.thread_id))
         if not (eff.get("capabilities") or {}).get("vision"):
@@ -1699,6 +1716,9 @@ async def shell(body: ShellIn):
     cmd = body.command.strip()
     if not cmd:
         raise HTTPException(400, "empty command")
+    why = await agent.archived_why(body.thread_id)
+    if why:
+        raise HTTPException(409, why)
     # hub-backed like chat: `! sleep 300` survives a dead phone (the client
     # seals its card from the shell_result event whenever it arrives)
     try:

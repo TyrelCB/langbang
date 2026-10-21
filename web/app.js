@@ -110,6 +110,11 @@ const api = {
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pinned }),
     }));
   },
+  async archiveThread(id, archived) {
+    return J(await fetch(`/api/threads/${id}/archive`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ archived }),
+    }));
+  },
   async forkThread(id, point) {
     return J(await fetch(`/api/threads/${id}/fork`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(point),
@@ -2215,16 +2220,16 @@ async function refreshThreads() {
   renamingTid = null; // the editor is gone (thread deleted / view rebuilt)
   box.innerHTML = "";
   let pinGroup = false;
-  for (const t of threads) {
+  const paint = (t) => {
     // server sorts pinned rows first; a rule closes the pinned group
-    if (pinGroup && !t.pinned) box.appendChild(el("div", "pin-rule"));
+    if (pinGroup && !t.pinned && !t.archived) box.appendChild(el("div", "pin-rule"));
     pinGroup = !!t.pinned;
     // busy = OUR client has a run in it, or the server says one is in flight
     // (another tab, a phone, or a cron-scheduled run we know nothing about)
     const busy = RUNS.has(t.id) || serverRuns.has(t.id);
     const d = el("div", "thread" + (t.id === threadId ? " active" : "")
                  + (busy ? " running" : "") + (t.pinned ? " pinned" : "")
-                 + (!busy && PROC_WAIT.has(t.id) ? " waiting" : ""));
+                 + (!busy && PROC_WAIT.has(t.id) ? " waiting" : "") + (t.archived ? " archived" : ""));
     d.dataset.tid = t.id;
     d.appendChild(el("span", "ctx", t.context_tokens != null ? fmtTok(t.context_tokens) : ""));
     const name = el("span", "t-name", t.title);
@@ -2269,7 +2274,17 @@ async function refreshThreads() {
       refreshThreads();
     };
     d.appendChild(pin);
-    if (t.parent) {
+    if (t.archived) {
+      const un = el("span", "a", "↺");
+      un.title = "Unarchive — make this thread writable again";
+      un.onclick = async (e) => {
+        e.stopPropagation();
+        SFX.play("click");
+        try { await api.archiveThread(t.id, false); } catch { SFX.play("error"); }
+        refreshThreads();
+      };
+      d.appendChild(un);
+    } else if (t.parent) {
       const mg = el("span", "a", "⤴");
       mg.title = `Merge into “${t.parent.title}” — drafts a hand-off note to review first`;
       mg.onclick = async (e) => {
@@ -2316,10 +2331,60 @@ async function refreshThreads() {
     d.appendChild(x);
     d.onclick = () => openThread(t);
     box.appendChild(d);
+  };
+  for (const t of threads) if (!t.archived) paint(t);
+  // merged ⑂ branches (and anything archived by hand): collapsed, read-only
+  const arch = threads.filter((t) => t.archived);
+  if (arch.length) {
+    const open = archOpen || arch.some((t) => t.id === threadId);
+    const h = el("div", "arch-head", `${open ? "▾" : "▸"} ARCHIVED · ${arch.length}`);
+    h.title = "Merged branches and archived threads — read-only until ↺ unarchived";
+    h.onclick = () => { archOpen = !open; try { localStorage.setItem("lb.archOpen", archOpen ? "1" : ""); } catch {} refreshThreads(); };
+    box.appendChild(h);
+    if (open) { pinGroup = false; for (const t of arch) paint(t); }
   }
+  syncLock();
   $("#btn-recap").disabled = !threadId; // recap needs an open thread
   $("#btn-tprompt").disabled = !threadId; // a draft has no row to hang it on
   updateCtxTag();
+}
+
+let archOpen = (() => { try { return !!localStorage.getItem("lb.archOpen"); } catch { return false; } })();
+
+// archived thread open → the composer is locked behind a read-only bar
+// (the server refuses runs anyway: agent.archived_why); built here rather
+// than in index.html so it can sit right above #composer
+function syncLock() {
+  const t = threadId && threads.find((x) => x.id === threadId);
+  let bar = $("#lock-bar");
+  if (!t || !t.archived) {
+    if (bar) bar.classList.add("hidden");
+    $("#input").disabled = false;
+    $("#btn-send").disabled = false;
+    return;
+  }
+  if (!bar) {
+    bar = el("div", "hidden");
+    bar.id = "lock-bar";
+    $("#composer").before(bar);
+  }
+  const merged = t.parent && t.parent.merged;
+  bar.replaceChildren(el("span", "lock-msg", merged
+    ? `⤴ MERGED INTO “${t.parent.title}” — this branch is archived and read-only`
+    : "▣ ARCHIVED — read-only"));
+  if (merged) {
+    const op = el("button", "btn ghost sm", "OPEN PARENT →");
+    op.onclick = () => { const p = threads.find((x) => x.id === t.parent.tid); if (p) openThread(p); };
+    bar.appendChild(op);
+  }
+  const un = el("button", "btn ghost sm", "↺ UNARCHIVE");
+  un.title = "Make this thread writable again";
+  un.onclick = async () => { await api.archiveThread(t.id, false).catch(() => SFX.play("error")); refreshThreads(); };
+  bar.appendChild(un);
+  bar.classList.remove("hidden");
+  syncComposerHint();
+  $("#input").disabled = true;
+  $("#btn-send").disabled = !RUNS.has(threadId); // STOP stays reachable for a run that predates the archive
 }
 
 function startInlineRename(t, row, name) {
@@ -2419,6 +2484,7 @@ async function openThread(t) {
   // the render already succeeded — worst case the row just won't re-sort.
   const bumped = api.touchThread(t.id).catch(() => {});
   syncTPrompt(t.id);
+  syncLock();
   draftModel = null; // a pick on an abandoned draft doesn't follow you
   syncTModel(t.id);
   const msgs = await api.messages(t.id);
@@ -2455,6 +2521,7 @@ async function newThread() {
   syncDraft();
   syncTPrompt(null);
   syncTModel(null);
+  syncLock();
   $("#chat").innerHTML = "";
   $("#chat-title").textContent = "NEW CHAT";
   $("#sb-live").classList.add("hidden");
@@ -5590,7 +5657,9 @@ function syncComposerHint() {
   $("#composer").classList.toggle("plan-mode", on);
   const waiting = !!document.querySelector("#chat .gate:not(.sealed)");
   const run = threadId && RUNS.get(threadId);
-  $("#input").placeholder = waiting
+  const arch = threadId && threads.find((x) => x.id === threadId)?.archived;
+  $("#input").placeholder = arch ? "▣ ARCHIVED — read-only. ↺ UNARCHIVE above to continue in this thread (or ⑂ fork it)."
+    : waiting
     ? "The agent is waiting on you — answer in the card above, or type a reply here…"
     : run && run.steerPending ? "↳ steer queued — it lands after the current step. Type more to add to it…"
     : run ? "Run in progress — Enter steers it (read after the current step) · ■ STOP halts…"

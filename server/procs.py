@@ -206,6 +206,8 @@ async def _wake(p: dict, what: str) -> bool:
     if not tid or not await (await agent._db.execute(
             "SELECT 1 FROM threads WHERE id=?", (tid,))).fetchone():
         return True
+    if await agent.archived_why(tid):
+        return True  # read-only now (merged/archived): the exit is in the PROCESSES bar
     text = (f"⚙ Background process “{p['name']}” ({p['id']}) {what} after "
             f"{_fmt_dur(p['secs'])}. Last output:\n```\n{tail(p['id'], WAKE_TAIL)[-6000:]}\n```\n"
             f"(command: {p['cmd'][:300]})")

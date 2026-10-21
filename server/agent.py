@@ -136,8 +136,10 @@ async def init() -> None:
     # threads.model = JSON {provider, model} override of the global default
     # threads.parent = JSON {tid, title} of the thread this one was ⑂ forked from
     # threads.pinned = pin time (REAL) — pinned rows sort above the rest
+    # threads.archived = archive time (REAL): read-only — no runs, no !cmd,
+    #   nothing merged in; a ⤴ merge archives its branch (git merge + branch -d)
     for col, typ in (("orig", "TEXT"), ("prompt", "TEXT"), ("model", "TEXT"),
-                     ("parent", "TEXT"), ("pinned", "REAL")):
+                     ("parent", "TEXT"), ("pinned", "REAL"), ("archived", "REAL")):
         try:
             await _db.execute(f"ALTER TABLE threads ADD COLUMN {col} {typ}")
         except aiosqlite.OperationalError:  # duplicate column — already migrated
@@ -2384,7 +2386,7 @@ async def list_threads() -> list:
     and DB busy exactly when a thread switch needed /messages. Now cached
     per thread, keyed by its newest checkpoint_id (every superstep / compaction
     writes a new one), so only threads that actually changed are recomputed."""
-    cur = await _db.execute("SELECT id,title,created_at,updated_at,orig,pinned,parent FROM threads "
+    cur = await _db.execute("SELECT id,title,created_at,updated_at,orig,pinned,parent,archived FROM threads "
                             "ORDER BY pinned IS NULL, updated_at DESC")
     rows = await cur.fetchall()
     cur = await _db.execute(
@@ -2409,9 +2411,31 @@ async def list_threads() -> list:
              # cheap content signal the sidebar uses to decide whether the ✕
              # needs a confirm click (see web/app.js refreshThreads)
              "n_msgs": hit[2], "chars": hit[3],
-             "pinned": r[5] is not None, "parent": json.loads(r[6]) if r[6] else None}
+             "pinned": r[5] is not None, "parent": json.loads(r[6]) if r[6] else None,
+             "archived": r[7]}
         )
     return out
+
+
+async def archived_why(tid: str) -> str:
+    """'' when the thread may run; else the user-facing reason it can't."""
+    row = await (await _db.execute("SELECT archived,parent FROM threads WHERE id=?", (tid,))).fetchone()
+    if not row or row[0] is None:
+        return ""
+    try:
+        p = json.loads(row[1]) if row[1] else {}
+    except ValueError:
+        p = {}
+    into = f" — it was ⤴ merged into “{p.get('title')}”" if p.get("merged") else ""
+    return f"this thread is archived (read-only){into}. ↺ Unarchive it to continue here."
+
+
+async def archive_thread(tid: str, on: bool) -> bool:
+    """Archive / unarchive. False = no such thread."""
+    async with _wt(_db):
+        cur = await _db.execute("UPDATE threads SET archived=? WHERE id=?",
+                                (time.time() if on else None, tid))
+    return cur.rowcount > 0
 
 
 async def pin_thread(tid: str, pinned: bool) -> bool:
@@ -3022,6 +3046,8 @@ async def _branch_info(tid: str) -> tuple[dict, str]:
         raise ValueError("this thread isn't a ⑂ fork — there is no parent to merge into")
     if not await (await _db.execute("SELECT 1 FROM threads WHERE id=?", (p["tid"],))).fetchone():
         raise ValueError(f"the parent thread “{p.get('title')}” was deleted")
+    if await archived_why(p["tid"]):
+        raise ValueError(f"the parent thread “{p.get('title')}” is archived — unarchive it first")
     return p, row[0]
 
 
@@ -3074,8 +3100,10 @@ async def merge_deliver(tid: str, note: str, upto: int, parent_running: bool) ->
         how = "appended"
     p = {**p, "merged": time.time(), "merged_upto": int(upto)}
     async with _wt(_db):
-        await _db.execute("UPDATE threads SET parent=? WHERE id=?",
-                          (json.dumps(p, ensure_ascii=False), tid))
+        # merged = done: the branch goes read-only so it can't be resumed by
+        # accident (↺ unarchive brings it back deliberately)
+        await _db.execute("UPDATE threads SET parent=?, archived=? WHERE id=?",
+                          (json.dumps(p, ensure_ascii=False), time.time(), tid))
         await _db.execute("UPDATE threads SET updated_at=? WHERE id=?", (time.time(), ptid))
     return {"parent": {"tid": ptid, "title": p.get("title")}, "how": how}
 
@@ -3113,6 +3141,10 @@ async def run_chat(
     post-done refresh always sees what the client was already shown)."""
     turn_id = uuid.uuid4().hex[:12]
     t_run0 = time.time()
+    why = await archived_why(thread_id)
+    if why:  # the authority for every caller (chat, wake, schedule, resume)
+        yield {"type": "error", "message": "⛔ " + why}
+        return
     steer_take(thread_id)  # nothing queued for a run that is over carries into this one
     try:
         await _touch(thread_id, user_text or "[image]")

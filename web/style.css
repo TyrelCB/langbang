@@ -1376,3 +1376,12 @@ html[data-theme="light"] .spk-hud-phrase span.on { text-shadow: none; }
 .consult-chip { border: 1px solid var(--line); padding: 1px 6px; color: var(--text); }
 .consult-chip.skill { border-color: var(--orange); }
 .consult-chip.memory { border-color: var(--cyan-dim); }
+/* archived threads (merged ⑂ branches): collapsed sidebar group + composer lock */
+.arch-head { margin-top: 8px; padding: 4px 8px; font-size: 10px; letter-spacing: 2px; color: var(--muted);
+  border-top: 1px dashed var(--line); cursor: pointer; user-select: none; }
+.arch-head:hover { color: var(--cyan); }
+.thread.archived { opacity: .6; }
+.thread.archived .t-name { text-decoration: line-through; text-decoration-color: var(--line); }
+#lock-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 14px;
+  border-top: 1px solid var(--orange); background: var(--panel); font-size: 11px; letter-spacing: 1px; color: var(--orange); }
+#lock-bar .lock-msg { flex: 1 1 240px; min-width: 0; }

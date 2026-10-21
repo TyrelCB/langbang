@@ -202,6 +202,10 @@ def shell_events(tid: str, command: str) -> AsyncIterator[dict]:
     so shells ride the hub machinery too (`! sleep 300` outlives a dead phone)."""
 
     async def _g() -> AsyncIterator[dict]:
+        why = await agent.archived_why(tid)
+        if why:
+            yield {"type": "error", "message": "⛔ " + why}
+            return
         result = await agent.run_user_shell(tid, command)
         yield {"type": "shell_result", "result": result}
         yield {"type": "done", "seconds": result.get("dur") or 0}
