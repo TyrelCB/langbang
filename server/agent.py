@@ -128,6 +128,9 @@ async def init() -> None:
           wake TEXT NOT NULL,               -- exit | match | none
           wake_match TEXT, woke REAL, log_off INTEGER DEFAULT 0);
         CREATE INDEX IF NOT EXISTS ix_procs_thread ON procs(thread_id, started);
+        CREATE TABLE IF NOT EXISTS projects(   -- ◫ projects (projects.py)
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, root TEXT,
+          created_at REAL NOT NULL, auto INTEGER NOT NULL DEFAULT 0);
         """
     )
     # threads.orig = the seed title (schedule name / first-message prefix) that
@@ -138,8 +141,11 @@ async def init() -> None:
     # threads.pinned = pin time (REAL) — pinned rows sort above the rest
     # threads.archived = archive time (REAL): read-only — no runs, no !cmd,
     #   nothing merged in; a ⤴ merge archives its branch (git merge + branch -d)
+    # threads.project = projects.id (NULL = unfiled); threads.drift = JSON
+    #   "this run worked in another repo" suggestion (projects.observe)
     for col, typ in (("orig", "TEXT"), ("prompt", "TEXT"), ("model", "TEXT"),
-                     ("parent", "TEXT"), ("pinned", "REAL"), ("archived", "REAL")):
+                     ("parent", "TEXT"), ("pinned", "REAL"), ("archived", "REAL"),
+                     ("project", "TEXT"), ("drift", "TEXT")):
         try:
             await _db.execute(f"ALTER TABLE threads ADD COLUMN {col} {typ}")
         except aiosqlite.OperationalError:  # duplicate column — already migrated
@@ -1419,9 +1425,25 @@ class _FileArgAlias(AgentMiddleware):
                 res = res.model_copy(update={"content": f"{_text_only(res.content)}\n\n{warn}"})
         return res
 
+def _render_stale(m):
+    """Model-view copy of a HumanMessage with its ⏱ get-current note IN FRONT
+    (it frames the request: read the situation, then the ask)."""
+    st = (m.additional_kwargs or {}).get("lb_stale")
+    if not st or not st.get("note"):
+        return m
+    c = m.content
+    head = st["note"] + "\n\n---\n"
+    if isinstance(c, str):
+        c = head + c
+    elif isinstance(c, list):
+        c = [{"type": "text", "text": head}, *c]
+    return m.model_copy(update={"content": c})
+
+
 class _PrefetchNote(AgentMiddleware):
-    """Show the model each human turn's auto-search hits (server/prefetch.py).
-    They live in the message's `lb_prefetch` kwarg and are rendered into the
+    """Show the model each human turn's auto-search hits (server/prefetch.py)
+    and its ⏱ get-current note (projects.staleness). They live in the
+    message's `lb_prefetch` / `lb_stale` kwargs and are rendered into the
     call-local copy only, so the stored message and its chat bubble stay as
     typed — and since every past turn renders identically on every call, the
     prompt prefix cache survives."""
@@ -1430,8 +1452,9 @@ class _PrefetchNote(AgentMiddleware):
         from . import prefetch
         msgs, hit = [], False
         for m in request.messages:
-            if isinstance(m, HumanMessage) and (m.additional_kwargs or {}).get("lb_prefetch"):
-                m, hit = prefetch.render(m), True
+            kw = (m.additional_kwargs or {}) if isinstance(m, HumanMessage) else {}
+            if kw.get("lb_prefetch") or kw.get("lb_stale"):
+                m, hit = _render_stale(prefetch.render(m)), True
             msgs.append(m)
         return await handler(request.override(messages=msgs) if hit else request)
 
@@ -1818,7 +1841,7 @@ def _fs_backend():
     return backends.FilesystemBackend(root_dir=os.path.expanduser("~"), virtual_mode=False)
 
 
-async def build_agent(s: dict, checkpointer=None, thread_prompt: str = ""):
+async def build_agent(s: dict, checkpointer=None, thread_prompt: str = "", project: dict | None = None):
     enabled = s.get("local_tools") or {}
     deep = bool(s.get("deep_agent", True))
     skip = DEEP_REPLACED_TOOLS if deep else set()
@@ -1836,7 +1859,8 @@ async def build_agent(s: dict, checkpointer=None, thread_prompt: str = ""):
     # built per run: memory edits and thread-prompt changes apply next turn
     # (also keeps the system prompt stable — and prefix-cached — mid-run)
     prompt = (s["system_prompt"] + learning.thread_note(thread_prompt)
-              + local_tools.TOOLS_NOTE + (procs.NOTE if bg else "") + learning.memory_note(s))
+              + local_tools.TOOLS_NOTE + (procs.NOTE if bg else "")
+              + learning.memory_note(s, project["name"] if project else ""))
     if deep:
         mw = [TodoListMiddleware()]  # write_todos planning tool
         if s.get("compact_enabled", True):
@@ -1986,6 +2010,9 @@ def _msg_dict(m) -> dict:
     pf = (m.additional_kwargs or {}).get("lb_prefetch")
     if pf:
         d["prefetch"] = {k: v for k, v in pf.items() if k != "note"}  # ⌕ AUTO-SEARCH strip
+    st = (m.additional_kwargs or {}).get("lb_stale")
+    if st:
+        d["stale"] = st  # ⏱ RESUMED strip (projects.staleness)
     return d
 
 
@@ -2351,16 +2378,18 @@ async def trajectory(thread_id: str) -> dict:
 
 # ---- thread bookkeeping ----
 
-async def create_thread(title: str = "New chat") -> dict:
+async def create_thread(title: str = "New chat", project: str | None = None) -> dict:
     tid = uuid.uuid4().hex[:12]
     now = time.time()
+    if project and not await (await _db.execute("SELECT 1 FROM projects WHERE id=?", (project,))).fetchone():
+        project = None  # a project deleted under the picker: file it nowhere
     # orig = seed title: renames (manual/auto) never touch it; ⟲ restores it
     async with _wt(_db):
         await _db.execute(
-            "INSERT INTO threads(id,title,created_at,updated_at,orig) VALUES(?,?,?,?,?)",
-            (tid, title, now, now, title),
+            "INSERT INTO threads(id,title,created_at,updated_at,orig,project) VALUES(?,?,?,?,?,?)",
+            (tid, title, now, now, title, project),
         )
-    return {"id": tid, "title": title, "created_at": now, "updated_at": now}
+    return {"id": tid, "title": title, "created_at": now, "updated_at": now, "project": project}
 
 
 def prompt_overhead_tokens() -> int:
@@ -2386,7 +2415,8 @@ async def list_threads() -> list:
     and DB busy exactly when a thread switch needed /messages. Now cached
     per thread, keyed by its newest checkpoint_id (every superstep / compaction
     writes a new one), so only threads that actually changed are recomputed."""
-    cur = await _db.execute("SELECT id,title,created_at,updated_at,orig,pinned,parent,archived FROM threads "
+    cur = await _db.execute("SELECT id,title,created_at,updated_at,orig,pinned,parent,archived,"
+                            "project,drift FROM threads "
                             "ORDER BY pinned IS NULL, updated_at DESC")
     rows = await cur.fetchall()
     cur = await _db.execute(
@@ -2412,7 +2442,7 @@ async def list_threads() -> list:
              # needs a confirm click (see web/app.js refreshThreads)
              "n_msgs": hit[2], "chars": hit[3],
              "pinned": r[5] is not None, "parent": json.loads(r[6]) if r[6] else None,
-             "archived": r[7]}
+             "archived": r[7], "project": r[8], "drift": json.loads(r[9]) if r[9] else None}
         )
     return out
 
@@ -2502,7 +2532,7 @@ async def fork_thread(tid: str, at: int | None = None, role: str = "", text: str
     graph input — the same as_node="__start__" append run_user_shell uses.
     A point inside the compacted region (originals only survive as lossy
     dicts in archived_messages) seeds a ⟲ summary note built from them."""
-    cur = await _db.execute("SELECT title,prompt,model FROM threads WHERE id=?", (tid,))
+    cur = await _db.execute("SELECT title,prompt,model,project FROM threads WHERE id=?", (tid,))
     row = await cur.fetchone()
     if row is None:
         raise LookupError("no such thread")
@@ -2562,10 +2592,11 @@ async def fork_thread(tid: str, at: int | None = None, role: str = "", text: str
     now = time.time()
     async with _wt(_db):
         await _db.execute(
-            "INSERT INTO threads(id,title,created_at,updated_at,orig,prompt,model,parent) "
-            "VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO threads(id,title,created_at,updated_at,orig,prompt,model,parent,project) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
             (new, title, now, now, title, row[1], row[2],
-             json.dumps({"tid": tid, "title": row[0], "at": i, "kept": cut}, ensure_ascii=False)))
+             json.dumps({"tid": tid, "title": row[0], "at": i, "kept": cut}, ensure_ascii=False),
+             row[3]))  # a fork starts in its source's project (projects.observe may move it on)
         if keep_arch:  # shared with the source, not copied (_arch_raw)
             base, n = await _arch_flatten(tid, len(keep_arch))
             await _db.execute("INSERT INTO arch_base(tid,base,n) VALUES(?,?,?)", (new, base, n))
@@ -2576,7 +2607,7 @@ async def fork_thread(tid: str, at: int | None = None, role: str = "", text: str
         g = await _read_agent()
         await g.aupdate_state({"configurable": {"thread_id": new}}, upd, as_node="__start__")
     return {"id": new, "title": title, "created_at": now, "updated_at": now,
-            "draft": carry, "kept": cut, "of": len(hist)}
+            "draft": carry, "kept": cut, "of": len(hist), "project": row[3]}
 
 
 async def search_text(m: dict) -> str:
@@ -3148,12 +3179,26 @@ async def run_chat(
     steer_take(thread_id)  # nothing queued for a run that is over carries into this one
     try:
         await _touch(thread_id, user_text or "[image]")
+        from . import projects
+        proj = await projects.thread_project(thread_id)
+        # ⏱ BEFORE this turn's own trajectory row: it measures the gap since
+        # the thread's last activity. Cron runs repeat on purpose — no note.
+        stale, t_st = None, time.time()
+        if not resume and not sched:
+            try:
+                stale = await projects.staleness(thread_id, s)
+            except Exception as e:  # noqa: BLE001 - a reminder, never a failure
+                logger.warning("staleness %s: %r", thread_id, e)
+        t_st = round(time.time() - t_st, 3)
         pf_task = None
         if not resume and user_text and bool(s.get("deep_agent", True)):
             from . import prefetch
             # started before build_agent (MCP tool load) so its ~0.3-0.7 s
-            # usually costs nothing; read before this turn's own user row
-            pf_task = asyncio.ensure_future(prefetch.gather(user_text, await _prior_user_text(thread_id), s))
+            # usually costs nothing; read before this turn's own user row.
+            # Other projects' threads never ride along as hints.
+            pf_task = asyncio.ensure_future(prefetch.gather(
+                user_text, await _prior_user_text(thread_id), s,
+                drop_tids=await projects.others_tids(proj and proj["id"])))
         await _log(
             thread_id, turn_id, "user",
             meta={"text": _cap(user_text or "[image]", 800),
@@ -3162,7 +3207,8 @@ async def run_chat(
         # this thread's provider/model override (scheduled tasks too: each
         # task owns a thread) — resolved per run, so a change applies next turn
         s = config.effective(s, await get_thread_model(thread_id))
-        agent = await build_agent(s, thread_prompt=await learning.get_thread_prompt(_db, thread_id))
+        agent = await build_agent(s, thread_prompt=await learning.get_thread_prompt(_db, thread_id),
+                                  project=proj)
         deep = bool(s.get("deep_agent", True))
         # Deep mode grants headroom for write_todos bookkeeping rounds (each
         # todo update is a full model+tool round that isn't "real" iteration).
@@ -3171,6 +3217,7 @@ async def run_chat(
                 "thread_id": thread_id,
                 "lb_plan": bool(plan),
                 "lb_nogate": sched is not None,  # nobody's there to answer
+                "lb_project": proj["name"] if proj else "",  # remember(project_only=…)
             },
             "recursion_limit": 2 * int(s.get("max_react_iterations", 12)) + 2 + (16 if deep else 0),
         }
@@ -3183,6 +3230,11 @@ async def run_chat(
         h_kwargs = {"lb_sched": sched} if sched else {}
         if wake:
             h_kwargs["lb_wake"] = {**wake, "ts": time.time()}  # ⚙ procs._wake
+        if stale:
+            h_kwargs["lb_stale"] = stale
+            await _log(thread_id, turn_id, "tool", name="get_current", dur=t_st,
+                       meta={"in": "", "out": _cap(stale["note"], 2000), "sub": None})
+            yield {"type": "stale", **stale}
         if pf_task is not None:
             pf = None
             try:
@@ -3216,6 +3268,7 @@ async def run_chat(
         # their LLM seconds get persisted even though their SSE is suppressed.
         tool_t0: dict[str, tuple[float, str | None, object]] = {}
         sub_m_t0: dict[str, float] = {}
+        calls: list[tuple[str, dict]] = []  # every tool call's args → projects.observe
         graph_in = (
             Command(resume={resume["id"]: resume["value"]}) if resume else {
                 "messages": [
@@ -3346,6 +3399,7 @@ async def run_chat(
                     rid = str(ev["run_id"])
                     tool_t0[rid] = (time.time(), sub_id, ev["data"].get("input"))
                     consult = learning.consulted(ev["name"], ev["data"].get("input"), s)
+                    calls.append((ev["name"], ev["data"].get("input")))
                     yield {
                         "type": "tool_start",
                         "name": ev["name"],
@@ -3431,6 +3485,12 @@ async def run_chat(
             await _log(thread_id, turn_id, "user", meta={"text": _cap(m_st.content, 800), "steer": True})
             yield {"type": "steer", "text": m_st.content}
             graph_in = {"messages": [m_st]}
+        try:  # ◫ auto-file an unfiled thread / flag a drifted one
+            pj = await projects.observe(thread_id, calls)
+            if pj:
+                yield {"type": "project", **pj}
+        except Exception as e:  # noqa: BLE001 - bookkeeping, never a failed run
+            logger.warning("projects.observe %s: %r", thread_id, e)
         # an interrupt() ends the stream quietly — the pause lives in the
         # checkpoint; surface it so the UI can render the question / plan
         for g in await pending_gates(thread_id):

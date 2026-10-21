@@ -83,10 +83,10 @@ const api = {
   async sfxRegenStatus(slot) { return J(await fetch("/api/sounds/regen/" + slot)); },
   async health() { return J(await fetch("/api/health")); },
   async threads() { return J(await fetch("/api/threads")); },
-  async newThread(title) {
+  async newThread(title, project = null) {
     return J(await fetch("/api/threads", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title }),
+      body: JSON.stringify({ title, project }),
     }));
   },
   async delThread(id) { await fetch("/api/threads/" + id, { method: "DELETE" }); },
@@ -124,7 +124,21 @@ const api = {
   async messages(id) { return J(await fetch(`/api/threads/${id}/messages`)); },
   async todos(id) { return J(await fetch(`/api/threads/${id}/todos`)); },
   async trajectory(id) { return J(await fetch(`/api/threads/${id}/trajectory`)); },
-  async search(q) { return J(await fetch("/api/search?q=" + encodeURIComponent(q))); },
+  async search(q) {
+    return J(await fetch("/api/search?q=" + encodeURIComponent(q) + (projPick ? "&project=" + encodeURIComponent(projPick) : "")));
+  },
+  async projects() { return J(await fetch("/api/projects")); },
+  async saveProject(id, body) {
+    return J(await fetch(id ? `/api/projects/${id}` : "/api/projects", {
+      method: id ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    }));
+  },
+  async delProject(id) { return J(await fetch(`/api/projects/${id}`, { method: "DELETE" })); },
+  async setThreadProject(id, body) {
+    return J(await fetch(`/api/threads/${id}/project`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    }));
+  },
   async schedules() { return J(await fetch("/api/schedules")); },
   async newSchedule(t) {
     return J(await fetch("/api/schedules", {
@@ -566,6 +580,30 @@ function attachPf(msg, pf) {
   msg.insertBefore(pfStrip(pf), msg.querySelector(".fork-btn"));
 }
 
+// ⏱ GET CURRENT — the turn resumed a thread that had been idle while things
+// moved (projects.staleness): what the model was told, inside the user bubble
+function fmtAgo(s) {
+  s = Math.max(0, Math.round(s || 0));
+  if (s >= 86400) return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
+  if (s >= 3600) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  return `${Math.floor(s / 60)}m`;
+}
+function staleStrip(st) {
+  const bits = [`⏱ RESUMED AFTER ${fmtAgo(st.ago_s)}`];
+  if (st.commits) bits.push(`${st.commits} COMMIT${st.commits === 1 ? "" : "S"} SINCE`);
+  if (st.dirty) bits.push(`${st.dirty} UNCOMMITTED`);
+  if (st.others && st.others.length) bits.push(`${st.others.length} OTHER THREAD${st.others.length === 1 ? "" : "S"} RAN`);
+  if (st.project) bits.push("◫ " + st.project);
+  const d = el("details", "pf-strip stale-strip");
+  d.appendChild(el("summary", null, bits.join(" · ")));
+  d.appendChild(el("pre", null, st.note || ""));
+  return d;
+}
+function attachStale(msg, st) {
+  if (!msg || msg.querySelector(".stale-strip")) return;
+  msg.insertBefore(staleStrip(st), msg.querySelector(".pf-strip") || msg.querySelector(".fork-btn"));
+}
+
 function runChip(s) {
   // tiny provenance tag on an AI bubble produced by a scheduled run — the
   // full ⏰ strip lives on the run's prompt far above, but by the time you're
@@ -683,6 +721,7 @@ function renderHistoryMsg(m, curSched) {
       if (m.merge) b.prepend(mergeStrip(m.merge));
       if (m.wake) b.prepend(el("div", "sched-strip wake-strip", `⚙ WOKEN BY “${m.wake.name}” — ${m.wake.what}`));
       if (m.prefetch) attachPf(b, m.prefetch);
+      if (m.stale) attachStale(b, m.stale);
       curSched = m.sched || null;
     } else if (m.role === "ai") {
       if (m.thinking) {
@@ -1273,8 +1312,15 @@ function runPipeline(run) {
       return; // not a hub event — seen counts server events only
     }
     // auto-search lands before the model's first token: keep AWAITING MODEL up
-    if (run.waiting && ev.type !== "prefetch") { run.waiting.remove(); run.waiting = null; } // first REAL event
+    if (run.waiting && ev.type !== "prefetch" && ev.type !== "stale") { run.waiting.remove(); run.waiting = null; } // first REAL event
     run.seen++;
+    if (ev.type === "stale") {
+      const ub = run.nodes.find((n) => n.classList && n.classList.contains("user")) ||
+        (run.viewing ? [...document.querySelectorAll("#chat > .msg.user")].pop() : null);
+      attachStale(ub, ev);
+      return;
+    }
+    if (ev.type === "project") { refreshThreads(); return; } // ◫ auto-filed / drift flagged
     if (ev.type === "prefetch") {
       const ub = run.nodes.find((n) => n.classList && n.classList.contains("user")) ||
         (run.viewing ? [...document.querySelectorAll("#chat > .msg.user")].pop() : null);
@@ -2207,8 +2253,10 @@ let armT = 0;
 let renamingTid = null;
 
 async function refreshThreads() {
-  threads = await api.threads();
+  [threads, projects] = await Promise.all([api.threads(), api.projects().catch(() => projects)]);
   syncTitle(); // renames land here too (auto-title, ✎, the 4 s poll)
+  syncProjPick();
+  syncTProj();
   const box = $("#threads");
   if (renamingTid && box.querySelector(".t-edit")) {
     for (const row of box.querySelectorAll(".thread")) {
@@ -2233,7 +2281,8 @@ async function refreshThreads() {
     d.dataset.tid = t.id;
     d.appendChild(el("span", "ctx", t.context_tokens != null ? fmtTok(t.context_tokens) : ""));
     const name = el("span", "t-name", t.title);
-    name.title = t.title + (t.parent ? `\n⑂ forked from “${t.parent.title}”` : "")
+    name.title = t.title + (t.project && projName(t.project) ? `\n◫ ${projName(t.project)}` : "")
+      + (t.parent ? `\n⑂ forked from “${t.parent.title}”` : "")
       + (PROC_WAIT.has(t.id) ? `\n⚙ waiting on ${PROC_WAIT.get(t.id)} background process(es) — not hung` : "");
     d.appendChild(name);
     // one-click title ops; ✎ (manual) is handled as inline edit below
@@ -2332,9 +2381,11 @@ async function refreshThreads() {
     d.onclick = () => openThread(t);
     box.appendChild(d);
   };
-  for (const t of threads) if (!t.archived) paint(t);
+  // ◫ the picked project only (the open thread always stays listed)
+  const inPick = (t) => t.id === threadId || !projPick || (projPick === "none" ? !t.project : t.project === projPick);
+  for (const t of threads) if (!t.archived && inPick(t)) paint(t);
   // merged ⑂ branches (and anything archived by hand): collapsed, read-only
-  const arch = threads.filter((t) => t.archived);
+  const arch = threads.filter((t) => t.archived && inPick(t));
   if (arch.length) {
     const open = archOpen || arch.some((t) => t.id === threadId);
     const h = el("div", "arch-head", `${open ? "▾" : "▸"} ARCHIVED · ${arch.length}`);
@@ -2344,9 +2395,164 @@ async function refreshThreads() {
     if (open) { pinGroup = false; for (const t of arch) paint(t); }
   }
   syncLock();
+  syncDrift();
   $("#btn-recap").disabled = !threadId; // recap needs an open thread
   $("#btn-tprompt").disabled = !threadId; // a draft has no row to hang it on
   updateCtxTag();
+}
+
+// ---------- ◫ projects ----------
+// sidebar picker (filters the list + search; new chats join it), a per-thread
+// selector in the topbar, and the drift bar (projects.observe noticed a run
+// working in another repo: move the thread there, graduate it, or keep it)
+let projects = [];
+let projPick = (() => { try { return localStorage.getItem("lb.proj") || ""; } catch { return ""; } })(); // "" all | "none" | id
+const projName = (id) => (projects.find((p) => p.id === id) || {}).name;
+
+function setProjPick(v) {
+  projPick = v;
+  try { localStorage.setItem("lb.proj", v); } catch {}
+  refreshThreads();
+  if ($("#search").value.trim().length >= 2) runSearch();
+}
+
+function fillSelect(sel, opts) {
+  // rebuilding an open <select> under the 4 s poll would snap it shut
+  const sig = JSON.stringify(opts);
+  if (sel._sig === sig || document.activeElement === sel) return;
+  sel.replaceChildren(...opts.map(([v, l]) => { const o = el("option", null, l); o.value = v; return o; }));
+  sel._sig = sig;
+}
+
+function syncProjPick() {
+  let bar = $("#proj-bar");
+  if (!bar) {
+    bar = el("div");
+    bar.id = "proj-bar";
+    const sel = el("select");
+    sel.id = "proj-pick";
+    sel.title = "◫ Project — filters this list and search; new chats are filed into it";
+    sel.onchange = () => {
+      SFX.play("click");
+      if (sel.value === "+new") { sel.value = projPick; projForm(null); return; }
+      setProjPick(sel.value);
+    };
+    const ed = el("button", "btn ghost sm", "✎");
+    ed.id = "proj-edit";
+    ed.title = "Rename this project, set its root folder, or delete it";
+    ed.onclick = () => { const p = projects.find((x) => x.id === projPick); if (p) projForm(p); };
+    bar.append(sel, ed);
+    $("#search").after(bar);
+  }
+  if (projPick && projPick !== "none" && !projects.some((p) => p.id === projPick)) projPick = ""; // deleted elsewhere
+  fillSelect($("#proj-pick"), [
+    ["", `◫ ALL PROJECTS · ${threads.length}`],
+    ["none", `◫ UNFILED · ${threads.filter((t) => !t.project).length}`],
+    ...projects.map((p) => [p.id, `◫ ${p.name} · ${p.threads}`]),
+    ["+new", "+ NEW PROJECT…"],
+  ]);
+  if (document.activeElement !== $("#proj-pick")) $("#proj-pick").value = projPick;
+  $("#proj-edit").classList.toggle("hidden", !projPick || projPick === "none");
+}
+
+// inline create / edit form under the picker (no browser dialogs)
+function projForm(p) {
+  $("#proj-form")?.remove();
+  const f = el("div");
+  f.id = "proj-form";
+  const name = el("input");
+  name.placeholder = "project name";
+  name.value = p ? p.name : "";
+  const root = el("input");
+  root.placeholder = "root folder, e.g. ~/projects/foo (optional — git check + auto-filing)";
+  root.value = p ? p.root : "";
+  const msg = el("div", "proj-msg", p && p.auto ? "auto-created from the repo this thread worked in" : "");
+  const save = el("button", "btn accent sm", p ? "SAVE" : "CREATE");
+  const cancel = el("button", "btn ghost sm", "CANCEL");
+  const acts = el("div", "proj-acts");
+  acts.append(save, cancel);
+  if (p) {
+    const del = el("button", "btn ghost sm danger", "DELETE");
+    del.title = "Delete the project — its threads are kept, just unfiled";
+    del.onclick = async () => {
+      if (!del._armed) { del._armed = true; del.textContent = `⚠ UNFILE ${p.threads} THREAD(S)?`; return; }
+      try { await api.delProject(p.id); } catch (e) { msg.textContent = "✕ " + e.message; return; }
+      f.remove();
+      setProjPick("");
+    };
+    acts.append(del);
+  }
+  save.onclick = async () => {
+    let r;
+    try { r = await api.saveProject(p && p.id, { name: name.value, root: root.value }); }
+    catch (e) { r = { detail: e.message }; }
+    if (!r || !r.id) { msg.textContent = "✕ " + ((r && r.detail) || "save failed"); SFX.play("error"); return; }
+    f.remove();
+    SFX.play("click");
+    setProjPick(r.id);
+  };
+  cancel.onclick = () => f.remove();
+  for (const i of [name, root]) i.onkeydown = (e) => { if (e.key === "Enter") save.click(); if (e.key === "Escape") f.remove(); };
+  f.append(name, root, msg, acts);
+  $("#proj-bar").after(f);
+  name.focus();
+}
+
+// topbar: which project THIS thread is filed in (change = move it)
+function syncTProj() {
+  let sel = $("#tproj");
+  if (!sel) {
+    sel = el("select");
+    sel.id = "tproj";
+    sel.title = "◫ project of THIS thread — change it to move the thread";
+    sel.onchange = async () => {
+      if (!threadId) return;
+      SFX.play("click");
+      try { await api.setThreadProject(threadId, { project: sel.value || null }); } catch { SFX.play("error"); }
+      refreshThreads();
+    };
+    $("#ctx-tag").before(sel);
+  }
+  const t = threadId && threads.find((x) => x.id === threadId);
+  fillSelect(sel, [["", "◫ UNFILED"], ...projects.map((p) => [p.id, "◫ " + p.name])]);
+  if (document.activeElement !== sel)
+    sel.value = t ? t.project || "" : projPick && projPick !== "none" ? projPick : "";
+  sel.disabled = !t || !!t.archived;
+}
+
+function syncDrift() {
+  const t = threadId && threads.find((x) => x.id === threadId);
+  let bar = $("#drift-bar");
+  if (!t || !t.drift || t.archived) { if (bar) bar.classList.add("hidden"); return; }
+  if (!bar) {
+    bar = el("div", "hidden");
+    bar.id = "drift-bar";
+    $("#composer").before(bar);
+  }
+  const d = t.drift;
+  const cur = projName(t.project) || "its project";
+  const folder = d.root.split("/").pop();
+  const short = d.root.replace(/^\/home\/[^/]+/, "~");
+  bar.replaceChildren(el("span", "lock-msg", `◫ THIS THREAD'S LAST RUN WORKED IN ${short} — not in “${cur}”`));
+  const go = (body) => async () => {
+    SFX.play("click");
+    try { await api.setThreadProject(t.id, body); } catch (e) { SFX.play("error"); }
+    refreshThreads();
+  };
+  if (d.project) {
+    const mv = el("button", "btn ghost sm", `MOVE TO “${d.project.name}”`);
+    mv.onclick = go({ project: d.project.id });
+    bar.appendChild(mv);
+  } else {
+    const nw = el("button", "btn ghost sm", `NEW PROJECT “${folder}”`);
+    nw.title = `Graduate this thread into its own project rooted at ${short}`;
+    nw.onclick = go({ new_root: d.root });
+    bar.appendChild(nw);
+  }
+  const keep = el("button", "btn ghost sm", `KEEP IN “${cur}”`);
+  keep.onclick = go({ dismiss: true });
+  bar.appendChild(keep);
+  bar.classList.remove("hidden");
 }
 
 let archOpen = (() => { try { return !!localStorage.getItem("lb.archOpen"); } catch { return false; } })();
@@ -2485,6 +2691,8 @@ async function openThread(t) {
   const bumped = api.touchThread(t.id).catch(() => {});
   syncTPrompt(t.id);
   syncLock();
+  syncDrift();
+  syncTProj();
   draftModel = null; // a pick on an abandoned draft doesn't follow you
   syncTModel(t.id);
   const msgs = await api.messages(t.id);
@@ -2522,6 +2730,8 @@ async function newThread() {
   syncTPrompt(null);
   syncTModel(null);
   syncLock();
+  syncDrift();
+  syncTProj();
   $("#chat").innerHTML = "";
   $("#chat-title").textContent = "NEW CHAT";
   $("#sb-live").classList.add("hidden");
@@ -2533,7 +2743,7 @@ async function newThread() {
 }
 
 async function createThreadNow() {
-  const t = await api.newThread("New chat");
+  const t = await api.newThread("New chat", projPick && projPick !== "none" ? projPick : null);
   const draftPlan = planOn(null);
   threadId = t.id;
   syncDraft();

@@ -1385,3 +1385,22 @@ html[data-theme="light"] .spk-hud-phrase span.on { text-shadow: none; }
 #lock-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 14px;
   border-top: 1px solid var(--orange); background: var(--panel); font-size: 11px; letter-spacing: 1px; color: var(--orange); }
 #lock-bar .lock-msg { flex: 1 1 240px; min-width: 0; }
+/* ◫ projects: sidebar picker + inline form, topbar thread selector, drift bar */
+#proj-bar { display: flex; gap: 4px; margin: 6px 0 2px; }
+#proj-pick, #tproj { font: inherit; font-size: 11px; letter-spacing: 1px; color: var(--text);
+  background: var(--panel); border: 1px solid var(--line); padding: 4px 6px; outline: none; }
+#proj-pick { flex: 1 1 auto; min-width: 0; }
+#proj-pick:focus, #tproj:focus { border-color: var(--cyan); }
+#tproj { max-width: 170px; color: var(--muted); }
+#tproj:disabled { opacity: .5; }
+#proj-form { display: flex; flex-direction: column; gap: 4px; margin: 2px 0 6px; }
+#proj-form input { font: inherit; font-size: 11px; color: var(--text); background: var(--panel);
+  border: 1px solid var(--line); padding: 5px 7px; outline: none; min-width: 0; }
+#proj-form input:focus { border-color: var(--cyan); }
+.proj-msg { font-size: 10px; color: var(--muted); letter-spacing: 1px; min-height: 0; }
+.proj-acts { display: flex; flex-wrap: wrap; gap: 4px; }
+#drift-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 14px;
+  border-top: 1px solid var(--cyan); background: var(--panel); font-size: 11px; letter-spacing: 1px; color: var(--cyan); }
+#drift-bar .lock-msg { flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
+/* ⏱ resumed-after strip inside the user bubble */
+.stale-strip > summary { color: var(--orange); }

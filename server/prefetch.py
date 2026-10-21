@@ -93,8 +93,9 @@ def _search(q, category=""):
     return rag.search(q, category=category, top_k=8, timeout=4).get("results") or []
 
 
-async def gather(text, prior="", s=None):
-    """→ {note, hits, gate, why, ms, queries} or None (no hint this turn)."""
+async def gather(text, prior="", s=None, drop_tids=()):
+    """→ {note, hits, gate, why, ms, queries} or None (no hint this turn).
+    `drop_tids`: threads whose turns must not be hinted (other projects)."""
     s = s or config.load()
     p = settings(s)
     if not p["enabled"] or not rag.settings(s)["enabled"]:
@@ -128,7 +129,7 @@ async def gather(text, prior="", s=None):
     res = {}
     for k, t in tasks.items():
         if t in done and not t.cancelled() and t.exception() is None:
-            res[k] = t.result()
+            res[k] = [r for r in t.result() if not _dropped(r, drop_tids)]
         elif t in done and not t.cancelled():
             logger.warning("prefetch: %s search failed: %r", k, t.exception())
     if not res:
@@ -154,6 +155,12 @@ async def gather(text, prior="", s=None):
     hits = local_tools._fmt_hits({"results": picked})
     return {"note": NOTE_HEAD + "\n" + hits, "hits": hits, "gate": gate, "why": why,
             "ms": round((time.perf_counter() - t0) * 1000), "queries": sorted(res)}
+
+
+def _dropped(r, tids):
+    """A thread-turn hit (path lb-thread:<tid>/<turn>) from a dropped thread."""
+    p = str(r.get("path") or "")
+    return bool(tids) and p.startswith("lb-thread:") and p[10:].split("/", 1)[0] in tids
 
 
 def render(m):

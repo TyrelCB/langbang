@@ -161,6 +161,7 @@ def list_memories(s: dict | None = None) -> list[dict]:
             "name": str(meta.get("name") or fn[:-3]),
             "description": str(meta.get("description") or body.strip().split("\n")[0][:150]),
             "type": str(meta.get("type") or ""),
+            "project": str(meta.get("project") or ""),  # ◫ scoped: index shows it in that project only
             "path": p, "mtime": os.path.getmtime(p), "chars": len(body),
             **({"error": err} if err else {}),
         })
@@ -208,7 +209,9 @@ def consulted(tool: str, args, s: dict | None = None) -> list[dict]:
 
 
 def write_memory(name: str, description: str, content: str, type_: str = "project",
-                 s: dict | None = None) -> dict:
+                 s: dict | None = None, project: str | None = None) -> dict:
+    """project: None keeps an existing file's ◫ scope, '' makes it global,
+    a name scopes it to that project's threads."""
     slug = _slug(name)
     if not slug:
         raise ValueError("memory name must contain letters or digits")
@@ -221,8 +224,15 @@ def write_memory(name: str, description: str, content: str, type_: str = "projec
         raise ValueError("content is empty")
     p = os.path.join(memory_dir(s), slug + ".md")
     existed = os.path.exists(p)
-    text = _dump_frontmatter({"name": slug, "description": description, "type": type_}) \
-        + "\n" + content.strip() + "\n"
+    if project is None and existed:
+        try:
+            project = str((parse_frontmatter(open(p, encoding="utf-8").read())[0] or {}).get("project") or "")
+        except OSError:
+            project = ""
+    fm = {"name": slug, "description": description, "type": type_}
+    if project:
+        fm["project"] = project
+    text = _dump_frontmatter(fm) + "\n" + content.strip() + "\n"
     tmp = p + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(text)
@@ -230,6 +240,20 @@ def write_memory(name: str, description: str, content: str, type_: str = "projec
     from . import rag  # cycle-safe
     rag.push_paths([p])
     return {"name": slug, "path": p, "updated": existed}
+
+
+def retag_memories(old: str, new: str, s: dict | None = None) -> int:
+    """A ◫ project was renamed (new='' → deleted: its memories go global)."""
+    n = 0
+    for m in list_memories(s):
+        if m["project"] != old:
+            continue
+        meta, body, err = parse_frontmatter(open(m["path"], encoding="utf-8").read())
+        if err or not meta:
+            continue
+        write_memory(m["name"], m["description"], body, m["type"] or "project", s, project=new)
+        n += 1
+    return n
 
 
 def delete_memory(name: str, s: dict | None = None) -> bool:
@@ -242,12 +266,19 @@ def delete_memory(name: str, s: dict | None = None) -> bool:
     return False
 
 
-def memory_note(s: dict) -> str:
+def memory_note(s: dict, project: str = "") -> str:
+    """The memory index for one run: global memories plus those scoped to
+    THIS thread's ◫ project — another project's facts never show up here
+    (similar-but-different repos were trading stale state)."""
     if not s.get("memory_enabled", True):
         return ""
-    mems = list_memories(s)
-    lines = [f"- **{m['name']}** ({m['type'] or 'note'}) — {m['description']}" for m in mems]
+    allm = list_memories(s)
+    mems = [m for m in allm if not m["project"] or m["project"] == project]
+    lines = [f"- **{m['name']}** ({m['type'] or 'note'}{', ◫ ' + project if m['project'] else ''})"
+             f" — {m['description']}" for m in mems]
     idx = "\n".join(lines) if lines else "(none yet)"
+    if len(allm) > len(mems):
+        idx += f"\n({len(allm) - len(mems)} more scoped to other projects — not shown)"
     if len(idx) > INDEX_CAP:
         idx = idx[:INDEX_CAP] + "\n…(index truncated — list the directory for the rest)"
     return f"""
@@ -256,6 +287,7 @@ def memory_note(s: dict) -> str:
 Directory: `{memory_dir(s)}` — one file per fact, `<name>.md`.
 {idx}
 
+{"This thread's project: **" + project + "**. Pass `project_only=true` to `remember` for facts that only hold for this project (its repo layout, state, decisions)." if project else ""}
 Read a memory's file when its description is relevant. Use `remember` to save
 durable facts worth knowing in future threads — who the user is and their
 preferences, guidance they gave you on how to work (corrections AND confirmed
@@ -277,13 +309,24 @@ def thread_note(tprompt: str) -> str:
 
 
 @tool
-def remember(name: str, description: str, content: str, type: str = "project") -> str:
+def remember(name: str, description: str, content: str, type: str = "project",
+             project_only: bool = False) -> str:
     """Save (or overwrite, same name) a durable memory shown to you in every
     future thread. name: short kebab-case slug. description: one line used to
     judge relevance later. content: the fact; for feedback/project add
-    'Why:' and 'How to apply:' lines. type: user | feedback | project | reference."""
+    'Why:' and 'How to apply:' lines. type: user | feedback | project | reference.
+    project_only: true = only threads in THIS thread's project see it."""
+    proj = None
+    if project_only:
+        try:
+            from langgraph.config import get_config
+            proj = (get_config().get("configurable") or {}).get("lb_project") or ""
+        except Exception:  # noqa: BLE001 - outside a run
+            proj = ""
+        if not proj:
+            return "ERROR: this thread isn't in a project — save it without project_only"
     try:
-        r = write_memory(name, description, content, type)
+        r = write_memory(name, description, content, type, project=proj)
     except ValueError as e:
         return f"ERROR: {e}"
     return f"{'updated' if r['updated'] else 'saved'} memory '{r['name']}' → {r['path']}"
@@ -465,8 +508,10 @@ def _backup(name: str, path: str) -> str | None:
     return dst
 
 
-def apply_actions(acts: list[dict], s: dict, catalog: list[dict], shown: set[str]) -> list[dict]:
-    """Validate + apply reviewer actions. Returns per-action results."""
+def apply_actions(acts: list[dict], s: dict, catalog: list[dict], shown: set[str],
+                  project: str = "") -> list[dict]:
+    """Validate + apply reviewer actions. Returns per-action results. A NEW
+    project-type memory from a thread in a ◫ project is scoped to it."""
     lb = _skills_dir(s)
     by_name = {c["name"]: c for c in catalog}
     results = []
@@ -474,7 +519,10 @@ def apply_actions(acts: list[dict], s: dict, catalog: list[dict], shown: set[str
         name = _slug(a.get("name", ""))
         try:
             if a["kind"] == "memory":
-                r = write_memory(name, a.get("description", ""), a["body"], a.get("type", "project"), s)
+                fresh = not os.path.exists(os.path.join(memory_dir(s), name + ".md"))
+                r = write_memory(name, a.get("description", ""), a["body"], a.get("type", "project"), s,
+                                 project=project if fresh and project and a.get("type", "project") == "project"
+                                 else None)
                 results.append({"kind": "memory", "name": r["name"], "path": r["path"],
                                 "op": "updated" if r["updated"] else "saved"})
                 continue
@@ -580,7 +628,9 @@ async def review(tid: str, s: dict | None = None, auto: bool = False) -> dict:
                                       HumanMessage(content=prompt)])
             out = _text(resp.content)
             acts, reason = parse_review(out)
-            results = apply_actions(acts, s, catalog, shown)
+            from . import projects
+            pj = await projects.thread_project(tid)
+            results = apply_actions(acts, s, catalog, shown, pj["name"] if pj else "")
             title = await notify._title(tid)
             entry = {"ts": time.time(), "tid": tid, "title": title, "auto": auto,
                      "tool_calls": n_tools, "seconds": round(time.time() - t0, 1),

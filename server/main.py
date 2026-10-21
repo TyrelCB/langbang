@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from . import agent, audioart, backup, comfy, config, decide, fileassist, ivr, learning, mcp, notify, procs, rag, runs, schedule, sfxgen, term, ttsjobs, voice
+from . import agent, audioart, backup, comfy, config, decide, fileassist, ivr, learning, mcp, notify, procs, projects, rag, runs, schedule, searchidx, sfxgen, term, ttsjobs, voice
 from .ivr_hub import router as ivr_hub_router
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
@@ -58,12 +58,21 @@ async def _startup():
         await ivr.prewarm(config.load())
     asyncio.create_task(_prewarm())
 
+    async def _warm_search():  # ⌕ index catch-up, off the first query's back
+        await asyncio.sleep(20)
+        try:
+            await searchidx.refresh()
+        except Exception as e:  # noqa: BLE001 - a query will retry
+            print(f"search warm-up failed: {e!r}", flush=True)
+    asyncio.create_task(_warm_search())
+
 
 @app.on_event("shutdown")
 async def _shutdown():
     # aiosqlite threads are non-daemon: left open, interpreter shutdown joins
     # them forever (graceful stop hangs). The scripted restart SIGKILLs, which
     # is the only reason this never bit before.
+    await searchidx.close()
     await agent.shutdown()
 
 
@@ -166,11 +175,75 @@ async def threads():
 
 class ThreadIn(BaseModel):
     title: str = "New chat"
+    project: str | None = None  # ◫ the sidebar's picked project
 
 
 @app.post("/api/threads")
 async def new_thread(body: ThreadIn):
-    return await agent.create_thread(body.title)
+    return await agent.create_thread(body.title, body.project)
+
+
+# ---- ◫ projects (projects.py) ----
+
+class ProjectIn(BaseModel):
+    name: str | None = None
+    root: str | None = None
+
+
+@app.get("/api/projects")
+async def list_projects():
+    return await projects.list_projects()
+
+
+@app.post("/api/projects")
+async def create_project(body: ProjectIn):
+    try:
+        return await projects.create(body.name or "", body.root or "")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.put("/api/projects/{pid}")
+async def update_project(pid: str, body: ProjectIn):
+    try:
+        return await projects.update(pid, body.name, body.root)
+    except LookupError:
+        raise HTTPException(404, "no such project")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/projects/{pid}")
+async def delete_project(pid: str):
+    if not await projects.delete(pid):
+        raise HTTPException(404, "no such project")
+    return {"ok": True}
+
+
+class ThreadProjectIn(BaseModel):
+    project: str | None = None       # id; None = unfiled
+    new_root: str | None = None      # file it into a NEW project at this root (drift → graduate)
+    new_name: str | None = None
+    dismiss: bool = False            # just drop the drift suggestion
+
+
+@app.put("/api/threads/{tid}/project")
+async def thread_project(tid: str, body: ThreadProjectIn):
+    try:
+        if body.dismiss:
+            await projects.dismiss_drift(tid)
+            return {"ok": True}
+        pid = body.project
+        if body.new_root or body.new_name:
+            pid = (await projects.by_root(body.new_root or "") or
+                   await projects.create(body.new_name or "", body.new_root or ""))["id"]
+        if not await projects.set_thread(tid, pid):
+            raise HTTPException(404, "no such thread")
+        return {"project": await projects.get(pid)}
+    except LookupError:
+        raise HTTPException(404, "no such project")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.delete("/api/threads/{tid}")
@@ -574,44 +647,37 @@ PER_THREAD_LIMIT = 3  # short queries ("sm") hit dozens of messages per thread;
 
 
 @app.get("/api/search")
-async def search(q: str = ""):
-    """Case-insensitive substring scan over every thread's full transcript
+async def search(q: str = "", project: str = ""):
+    """Case-insensitive substring search over every thread's full transcript
     (compaction archives included), newest threads first, max PER_THREAD_LIMIT
-    hits per thread so a broad query still surfaces breadth. `pos` is the
-    message's index among rendered messages — exactly the chat DOM child
-    index the UI renders, so a click can scroll straight to the hit."""
-    q = q.strip().lower()
+    hits per thread so a broad query still surfaces breadth. Served from the
+    ⌕ index (searchidx: only threads changed since the last query are
+    re-read). `project` = a ◫ project id, "none" = unfiled only, "" = all.
+    `pos` is the message's index among rendered messages — exactly the chat
+    DOM child index the UI renders, so a click can scroll straight to the hit."""
+    q = q.strip()
     if len(q) < 2:
         return []
+    ts = await agent.list_threads()
+    if project == "none":
+        ts = [t for t in ts if not t.get("project")]
+    elif project:
+        ts = [t for t in ts if t.get("project") == project]
+    found = await searchidx.query(q, [t["id"] for t in ts], PER_THREAD_LIMIT)
+    ql = q.lower()
     out = []
-    for t in await agent.list_threads():
+    for t in ts:
         hits = []
-        pos = -1
-        for m in await agent.history(t["id"]):
-            if m["role"] == "system":
-                continue
-            if (
-                m["role"] == "ai"
-                and not str(m.get("content") or "").strip()
-                and not m.get("tool_calls")
-                and not m.get("thinking")
-            ):
-                continue  # renderHistory draws no node for these — keep pos aligned
-            pos += 1  # counts rendered msgs only == client chat DOM child index
-            text = await agent.search_text(m)
-            i = text.lower().find(q)
-            if i < 0:
-                continue
+        for pos, role, text in found.get(t["id"], []):
+            i = max(0, text.lower().find(ql))  # LIKE folds ASCII only; never miss the row
             a = max(0, i - 40)
             b = min(len(text), i + len(q) + 120)
             snippet = ("… " if a else "") + " ".join(text[a:b].split()) + (" …" if b < len(text) else "")
             hits.append({"thread_id": t["id"], "title": t["title"], "pos": pos,
-                         "role": m["role"], "snippet": snippet})
-            if len(hits) >= PER_THREAD_LIMIT:
-                break
+                         "role": role, "snippet": snippet})
         # title row only when the thread has no message hits — otherwise the
         # title already shows on every hit row and this is pure noise
-        if not hits and q in t["title"].lower():
+        if not hits and ql in t["title"].lower():
             hits.append({"thread_id": t["id"], "title": t["title"], "pos": -1,
                          "role": "title", "snippet": t["title"]})
         out.extend(hits)

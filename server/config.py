@@ -59,6 +59,11 @@ DEFAULTS = {
     # after a clean run with >= min_tool_calls tool calls, a background
     # no-tool review may create/patch LangBang skills and save memories
     "skill_review": {"enabled": True, "min_tool_calls": 6, "scheduled": False},
+    # ⏱ get-current check (projects.staleness): a turn that resumes a thread
+    # after_h hours idle — or after min_gap_min+ minutes when its ◫ project's
+    # repo got commits / sibling threads ran meanwhile — carries a note of
+    # what changed, so the agent re-checks instead of trusting old state
+    "staleness": {"enabled": True, "after_h": 6, "min_gap_min": 10},
     # Off by default: Qwen3-style hybrids answer silently unless asked, and
     # thinking adds a few hundred decode tokens per turn (~40-50 ms each on
     # a single Spark). Enable in CONFIG to stream reasoning into the
@@ -330,6 +335,7 @@ def _backfill(merged: dict) -> dict:
     merged["decide"] = {**DEFAULTS["decide"], **(merged.get("decide") or {})}
     merged["ivr"] = {**DEFAULTS["ivr"], **(merged.get("ivr") or {})}
     merged["skill_review"] = {**DEFAULTS["skill_review"], **(merged.get("skill_review") or {})}
+    merged["staleness"] = {**DEFAULTS["staleness"], **(merged.get("staleness") or {})}
     merged["providers"] = _providers(merged)
     # top-level base_url/api_key/capabilities mirror the DEFAULT provider, so
     # every older call site (health, titles, file assist…) keeps working
