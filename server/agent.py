@@ -126,7 +126,9 @@ async def init() -> None:
           started REAL NOT NULL, ended REAL, exit INTEGER,
           state TEXT NOT NULL,              -- running | exited | stopped | lost
           wake TEXT NOT NULL,               -- exit | match | none
-          wake_match TEXT, woke REAL, log_off INTEGER DEFAULT 0);
+          wake_match TEXT, woke REAL, log_off INTEGER DEFAULT 0,
+          host TEXT,                        -- ran via ssh on this host (NULL = here)
+          warned REAL);                     -- early shell-error wake sent
         CREATE INDEX IF NOT EXISTS ix_procs_thread ON procs(thread_id, started);
         CREATE TABLE IF NOT EXISTS projects(   -- ◫ projects (projects.py)
           id TEXT PRIMARY KEY, name TEXT NOT NULL, root TEXT,
@@ -149,6 +151,11 @@ async def init() -> None:
         try:
             await _db.execute(f"ALTER TABLE threads ADD COLUMN {col} {typ}")
         except aiosqlite.OperationalError:  # duplicate column — already migrated
+            pass
+    for col, typ in (("host", "TEXT"), ("warned", "REAL")):
+        try:
+            await _db.execute(f"ALTER TABLE procs ADD COLUMN {col} {typ}")
+        except aiosqlite.OperationalError:
             pass
     await _db.execute("UPDATE threads SET orig=title WHERE orig IS NULL")
     await _db.commit()

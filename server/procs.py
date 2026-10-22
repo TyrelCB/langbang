@@ -42,6 +42,17 @@ LOG_CAP = 64 * 1024 * 1024  # a log past this keeps only its last LOG_KEEP
 LOG_KEEP = 8 * 1024 * 1024
 POLL_S = 5
 WAKE_TAIL = 40  # log lines handed to the woken agent
+HOST = os.uname().nodename
+# A watcher the agent hand-rolls usually breaks the same few ways: checks run
+# on the wrong machine (no such container / port), nested ssh quoting, a typo
+# like $(out##*) for ${out##*}. Those print shell errors from the first loop
+# iteration on — and then loop silently for 20 min. Lines like these in the
+# first EARLY_S seconds wake the thread at once (the process keeps running).
+EARLY_S = 180
+SHELL_ERR = re.compile(
+    r"command not found|syntax error|unexpected EOF|bad substitution|unbound variable"
+    r"|No such container|Could not resolve hostname|Permission denied \(publickey", re.I)
+_HOST_OK = re.compile(r"^[A-Za-z0-9_.@-]{1,100}$")
 
 
 def _env() -> dict:
@@ -75,13 +86,13 @@ def tail(pid: str, lines: int = 40, max_bytes: int = 64 * 1024) -> str:
 
 def _row(r) -> dict:
     keys = ("id", "thread_id", "name", "cmd", "started", "ended", "exit", "state",
-            "wake", "wake_match", "woke")
+            "wake", "wake_match", "woke", "host", "warned")
     d = dict(zip(keys, r))
     d["secs"] = round((d["ended"] or time.time()) - d["started"])
     return d
 
 
-_COLS = "id,thread_id,name,cmd,started,ended,exit,state,wake,wake_match,woke"
+_COLS = "id,thread_id,name,cmd,started,ended,exit,state,wake,wake_match,woke,host,warned"
 
 
 async def list_procs(thread_id: str | None = None, limit: int = 50) -> list[dict]:
@@ -106,8 +117,36 @@ async def get(pid: str) -> dict | None:
     return _row(r) if r else None
 
 
+def _syntax_err(command: str) -> str:
+    """bash -n: parse without running → "" or bash's complaint."""
+    r = subprocess.run(["bash", "-n", "-c", command], capture_output=True, text=True, timeout=10)
+    return "" if r.returncode == 0 else (r.stderr.strip() or "bash -n failed")
+
+
+def _ssh_wrap(host: str, command: str) -> str:
+    """Run `command` under bash -l on `host`. One shlex.quote per shell that
+    parses it (the local bash, then the remote login shell), so the agent's
+    command goes over verbatim — no hand-nested quotes. -tt: the remote side
+    runs on a pty, so when bg_stop kills the local ssh the remote command gets
+    SIGHUP and dies too (without it, the remote loop runs on orphaned);
+    stty -onlcr keeps the log free of \r. BatchMode: never hang on a password
+    prompt; keepalives: a dead link ends the unit (exit 255) instead of
+    hanging forever."""
+    remote = "stty -onlcr -echo 2>/dev/null; exec bash -lc " + shlex.quote(command)
+    return ("ssh -q -tt -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=30 "
+            f"-o ServerAliveCountMax=6 {shlex.quote(host)} {shlex.quote(remote)} < /dev/null")
+
+
 async def start(thread_id: str | None, command: str, name: str, wake: str = "exit",
-                wake_match: str = "", max_hours: float = 24) -> dict:
+                wake_match: str = "", max_hours: float = 24, host: str = "") -> dict:
+    host = (host or "").strip()
+    if host in ("localhost", "127.0.0.1", HOST):
+        host = ""
+    if host and not _HOST_OK.match(host):
+        raise ValueError(f"bad host {host!r} (an ssh alias or user@host)")
+    err = await asyncio.to_thread(_syntax_err, command)
+    if err:
+        raise ValueError(f"bash syntax error — nothing started:\n{err}")
     if wake not in ("exit", "match", "none"):
         raise ValueError("wake must be exit, match or none")
     if wake == "match":
@@ -118,6 +157,7 @@ async def start(thread_id: str | None, command: str, name: str, wake: str = "exi
     log, exitf = _paths(pid)
     log.parent.mkdir(parents=True, exist_ok=True)
     (log.parent / "cmd").write_text(command)
+    run_cmd = _ssh_wrap(host, command) if host else command
     secs = max(60, int(min(float(max_hours), 24 * 7) * 3600))
     # bash -lc: the user's login env (the user manager's own env is bare);
     # >> appends (O_APPEND), so the poller's in-place trim keeps working
@@ -126,16 +166,17 @@ async def start(thread_id: str | None, command: str, name: str, wake: str = "exi
         "systemd-run", "--user", "--unit", UNIT + pid, "--collect", "--quiet",
         "-p", f"RuntimeMaxSec={secs}", "--working-directory", str(Path.home()),
         "--description", f"LangBang bg: {name[:60]}",
-        "/usr/bin/bash", "-c", wrapper, command, str(log), str(exitf),
+        "/usr/bin/bash", "-c", wrapper, run_cmd, str(log), str(exitf),
     ], env=_env(), capture_output=True, text=True, timeout=20)
     if r.returncode != 0:
         raise RuntimeError((r.stderr or r.stdout).strip() or "systemd-run failed")
     now = time.time()
     async with agent._wt(agent._db):
         await agent._db.execute(
-            "INSERT INTO procs(id,thread_id,name,cmd,started,state,wake,wake_match) "
-            "VALUES(?,?,?,?,?,?,?,?)",
-            (pid, thread_id, name[:120], command, now, "running", wake, wake_match or None))
+            "INSERT INTO procs(id,thread_id,name,cmd,started,state,wake,wake_match,host) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (pid, thread_id, name[:120], command, now, "running", wake, wake_match or None,
+             host or None))
     return await get(pid)
 
 
@@ -199,7 +240,7 @@ def _fmt_dur(s: float) -> str:
     return f"{s // 3600}h{s % 3600 // 60:02d}m" if s >= 3600 else f"{s // 60}m{s % 60:02d}s"
 
 
-async def _wake(p: dict, what: str) -> bool:
+async def _wake(p: dict, what: str, advice: str = "") -> bool:
     """Hand the outcome to the owning thread. False = try again next tick
     (run cap reached)."""
     tid = p["thread_id"]
@@ -208,9 +249,15 @@ async def _wake(p: dict, what: str) -> bool:
         return True
     if await agent.archived_why(tid):
         return True  # read-only now (merged/archived): the exit is in the PROCESSES bar
-    text = (f"⚙ Background process “{p['name']}” ({p['id']}) {what} after "
+    where = f" on {p['host']}" if p.get("host") else f" on {HOST} (the LangBang host)"
+    hint = ""
+    if p.get("host") and p.get("exit") == 255:
+        hint = (f"\nExit 255 is ssh's own code: the connection to {p['host']} failed or "
+                "dropped — or something killed the remote shell (e.g. `pkill -f` matching "
+                "its own command line). It says nothing about the command's result.")
+    text = (f"⚙ Background process “{p['name']}” ({p['id']}){where} {what} after "
             f"{_fmt_dur(p['secs'])}. Last output:\n```\n{tail(p['id'], WAKE_TAIL)[-6000:]}\n```\n"
-            f"(command: {p['cmd'][:300]})")
+            f"(command: {p['cmd'][:300]}){hint}{advice}")
     info = {"id": p["id"], "name": p["name"], "what": what, "exit": p.get("exit")}
     try:
         runs.start(tid, agent.run_chat(tid, text, config.load(), wake=info))
@@ -235,6 +282,16 @@ async def _tick() -> None:
         log, exitf = _paths(p["id"])
         if p["state"] == "running":
             await asyncio.to_thread(_trim_log, log)
+            if (p["thread_id"] and not p["warned"] and p["wake"] != "none"
+                    and time.time() - p["started"] < EARLY_S):
+                m = SHELL_ERR.search(await asyncio.to_thread(tail, p["id"], 60))
+                if m and await _wake(p, f"started printing shell errors (“{m.group(0)}”)", (
+                        "\nThe command itself is probably broken (wrong machine? quoting? "
+                        "typo?) and it is STILL RUNNING: bg_stop it, run its check once with "
+                        "run_bash, then bg_start the fixed version (host= for remote checks).")):
+                    async with agent._wt(agent._db):
+                        await agent._db.execute("UPDATE procs SET warned=? WHERE id=?",
+                                                (time.time(), p["id"]))
             if p["wake"] == "match" and not p["woke"] and p["wake_match"]:
                 text, end = await asyncio.to_thread(_new_text, log, off)
                 m = re.search(p["wake_match"], text, re.M)
@@ -302,7 +359,7 @@ def _thread() -> str | None:
 
 def _fmt(p: dict, lines: int = 0) -> str:
     st = p["state"] + (f" (exit {p['exit']})" if p["exit"] is not None else "")
-    s = (f"{p['id']} “{p['name']}” — {st}, {_fmt_dur(p['secs'])}"
+    s = (f"{p['id']} “{p['name']}” on {p.get('host') or HOST} — {st}, {_fmt_dur(p['secs'])}"
          f"{'' if p['wake'] == 'none' else ', wakes this thread on ' + p['wake']}"
          f"{' (woken)' if p.get('woke') and p['state'] == 'running' else ''}")
     if lines:
@@ -312,7 +369,7 @@ def _fmt(p: dict, lines: int = 0) -> str:
 
 @tool
 async def bg_start(command: str, name: str, wake: str = "exit", wake_match: str = "",
-                   max_hours: float = 24) -> str:
+                   max_hours: float = 24, host: str = "") -> str:
     """Start a long-running shell command in the background, tracked by LangBang
     and shown to the user. Use it for anything that runs or waits longer than a
     couple of minutes (training, evals, uploads, builds, remote jobs, watchers)
@@ -327,9 +384,23 @@ async def bg_start(command: str, name: str, wake: str = "exit", wake_match: str 
       A watcher can also simply be a loop that exits once its condition holds.
     - wake="none": nobody is woken (servers, tunnels).
     max_hours: hard runtime cap (default 24, max 168), then it is killed.
-    name: short label the user sees, e.g. "t26 stats eval"."""
+    name: short label the user sees, e.g. "t26 stats eval".
+
+    host: WHERE it runs. Default "" = the LangBang machine itself — NOT the
+    box your run_bash commands ssh into. If the job or the thing you check
+    (a container, a port, a log file) lives on another machine, pass its ssh
+    name, e.g. host="spark-ee93", and write the command exactly as you would
+    in a shell ON that machine: LangBang adds the ssh and all quoting. Do not
+    wrap it in ssh '...' yourself. Exit 255 with host= means ssh failed.
+
+    Before starting a watcher loop, run its check body ONCE with run_bash
+    (on the same host) and confirm it prints what you expect. Never use
+    `pkill -f PATTERN` inside a watcher: the pattern also matches the
+    watcher's own command line, so it kills itself. A command that prints
+    shell errors (command not found, No such container, …) in its first
+    minutes wakes you right away so you can fix it."""
     try:
-        p = await start(_thread(), command, name, wake, wake_match, max_hours)
+        p = await start(_thread(), command, name, wake, wake_match, max_hours, host)
     except Exception as e:  # noqa: BLE001
         return f"ERROR: {e}"
     return ("started " + _fmt(p) + ". End your turn now unless there is other work; "
@@ -361,6 +432,7 @@ NOTE = (
     "do NOT sleep-poll in run_bash (`sleep 290; check`) and do not `nohup … &`. "
     "Start it with bg_start (or a small watcher loop that exits when the "
     "condition holds), tell the user what you started, and end your turn — "
+    "remember bg_start runs on THIS machine unless you pass host=. "
     "LangBang wakes this thread with the result. The user sees these in the "
     "⚙ PROCESSES bar."
 )

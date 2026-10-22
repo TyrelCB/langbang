@@ -1866,7 +1866,7 @@ function procRow(p, showThread) {
   const nm = el("span", "proc-name", p.name);
   nm.title = p.cmd;
   const secs = p.state === "running" ? (Date.now() / 1000 - p.started) : p.secs;
-  const meta = el("span", "proc-meta", `${procState(p)} · ${fmtClock(secs)}${procWake(p)}`);
+  const meta = el("span", "proc-meta", `${procState(p)}${p.host ? " @ " + p.host : ""} · ${fmtClock(secs)}${procWake(p)}`);
   top.append(ic, nm, meta);
   if (showThread && p.thread_id) {
     const t = threads.find((x) => x.id === p.thread_id);
