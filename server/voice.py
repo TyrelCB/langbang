@@ -778,7 +778,12 @@ def _transcribe_whisper(pcm: bytes, v: dict) -> tuple[str, list]:
         audio,
         language=((v.get("stt_lang") or "en-US").split("-")[0]),
         beam_size=1, vad_filter=True, word_timestamps=True,
-        condition_on_previous_text=False)
+        condition_on_previous_text=False,
+        initial_prompt=(v.get("stt_prompt") or
+                        "Tyrel Barstow, LinkedIn, Indeed, AlgoSec, SolarWinds, Novo Nordisk, "
+                        "Meraki, BGP, EVPN-VXLAN, FFB Investments, Chewy, Norwegian Cruise Line, "
+                        "Benefitfocus, ThriveDX, CompTIA Linux+, CCNA, Westwood College, "
+                        "network engineer, job description, right to represent."))
     out, words = [], []
     for s in segs:
         for w in s.words:
