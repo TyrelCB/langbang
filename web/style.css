@@ -752,8 +752,7 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
   .ed-head { flex-wrap: wrap; }
 }
 
-/* ◇ PLAN toggle + human-gate cards (ask_user / exit_plan_mode) */
-#btn-plan.on { color: var(--orange); border-color: var(--orange); }
+/* plan mode (/plan, Shift+Tab) + human-gate cards (ask_user / exit_plan_mode) */
 #composer.plan-mode #input { border-color: var(--orange); }
 .msg.gate { align-self: stretch; max-width: 100%; border-color: var(--orange);
   background: linear-gradient(0deg, var(--panel), #1a1a2e); }
@@ -777,13 +776,11 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
 .msg.gate.sealed { border-color: var(--line); opacity: .85; }
 .msg.gate.sealed .gate-opt:not(.on) { opacity: .45; }
 .block.gate-hist > summary { color: var(--orange); }
-/* phone composer: ATTACH + PLAN collapse to their glyphs so the textarea
+/* phone composer: ATTACH + MIC collapse to their glyphs so the textarea
    keeps its width (cdp_mobile COMPOSER_OK: input >= 100px at 390px) */
 @media (max-width: 720px) {
-  #btn-attach, #btn-plan { font-size: 0; padding: 8px 10px; }
+  #btn-attach { font-size: 0; padding: 8px 10px; }
   #btn-attach::before { content: "📎"; font-size: 14px; }
-  #btn-plan::before { content: "◇"; font-size: 14px; }
-  #btn-plan.on::before { content: "◆"; }
   #btn-mic { font-size: 0; padding: 8px 10px; }
   #btn-mic::before { content: "🎙"; font-size: 14px; }
   #btn-mic.on::before { content: "●"; }

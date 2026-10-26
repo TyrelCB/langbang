@@ -6026,8 +6026,6 @@ function setPlan(on, tid = threadId) {
 const INPUT_HINT = $("#input").placeholder;
 function syncComposerHint() {
   const on = planOn();
-  $("#btn-plan").classList.toggle("on", on);
-  $("#btn-plan").textContent = on ? "◆ PLAN: ON" : "◇ PLAN";
   $("#composer").classList.toggle("plan-mode", on);
   const waiting = !!document.querySelector("#chat .gate:not(.sealed)");
   const run = threadId && RUNS.get(threadId);
@@ -6172,7 +6170,6 @@ async function showPendingGates(tid, seq) {
   syncComposerHint();
 }
 
-$("#btn-plan").onclick = () => { SFX.play("click"); setPlan(!planOn()); };
 $("#input").addEventListener("keydown", (e) => {
   if (e.key === "Tab" && e.shiftKey) { e.preventDefault(); SFX.play("click"); setPlan(!planOn()); }
 });
