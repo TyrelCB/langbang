@@ -3,6 +3,8 @@ import json
 import os
 import threading
 
+from . import caps
+
 # LANGBANG_DATA_DIR relocates everything stateful (settings, threads,
 # trajectory, uploads, TTS cache, voices) — e.g. a second, isolated instance
 DATA_DIR = os.path.expanduser(os.environ.get("LANGBANG_DATA_DIR") or os.path.join(
@@ -296,7 +298,7 @@ def _providers(merged: dict) -> dict:
         merged["provider"] = name
     for p in provs.values():
         p.setdefault("api_key", "none")
-        p.setdefault("vision", False)
+        p["vision"] = caps.mode(p)             # auto | on | off (server/caps.py)
         # retired 2026-10-26: thinking/budget fields now go to every provider
         # and are dropped per backend on a 400 (agent._drop_optional)
         p.pop("template_kwargs", None)
@@ -310,7 +312,9 @@ def effective(s: dict, override: dict | None = None) -> dict:
     """Settings with the connection fields resolved for one run: the global
     default provider/model, or a thread's override {provider, model} (either
     may be empty = inherit). Everything that builds a model client reads
-    base_url / api_key / model / capabilities.vision."""
+    base_url / api_key / model / capabilities.vision. Vision here is the
+    sync best guess (forced setting, else the cached auto-detect); async
+    entry points settle it with caps.resolve() before relying on it."""
     ov = override or {}
     if ov.get("keep_reasoning") in KEEP_REASONING:
         s = {**s, "keep_reasoning": ov["keep_reasoning"]}
@@ -325,9 +329,11 @@ def effective(s: dict, override: dict | None = None) -> dict:
         model = p.get("model") or s.get("model")  # other provider: its own default model
     else:
         model = s.get("model")
+    vm = caps.mode(p)
+    vision = vm == "on" if vm != "auto" else bool(caps.cached(p["base_url"], model)[0])
     return {**s, "provider": pname, "base_url": p["base_url"], "api_key": p.get("api_key") or "none",
-            "model": model,
-            "capabilities": {**(s.get("capabilities") or {}), "vision": bool(p.get("vision"))}}
+            "model": model, "vision_mode": vm,
+            "capabilities": {**(s.get("capabilities") or {}), "vision": vision}}
 
 
 # Per-thread run options (threads.opts JSON, agent.get_thread_opts). Absent

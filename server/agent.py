@@ -42,7 +42,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 from deepagents.middleware._utils import append_to_system_message
 
-from . import config, learning, local_tools, mcp
+from . import caps, config, learning, local_tools, mcp
 
 # LangBang's tuning of the deepagents harness, registered for provider
 # "openai" (our sglang backend is OpenAI-compatible; the lookup falls back to
@@ -3118,7 +3118,7 @@ async def _ask_view(tid: str, ask: str, max_tokens: int) -> tuple[str, dict]:
     system prompt, tools and messages, so vLLM's prefix cache already holds
     nearly all of it, plus any messages since. With no capture (server
     restarted since the thread last ran) it's rebuilt from live state."""
-    s = config.effective(config.load(), await get_thread_model(tid))
+    s = await caps.resolve(config.effective(config.load(), await get_thread_model(tid)))
     live = await _live_messages(tid)
     view = _VIEWS.get(tid)
     m = model(s)
@@ -3336,8 +3336,8 @@ async def run_chat(
         # this thread's provider/model override + run options (scheduled tasks
         # too: each task owns a thread) — resolved per run, so a change
         # applies next turn. Before prefetch: opts can switch it off.
-        s = config.apply_opts(config.effective(s, await get_thread_model(thread_id)),
-                              await get_thread_opts(thread_id))
+        s = await caps.resolve(config.apply_opts(
+            config.effective(s, await get_thread_model(thread_id)), await get_thread_opts(thread_id)))
         pf_task = None
         if not resume and user_text and bool(s.get("deep_agent", True)) and not s.get("lb_bare"):
             from . import prefetch

@@ -3824,7 +3824,6 @@ async function openSettings() {
   try { sndSlots = await api.soundsSlots(); } catch { sndSlots = []; }
   renderSoundboard();
   sndStatusSweep();
-  $("#set-vision").checked = !!(s.capabilities || {}).vision;
   $("#set-max_images").value = s.max_images || 16;
   $("#set-splash_image").value = s.splash_image || "";
   $("#set-thinking").checked = !!s.enable_thinking;
@@ -3892,7 +3891,6 @@ async function saveSettings() {
     max_tokens: parseInt($("#set-max_tokens").value),
     max_react_iterations: parseInt($("#set-max_react_iterations").value),
     system_prompt: $("#set-system_prompt").value,
-    capabilities: { vision: $("#set-vision").checked },
     max_images: Math.max(1, Math.min(64, parseInt($("#set-max_images").value) || 16)),
     splash_image: $("#set-splash_image").value.trim(),
     enable_thinking: $("#set-thinking").checked,
@@ -5571,7 +5569,13 @@ function provRow(name = "", p = {}) {
     const c = document.createElement("input"); c.type = "checkbox"; c.className = cls; c.checked = !!on;
     lab.append(c, document.createTextNode(" " + label)); flags.appendChild(lab);
   };
-  chk("vision", "p-vision", p.vision, "model accepts images");
+  { // vision: auto-detected per model (server/caps.py); force only if detection is wrong
+    const lab = el("label", "chk"); lab.title = "auto = ask the backend per model (llama-server mmproj / Ollama capabilities / a 1-pixel image probe)";
+    const sel = document.createElement("select"); sel.className = "p-vision";
+    sel.append(new Option("vision: auto", "auto"), new Option("vision: yes", "on"), new Option("vision: no", "off"));
+    sel.value = ["on", "off"].includes(p.vision) ? p.vision : "auto";
+    lab.appendChild(sel); flags.appendChild(lab);
+  }
   const test = el("button", "btn ghost", "↻ TEST"); test.type = "button";
   const out = el("span", "prov-test", "");
   test.onclick = async () => {
@@ -5606,7 +5610,7 @@ function provForm() {
       base_url: r.querySelector(".p-url").value.trim(),
       api_key: r.querySelector(".p-key").value.trim() || "none",
       model: r.querySelector(".p-model").value.trim(),
-      vision: r.querySelector(".p-vision").checked,
+      vision: r.querySelector(".p-vision").value,
     };
   }
   return out;
@@ -5669,7 +5673,7 @@ async function syncTModel(tid) {
   if (seq !== tmodelSeq || tid !== threadId) return;
   tmodelView = v;
   const over = !!(v.override.provider || v.override.model || v.override.keep_reasoning);
-  paint(v.model, over, `${v.provider} · ${v.model} · keep reasoning: ${v.keep_reasoning}` + (over ? "  (this thread has overrides — click to change)" : "  (global defaults — click to override for this thread)"), v.vision);
+  paint(v.model, over, `${v.provider} · ${v.model} · vision: ${v.vision ? "yes" : "no"} (${v.vision_how || "?"}) · keep reasoning: ${v.keep_reasoning}` + (over ? "  (this thread has overrides — click to change)" : "  (global defaults — click to override for this thread)"), v.vision);
 }
 async function openTModel() {
   if (!tmodelView) return;

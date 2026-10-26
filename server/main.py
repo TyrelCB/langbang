@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from . import agent, audioart, backup, comfy, config, decide, fileassist, ivr, learning, mcp, notify, procs, projects, rag, runs, schedule, searchidx, sfxgen, stream, term, ttsjobs, voice
+from . import agent, audioart, backup, caps, comfy, config, decide, fileassist, ivr, learning, mcp, notify, procs, projects, rag, runs, schedule, searchidx, sfxgen, stream, term, ttsjobs, voice
 from .ivr_hub import router as ivr_hub_router
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
@@ -94,7 +94,7 @@ def _ui_version() -> str:
 
 @app.get("/api/health")
 async def health():
-    s = config.load()
+    s = await caps.resolve(config.load())
     up = False
     try:
         async with httpx.AsyncClient(timeout=5) as c:
@@ -349,18 +349,19 @@ class ThreadModelIn(BaseModel):
     keep_reasoning: str = ""  # "" = inherit CONFIG; off | turn | all
 
 
-def _model_view(s: dict, ov: dict) -> dict:
-    eff = config.effective(s, ov)
+async def _model_view(s: dict, ov: dict) -> dict:
+    eff = await caps.resolve(config.effective(s, ov))
     return {"override": ov, "provider": eff["provider"], "model": eff["model"],
             "keep_reasoning": eff.get("keep_reasoning", "off"),
             "default": {"provider": s["provider"], "model": s["model"],
                         "keep_reasoning": s.get("keep_reasoning", "off")},
-            "vision": bool((eff.get("capabilities") or {}).get("vision"))}
+            "vision": bool((eff.get("capabilities") or {}).get("vision")),
+            "vision_how": eff.get("vision_how", "")}
 
 
 @app.get("/api/threads/{tid}/model")
 async def get_thread_model(tid: str):
-    return _model_view(config.load(), await agent.get_thread_model(tid))
+    return await _model_view(config.load(), await agent.get_thread_model(tid))
 
 
 @app.put("/api/threads/{tid}/model")
@@ -370,7 +371,7 @@ async def put_thread_model(tid: str, body: ThreadModelIn):
         raise HTTPException(400, f"unknown provider {body.provider!r}")
     if not await agent.set_thread_model(tid, body.model_dump()):
         raise HTTPException(404, "no such thread")
-    return _model_view(s, await agent.get_thread_model(tid))
+    return await _model_view(s, await agent.get_thread_model(tid))
 
 
 class ThreadOptsIn(BaseModel):
@@ -1427,10 +1428,11 @@ async def chat(body: ChatIn):
     if why:
         raise HTTPException(409, why)
     if body.images:
-        eff = config.effective(s, await agent.get_thread_model(body.thread_id))
+        eff = await caps.resolve(config.effective(s, await agent.get_thread_model(body.thread_id)))
         if not (eff.get("capabilities") or {}).get("vision"):
             raise HTTPException(
-                400, "model does not support vision (enable it in CONFIG)"
+                400, f"{eff['model']} does not take images (vision: {eff.get('vision_how')}; "
+                "force it per provider in CONFIG → MODEL)"
             )
         cap = max_images(s)
         if len(body.images) > cap:
