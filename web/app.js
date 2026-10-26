@@ -5942,6 +5942,180 @@ $("#btn-topts-default").onclick = () => saveTOpts({});
 $("#btn-topts-cancel").onclick = () => { SFX.play("click"); closeTOpts(); };
 $("#topts-panel").onclick = (e) => { if (e.target.id === "topts-panel") closeTOpts(); };
 
+// ---------- ▤ BENCH (server/bench.py) ----------
+// One benchmark for now (GPQA Diamond). Runs live server-side and persist
+// per answer, so the panel just polls while it's open.
+let benchTimer = null, benchOpen = null, benchDetail = null, benchData = null;
+const benchLabel = (r) => `${r.model}`;
+const fmtDur = (s) => s >= 3600 ? `${(s / 3600).toFixed(1)} h` : s >= 60 ? `${Math.round(s / 60)} min` : `${s} s`;
+function benchParamsTxt(p) {
+  return `think ${p.thinking ? "on" : "off"}` + (p.thinking && p.budget ? ` · budget ${p.budget}` : "")
+    + ` · max ${p.max_tokens} · T ${p.temperature} · ×${p.concurrency}`;
+}
+function renderBenchBoard(d) {
+  const box = $("#bench-board"); box.innerHTML = "";
+  // best FINISHED (or largest in-progress, marked) run per provider·model per bench
+  const cols = new Map();
+  for (const r of d.runs) {
+    if (r.acc == null) continue;
+    const k = r.provider + "\u0000" + r.model;
+    const c = cols.get(k) || { provider: r.provider, model: r.model, cells: {} };
+    const cur = c.cells[r.bench];
+    const done = r.state === "done";
+    const better = !cur || (done && !cur.done) || (done === cur.done && (r.scored > cur.r.scored || (r.scored === cur.r.scored && r.acc > cur.r.acc)));
+    if (better) c.cells[r.bench] = { r, done };
+    cols.set(k, c);
+  }
+  if (!cols.size) { box.appendChild(el("div", "learn-empty", "no results yet — start a run below")); return; }
+  const tb = el("table", "bench-table"), head = el("tr");
+  head.appendChild(el("th", "", ""));
+  const list = [...cols.values()];
+  for (const c of list) { const th = el("th", "", c.model); th.appendChild(el("span", "bt-prov", c.provider)); head.appendChild(th); }
+  tb.appendChild(head);
+  for (const [b, name] of Object.entries(d.benches)) {
+    const tr = el("tr"), nm = el("td", "bt-name", name);
+    nm.appendChild(el("span", "hint", `${d.dataset.n || "?"} questions`));
+    tr.appendChild(nm);
+    const best = Math.max(...list.map((c) => (c.cells[b] && c.cells[b].done && c.cells[b].r.scored === d.dataset.n) ? c.cells[b].r.acc : -1));
+    for (const c of list) {
+      const cell = c.cells[b], td = el("td");
+      if (!cell) { td.textContent = "--"; tr.appendChild(td); continue; }
+      const r = cell.r;
+      td.appendChild(el("span", "bt-acc", r.acc.toFixed(1) + (cell.done ? "" : "…")));
+      td.appendChild(el("span", "bt-sub", `${r.correct}/${r.scored}` + (r.scored < r.n ? ` of ${r.n}` : "") + (r.n < d.dataset.n ? ` (subset)` : "")
+        + (r.truncated ? ` · ${r.truncated} cut` : "")));
+      td.title = `${r.provider} · ${r.model}\n${benchParamsTxt(r.params)}\nno answer: ${r.no_answer} · truncated: ${r.truncated} · errors: ${r.errors}\navg ${r.avg_tokens ?? "?"} tokens/answer`;
+      if (cell.done && r.scored === d.dataset.n && r.acc === best) td.classList.add("top");
+      tr.appendChild(td);
+    }
+    tb.appendChild(tr);
+  }
+  box.appendChild(tb);
+}
+function renderBenchRuns(d) {
+  const box = $("#bench-runs"); box.innerHTML = "";
+  for (const r of d.runs) {
+    const card = el("div", "bench-run" + (r.state === "running" ? " running" : ""));
+    const head = el("div", "br-head");
+    head.appendChild(el("span", "br-title", `${BENCH_NAMES[r.bench] || r.bench} · ${r.provider} · ${benchLabel(r)}`));
+    head.appendChild(el("span", "br-acc", r.acc == null ? "—" : r.acc.toFixed(1) + "%"));
+    head.appendChild(el("span", "hint", r.state.toUpperCase()));
+    const btn = (txt, fn, tip) => { const b = el("button", "btn ghost", txt); b.type = "button"; if (tip) b.title = tip; b.onclick = fn; head.appendChild(b); };
+    if (r.state === "running") btn("■ STOP", () => benchAct(r.id, "stop"));
+    else if (r.done < r.n || r.errors) btn("↻ RESUME", () => benchAct(r.id, "resume"), "continue with the unanswered / errored questions");
+    btn(benchOpen === r.id ? "▾ ANSWERS" : "▸ ANSWERS", () => { benchOpen = benchOpen === r.id ? null : r.id; benchDetail = null; refreshBench(); });
+    btn("✕", () => benchDel(r.id, card), "delete this run and its answers");
+    head.appendChild(el("span", "br-meta",
+      `${r.done}/${r.n} answered · ${r.correct} correct` + (r.no_answer ? ` · ${r.no_answer} no answer` : "")
+      + (r.truncated ? ` · ${r.truncated} hit max tokens` : "") + (r.errors ? ` · ${r.errors} errors` : "")
+      + (r.avg_tokens ? ` · ~${r.avg_tokens} tok/answer` : "") + ` · ${fmtDur(r.secs)} model time · ${benchParamsTxt(r.params)}`
+      + (r.error ? ` · ⚠ ${r.error}` : "")));
+    card.appendChild(head);
+    const bar = el("div", "bench-bar"), fill = el("i"); fill.style.width = `${Math.round(100 * r.done / r.n)}%`;
+    bar.appendChild(fill); card.appendChild(bar);
+    if (benchOpen === r.id) card.appendChild(el("div", "bench-items")), benchItems(r.id, card);
+    box.appendChild(card);
+  }
+}
+const BENCH_NAMES = {};
+async function benchItems(rid, card) {
+  let its;
+  try { its = (await J(await fetch(`/api/bench/runs/${rid}`))).items; } catch { return; }
+  const grid = card.querySelector(".bench-items"); if (!grid) return;
+  for (const it of its) {
+    const b = el("span", "bi " + (it.error ? "err" : !it.pred ? "none" : it.correct ? "ok" : "bad"));
+    b.title = `#${it.idx + 1} · gold ${it.gold} · answered ${it.pred || "—"}` + (it.finish === "length" ? " · hit max tokens" : "")
+      + (it.out_tokens ? ` · ${it.out_tokens} tok` : "") + (it.secs ? ` · ${it.secs}s` : "") + (it.error ? `\n${it.error}` : "");
+    b.onclick = () => { benchDetail = { rid, idx: it.idx }; benchShowItem(card); };
+    grid.appendChild(b);
+  }
+  if (benchDetail && benchDetail.rid === rid) benchShowItem(card);
+}
+async function benchShowItem(card) {
+  const { rid, idx } = benchDetail;
+  let it;
+  try { it = await J(await fetch(`/api/bench/runs/${rid}/items/${idx}`)); } catch { return; }
+  card.querySelector(".bench-detail")?.remove();
+  const d = el("div", "bench-detail");
+  d.appendChild(el("div", "", `#${idx + 1} · gold ${it.gold} · answered ${it.pred || "— (no Answer: line)"} · ${it.correct ? "✓" : "✗"}`
+    + ` · ${it.out_tokens ?? "?"} tokens (${it.reasoning_chars ?? 0} chars thinking) · ${it.secs}s · finish ${it.finish || "?"}`));
+  const q = el("details"); q.appendChild(el("summary", "", "question")); q.appendChild(el("pre", "", it.prompt)); d.appendChild(q);
+  d.appendChild(el("pre", "", it.error || it.text || "(empty answer)"));
+  card.appendChild(d);
+}
+async function refreshBench() {
+  if ($("#bench-panel").classList.contains("hidden")) return;
+  let d;
+  try { d = await J(await fetch("/api/bench")); } catch { return; }
+  benchData = d;
+  Object.assign(BENCH_NAMES, d.benches);
+  const ds = d.dataset, dsb = $("#bench-ds"); dsb.innerHTML = "";
+  if (ds.ok) dsb.textContent = `GPQA Diamond dataset: ${ds.n} questions (local, data/bench — never committed)`;
+  else {
+    dsb.textContent = ds.has_token ? "GPQA Diamond isn't downloaded yet (gated on Hugging Face; uses your HF token). "
+      : "GPQA Diamond needs a Hugging Face token with access to Idavidrein/gpqa (HF_TOKEN or huggingface-cli login). ";
+    const b = el("button", "btn ghost", "⇩ DOWNLOAD"); b.type = "button";
+    b.onclick = async () => {
+      b.disabled = true; b.textContent = "downloading…";
+      try { await J(await fetch("/api/bench/dataset", { method: "POST" })); } catch (e) { dsb.textContent = "download failed: " + e.message; return; }
+      refreshBench();
+    };
+    dsb.appendChild(b);
+  }
+  $("#btn-bench-run").disabled = !ds.ok;
+  renderBenchBoard(d);
+  renderBenchRuns(d);
+}
+async function benchAct(rid, act) {
+  SFX.play("click");
+  try { await J(await fetch(`/api/bench/runs/${rid}/${act}`, { method: "POST" })); } catch (e) { $("#bench-msg").textContent = e.message; }
+  refreshBench();
+}
+async function benchDel(rid, card) {
+  if (!card.dataset.arm) { card.dataset.arm = "1"; card.querySelector(".br-head .btn:last-of-type").textContent = "⚠ DELETE?"; return; }
+  try { await J(await fetch(`/api/bench/runs/${rid}`, { method: "DELETE" })); } catch {}
+  refreshBench();
+}
+async function openBench() {
+  closeNav();
+  SFX.play("click");
+  const s = await api.settings();
+  const sel = $("#bench-provider");
+  if (!sel.options.length) {
+    for (const n of Object.keys(s.providers || {})) sel.appendChild(new Option(n, n));
+    sel.value = s.provider;
+    const fill = () => {
+      const p = s.providers[sel.value] || {};
+      $("#bench-model").value = p.model || s.model;
+      fillModels($("#dl-bench-models"), { provider: sel.value });
+    };
+    sel.onchange = fill; fill();
+    const D = (await J(await fetch("/api/bench"))).defaults;
+    $("#bench-conc").value = D.concurrency; $("#bench-max").value = D.max_tokens;
+    $("#bench-budget").value = D.budget; $("#bench-temp").value = D.temperature;
+    $("#bench-thinking").value = D.thinking ? "1" : "0";
+  }
+  $("#bench-panel").classList.remove("hidden");
+  await refreshBench();
+  clearInterval(benchTimer);
+  benchTimer = setInterval(() => { if (benchData?.runs.some((r) => r.state === "running")) refreshBench(); }, 3000);
+}
+function closeBench() { $("#bench-panel").classList.add("hidden"); clearInterval(benchTimer); }
+$("#btn-bench").onclick = openBench;
+$("#btn-bench-close").onclick = () => { SFX.play("click"); closeBench(); };
+$("#bench-panel").onclick = (e) => { if (e.target.id === "bench-panel") closeBench(); };
+$("#btn-bench-run").onclick = async () => {
+  SFX.play("click");
+  const num = (id, d) => { const v = parseFloat($(id).value); return Number.isFinite(v) ? v : d; };
+  const body = { bench: "gpqa_diamond", provider: $("#bench-provider").value, model: $("#bench-model").value.trim(),
+    params: { n: parseInt($("#bench-n").value), concurrency: num("#bench-conc", 1), max_tokens: num("#bench-max", 32768),
+      thinking: $("#bench-thinking").value === "1", budget: num("#bench-budget", 0), temperature: num("#bench-temp", 0.6) } };
+  $("#bench-msg").textContent = "";
+  try { await J(await fetch("/api/bench/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })); }
+  catch (e) { $("#bench-msg").textContent = "start failed: " + e.message; return; }
+  refreshBench();
+};
+
 // ---------- memory & learning (CONFIG) ----------
 const fmtWhen = (ts) => new Date(ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 function learnOpenFile(path) {
@@ -6031,6 +6205,7 @@ document.addEventListener("keydown", (e) => {
   if (!$("#settings-panel").classList.contains("hidden")) closeSettings(false);
   else if (!$("#tprompt-panel").classList.contains("hidden")) closeTPrompt();
   else if (!$("#topts-panel").classList.contains("hidden")) closeTOpts();
+  else if (!$("#bench-panel").classList.contains("hidden")) closeBench();
   else if (!$("#tmodel-panel").classList.contains("hidden")) closeTModel();
   else if (!$("#editor-panel").classList.contains("hidden")) edClose();
   else if (!$("#recap-panel").classList.contains("hidden")) closeRecap();

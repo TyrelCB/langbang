@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from . import agent, audioart, backup, caps, comfy, config, decide, fileassist, ivr, learning, mcp, notify, procs, projects, rag, runs, schedule, searchidx, sfxgen, stream, term, ttsjobs, voice
+from . import agent, audioart, backup, bench, caps, comfy, config, decide, fileassist, ivr, learning, mcp, notify, procs, projects, rag, runs, schedule, searchidx, sfxgen, stream, term, ttsjobs, voice
 from .ivr_hub import router as ivr_hub_router
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
@@ -45,6 +45,7 @@ async def _startup():
     await agent.init()
     await schedule.init()
     schedule.start_loop()
+    await bench.init()  # ▤ BENCH: runs a restart killed become resumable "lost"
     agent.start_sweeper()  # hourly: delete abandoned empty "New chat"s
     procs.start_poller()  # ⚙ background processes: exits, log caps, thread wakes
     _prune_tts_cache()     # TTS disk cache is a replay aid, not an archive
@@ -388,6 +389,66 @@ async def put_thread_opts(tid: str, body: ThreadOptsIn):
     if not await agent.set_thread_opts(tid, body.opts):
         raise HTTPException(404, "no such thread")
     return {"opts": await agent.get_thread_opts(tid)}
+
+
+# ---- ▤ BENCH (server/bench.py) ----
+
+class BenchRunIn(BaseModel):
+    bench: str = "gpqa_diamond"
+    provider: str
+    model: str = ""
+    params: dict = {}
+
+
+@app.get("/api/bench")
+async def bench_overview():
+    return {"benches": bench.BENCHES, "dataset": bench.dataset_status(),
+            "defaults": bench.DEFAULTS, "runs": await bench.list_runs()}
+
+
+@app.post("/api/bench/dataset")
+async def bench_dataset():
+    try:
+        return await bench.download()
+    except Exception as e:  # noqa: BLE001 - surfaced to the panel
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/bench/runs")
+async def bench_start(body: BenchRunIn):
+    try:
+        return await bench.start(body.bench, body.provider, body.model.strip(), body.params)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/bench/runs/{rid}")
+async def bench_items(rid: str):
+    return {"items": await bench.run_items(rid)}
+
+
+@app.get("/api/bench/runs/{rid}/items/{idx}")
+async def bench_item(rid: str, idx: int):
+    it = await bench.item(rid, idx)
+    if not it:
+        raise HTTPException(404, "no such item")
+    return it
+
+
+@app.post("/api/bench/runs/{rid}/stop")
+async def bench_stop(rid: str):
+    return {"ok": await bench.stop(rid)}
+
+
+@app.post("/api/bench/runs/{rid}/resume")
+async def bench_resume(rid: str):
+    return {"ok": await bench.resume(rid)}
+
+
+@app.delete("/api/bench/runs/{rid}")
+async def bench_delete(rid: str):
+    await bench.delete(rid)
+    return {"ok": True}
 
 
 class ModelsProbeIn(BaseModel):

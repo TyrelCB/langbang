@@ -25,6 +25,7 @@
     <div class="sidebar-footer">
       <button id="btn-settings" class="btn ghost">⚙ CONFIG</button>
       <button id="btn-schedules" class="btn ghost" title="cron-scheduled agent runs">⏰ SCHEDULES</button>
+      <button id="btn-bench" class="btn ghost" title="benchmark providers/models (GPQA Diamond)">▤ BENCH</button>
       <button id="btn-sound" class="btn ghost" title="sound toggle">♪ SOUND: OFF</button>
       <div id="health" class="health">LINK: …</div>
     </div>
@@ -574,6 +575,38 @@
         <button id="btn-tprompt-cancel" class="btn ghost">CANCEL</button>
         <button id="btn-tprompt-save" class="btn accent">SAVE</button>
       </div>
+    </div>
+  </div>
+
+  <div id="bench-panel" class="hidden">
+    <div class="panel-inner bench-inner">
+      <h2>BENCHMARKS</h2>
+      <section class="cfg-card wide">
+        <h3>LEADERBOARD <span class="hint">accuracy % · best finished run per model · <b>bold</b> = top</span></h3>
+        <div id="bench-board"></div>
+        <div id="bench-ds" class="hint"></div>
+      </section>
+      <section class="cfg-card wide">
+        <h3>NEW RUN — GPQA DIAMOND <span class="hint">198 grad-level science MCQs; same seeded question order + answer shuffle for every model</span></h3>
+        <div class="row bench-form">
+          <label>Provider <select id="bench-provider"></select></label>
+          <label>Model <input id="bench-model" type="text" list="dl-bench-models" autocomplete="off" spellcheck="false"></label>
+          <label>Questions <select id="bench-n">
+            <option value="20">20 — quick look</option><option value="50">50</option>
+            <option value="100">100</option><option value="198" selected>198 — full</option></select></label>
+          <label title="parallel requests; sglang/vLLM on the Spark caps ~4 streams, llama-server presets run 1 slot">Parallel <input id="bench-conc" type="number" min="1" max="8"></label>
+        </div>
+        <div class="row bench-form">
+          <label>Thinking <select id="bench-thinking"><option value="1">on</option><option value="0">off</option></select></label>
+          <label title="llama-server reasoning_budget_tokens; 0 = unlimited (GPQA wants ≥32k CoT+answer)">Thinking budget <input id="bench-budget" type="number" min="0" step="1024"></label>
+          <label>Max tokens <input id="bench-max" type="number" min="256" step="1024"></label>
+          <label>Temperature <input id="bench-temp" type="number" min="0" max="2" step="0.05"></label>
+        </div>
+        <datalist id="dl-bench-models"></datalist>
+        <div class="row end"><span id="bench-msg" class="hint"></span><button id="btn-bench-run" class="btn accent">▶ RUN</button></div>
+      </section>
+      <div id="bench-runs"></div>
+      <div class="row end"><button id="btn-bench-close" class="btn ghost">CLOSE</button></div>
     </div>
   </div>
 
