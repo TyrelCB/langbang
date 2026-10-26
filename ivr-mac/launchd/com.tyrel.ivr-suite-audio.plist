@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.tyrel.ivr-suite-audio</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/tyrel/projects/ivr-mac/.venv/bin/python</string>
+    <string>/Users/tyrel/projects/ivr-mac/tests/audio_replay.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/tyrel/projects/ivr-mac</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>IVR_BASE</key><string>http://127.0.0.1:8130</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PYTHONUNBUFFERED</key><string>1</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/tyrel/projects/ivr-mac/tests/results/audio_replay.log</string>
+  <key>StandardErrorPath</key><string>/Users/tyrel/projects/ivr-mac/tests/results/audio_replay.log</string>
+</dict>
+</plist>

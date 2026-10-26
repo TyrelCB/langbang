@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.tyrel.ivr-chrome</string>
+  <key>ProgramArguments</key><array>
+    <string>/Applications/Google Chrome.app/Contents/MacOS/Google Chrome</string>
+    <string>--user-data-dir=/Users/tyrel/.agent-browser/profile</string>
+    <string>--remote-debugging-port=44001</string>
+    <string>--no-first-run</string>
+    <string>--no-default-browser-check</string>
+    <string>--disable-blink-features=AutomationControlled</string>
+    <string>--autoplay-policy=no-user-gesture-required</string>
+    <string>--disable-background-timer-throttling</string>
+    <string>--disable-renderer-backgrounding</string>
+    <string>--disable-backgrounding-occluded-windows</string>
+    <string>https://voice.google.com/u/0/calls</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>20</integer>
+  <key>StandardOutPath</key><string>/Users/tyrel/Library/Logs/ivr-chrome.log</string>
+  <key>StandardErrorPath</key><string>/Users/tyrel/Library/Logs/ivr-chrome.log</string>
+</dict></plist>

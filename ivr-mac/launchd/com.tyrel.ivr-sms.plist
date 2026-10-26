@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.tyrel.ivr-sms</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/tyrel/projects/ivr-mac/.venv/bin/python</string><string>-u</string>
+    <string>/Users/tyrel/projects/ivr-mac/ivr_sms.py</string><string>--secs</string><string>86400</string><string>--interval</string><string>8</string><string>--numbers</string><string>YOUR_NUMBERS</string>
+  </array>
+  <key>EnvironmentVariables</key><dict>
+    <key>IVR_BASE</key><string>http://127.0.0.1:8130</string>
+    <key>IVR_REPORT_HUB</key><string>http://YOUR_HUB_HOST:8123</string>
+    <key>IVR_NODE_NAME</key><string>mac-mini</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PYTHONUNBUFFERED</key><string>1</string>
+  </dict>
+  <key>WorkingDirectory</key><string>/Users/tyrel/projects/ivr-mac</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>/Users/tyrel/Library/Logs/com.tyrel.ivr-sms.log</string>
+  <key>StandardErrorPath</key><string>/Users/tyrel/Library/Logs/com.tyrel.ivr-sms.log</string>
+</dict></plist>

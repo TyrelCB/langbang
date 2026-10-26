@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.tyrel.ivr-answer-test</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/tyrel/projects/ivr-mac/.venv/bin/python</string>
+    <string>-u</string>
+    <string>/Users/tyrel/projects/ivr-mac/ivr_answer.py</string>
+    <string>--secs</string><string>900</string>
+  </array>
+  <key>EnvironmentVariables</key><dict>
+    <key>IVR_NO_REPORT</key><string>1</string>
+    <key>PYTHONUNBUFFERED</key><string>1</string>
+  </dict>
+  <key>WorkingDirectory</key><string>/Users/tyrel/projects/ivr-mac</string>
+  <key>StandardOutPath</key><string>/Users/tyrel/projects/ivr-mac/ivr_answer.log</string>
+  <key>StandardErrorPath</key><string>/Users/tyrel/projects/ivr-mac/ivr_answer.log</string>
+</dict></plist>

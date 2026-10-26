@@ -1,0 +1,14 @@
+# real caller audio/transcripts and secrets never go in this public repo
+.ivr_token
+recordings/
+bench/
+tests/results/
+tests/cases/audio/
+tests/cases/history.json
+tests/cases/gv_menu.wav
+tests/.audio_request.json
+.suite_running
+.venv/
+__pycache__/
+*.bak-*
+*.log

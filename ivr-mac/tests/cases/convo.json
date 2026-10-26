@@ -1,0 +1,145 @@
+[
+ {
+  "name": "hello_asks_who",
+  "source": "10-16 user feedback: ask who is calling; 9e95a05395cc 'Hello how can I help you today'",
+  "turns": [
+   {
+    "say": "Hello.",
+    "match": "\\bwho\\b"
+   }
+  ]
+ },
+ {
+  "name": "recruiter_asks_for_questions",
+  "source": "14c7e7164297 (10-22 a virtual recruiter)",
+  "turns": [
+   {
+    "say": "Hi, this is virtual recruiter Ava with Acme Staffing. Am I speaking with Tyrel?"
+   },
+   {
+    "say": "Great. Do you have any questions for me?",
+    "match": "role|team|skill|position|project",
+    "no_match": "do you have (any )?questions"
+   }
+  ]
+ },
+ {
+  "name": "no_backwards_role_question",
+  "source": "14c7e7164297 09:51 'Since you are the recruiter, do you have any questions for me about the role or the company?'",
+  "turns": [
+   {
+    "say": "Hi, this is Ava, a recruiter with Acme Staffing, calling about a network site reliability engineer role."
+   },
+   {
+    "say": "How would you describe your ideal team and hiring manager?"
+   },
+   {
+    "say": "That makes sense.",
+    "no_match": "since you are the recruiter|questions? (for me )?about the (role|company)"
+   }
+  ]
+ },
+ {
+  "name": "citizenship",
+  "source": "c8d18315086e 05:42 'Are you a US citizen?' -> 'I do not have details'",
+  "turns": [
+   {
+    "say": "Are you authorized to work in the US?",
+    "match": "\\b(yes|authorized|citizen)\\b"
+   },
+   {
+    "say": "Are you a US citizen?",
+    "match": "citizen",
+    "no_match": "do not have|don't have|follow up|not sure"
+   }
+  ]
+ },
+ {
+  "name": "sponsorship",
+  "source": "knowledge: U.S. citizen, no sponsorship",
+  "turns": [
+   {
+    "say": "Will you now or in the future require visa sponsorship?",
+    "match": "\\bno\\b|not (need|require)|don't (need|require)|citizen"
+   }
+  ]
+ },
+ {
+  "name": "no_pay_math",
+  "source": "c8d18315086e 05:41 '$300 an hour, 40 hours a week' -> computed a yearly figure and agreed it aligns",
+  "turns": [
+   {
+    "say": "Hi, this is John from Acme about the networking role you applied for."
+   },
+   {
+    "say": "Yeah, so $300 an hour, 40 hours a week. How much money is that?",
+    "no_match": "six hundred|\\b624\\b|(that|which) (would be|comes to|equals|is) (about |approximately |roughly )?(a |one )?\\w+ (hundred|thousand)|aligns|that works"
+   },
+   {
+    "say": "$300 an hour equals $150K a year.",
+    "no_match": "\\b(i concur|that's correct|that is correct|that's right|that is right|i agree|exactly right|yes, that)\\b"
+   }
+  ]
+ },
+ {
+  "name": "no_weather_bleed",
+  "source": "ae9a8e0ee367 05:26 'It's breaking up a little bit. Is that' -> 'It is a little chilly'",
+  "turns": [
+   {
+    "say": "It's breaking up a little bit. Is that...",
+    "no_match": "chilly|weather"
+   }
+  ]
+ },
+ {
+  "name": "first_person_on_name",
+  "source": "10-16 'Oh, is this Tyrell?'",
+  "turns": [
+   {
+    "say": "Oh, is this Tyrell?",
+    "match": "\\b(yes|this is|i am|speaking)\\b",
+    "no_match": "\\bhe (is|has|was)\\b"
+   }
+  ]
+ },
+ {
+  "name": "filler_gets_no_helpdesk",
+  "source": "ae9a8e0ee367 05:26 'Hmm, okay.' -> 'I am here to answer your questions'",
+  "turns": [
+   {
+    "say": "Hmm, okay.",
+    "no_match": "here to answer your questions"
+   }
+  ]
+ },
+ {
+  "name": "message_not_taken",
+  "source": "prompt: never offer to take a message",
+  "turns": [
+   {
+    "say": "Can I leave a message for him?",
+    "match": "go ahead|record|listening|leave (your|a) message"
+   }
+  ]
+ },
+ {
+  "name": "availability",
+  "source": "knowledge: about two weeks notice",
+  "turns": [
+   {
+    "say": "If everything goes well, how soon could you start?",
+    "match": "two weeks"
+   }
+  ]
+ },
+ {
+  "name": "goodbye",
+  "source": "c8d18315086e",
+  "turns": [
+   {
+    "say": "Okay, goodbye.",
+    "match": "bye|good day|pleasant day|take care"
+   }
+  ]
+ }
+]

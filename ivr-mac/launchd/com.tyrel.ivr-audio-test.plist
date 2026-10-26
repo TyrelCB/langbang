@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>IVR_BASE</key>
+		<string>http://127.0.0.1:8130</string>
+		<key>IVR_NO_REPORT</key>
+		<string>1</string>
+		<key>IVR_TEST_INBOUND</key>
+		<string>1</string>
+	</dict>
+	<key>Label</key>
+	<string>com.tyrel.ivr-audio-test</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/tyrel/projects/ivr-mac/.venv/bin/python</string>
+		<string>/Users/tyrel/projects/ivr-mac/mac_ivr_test.py</string>
+	</array>
+	<key>StandardErrorPath</key>
+	<string>/Users/tyrel/projects/ivr-mac/mac_ivr_test.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/tyrel/projects/ivr-mac/mac_ivr_test.log</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/tyrel/projects/ivr-mac</string>
+</dict>
+</plist>
