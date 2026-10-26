@@ -66,9 +66,16 @@ DEFAULTS = {
     "staleness": {"enabled": True, "after_h": 6, "min_gap_min": 10},
     # Off by default: Qwen3-style hybrids answer silently unless asked, and
     # thinking adds a few hundred decode tokens per turn (~40-50 ms each on
-    # a single Spark). Enable in CONFIG to stream reasoning into the
-    # ◈ THINKING cards (the topbar REASONING button only shows/hides cards).
+    # a single Spark). The default for threads; ◈ THINKING (threads.opts)
+    # overrides it per thread.
     "enable_thinking": False,
+    # max reasoning tokens per model call while thinking (0 = unlimited).
+    # Sent as llama-server's reasoning_budget_tokens: when it runs out the
+    # server closes the think block itself, so the model still answers —
+    # without it a long puzzle can think through all of max_tokens and end
+    # with an empty reply. Clamped so the answer always keeps
+    # ANSWER_RESERVE of max_tokens. Backends without the field ignore it.
+    "thinking_budget": 16384,
     # chat_template_kwargs.reasoning_effort while thinking: xhigh | medium |
     # low. The Qwen3.8 template defaults to xhigh when it isn't sent.
     "reasoning_effort": "xhigh",
@@ -285,13 +292,14 @@ def _providers(merged: dict) -> dict:
         name = _provider_name(merged.get("base_url"))
         provs = {name: {"base_url": merged.get("base_url") or DEFAULTS["base_url"],
                         "api_key": merged.get("api_key") or "none",
-                        "vision": bool((merged.get("capabilities") or {}).get("vision")),
-                        "template_kwargs": True}}
+                        "vision": bool((merged.get("capabilities") or {}).get("vision"))}}
         merged["provider"] = name
     for p in provs.values():
         p.setdefault("api_key", "none")
         p.setdefault("vision", False)
-        p.setdefault("template_kwargs", True)  # sglang/vLLM chat_template_kwargs (thinking flags)
+        # retired 2026-10-26: thinking/budget fields now go to every provider
+        # and are dropped per backend on a 400 (agent._drop_optional)
+        p.pop("template_kwargs", None)
         p.setdefault("model", "")              # this provider's default model ("" = global model)
     if merged.get("provider") not in provs:
         merged["provider"] = next(iter(provs))
@@ -302,7 +310,7 @@ def effective(s: dict, override: dict | None = None) -> dict:
     """Settings with the connection fields resolved for one run: the global
     default provider/model, or a thread's override {provider, model} (either
     may be empty = inherit). Everything that builds a model client reads
-    base_url / api_key / model / capabilities.vision / template_kwargs."""
+    base_url / api_key / model / capabilities.vision."""
     ov = override or {}
     if ov.get("keep_reasoning") in KEEP_REASONING:
         s = {**s, "keep_reasoning": ov["keep_reasoning"]}
@@ -318,7 +326,7 @@ def effective(s: dict, override: dict | None = None) -> dict:
     else:
         model = s.get("model")
     return {**s, "provider": pname, "base_url": p["base_url"], "api_key": p.get("api_key") or "none",
-            "model": model, "template_kwargs": bool(p.get("template_kwargs", True)),
+            "model": model,
             "capabilities": {**(s.get("capabilities") or {}), "vision": bool(p.get("vision"))}}
 
 

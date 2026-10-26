@@ -3831,6 +3831,7 @@ async function openSettings() {
   $("#set-reasoning_effort").value = s.reasoning_effort || "xhigh";
   $("#set-keep_reasoning").value = s.keep_reasoning || "off";
   $("#set-reasoning_effort").disabled = !s.enable_thinking;
+  $("#set-thinking_budget").value = s.thinking_budget ?? 16384;
   $("#set-compact").checked = !!s.compact_enabled;
   $("#set-deep_agent").checked = !!s.deep_agent;
   $("#set-skills_enabled").checked = !!s.skills_enabled;
@@ -3896,6 +3897,7 @@ async function saveSettings() {
     splash_image: $("#set-splash_image").value.trim(),
     enable_thinking: $("#set-thinking").checked,
     reasoning_effort: $("#set-reasoning_effort").value || "xhigh",
+    thinking_budget: Math.max(0, parseInt($("#set-thinking_budget").value) || 0),
     keep_reasoning: $("#set-keep_reasoning").value || "off",
     compact_enabled: $("#set-compact").checked,
     deep_agent: $("#set-deep_agent").checked,
@@ -5570,8 +5572,6 @@ function provRow(name = "", p = {}) {
     lab.append(c, document.createTextNode(" " + label)); flags.appendChild(lab);
   };
   chk("vision", "p-vision", p.vision, "model accepts images");
-  chk("sglang/vLLM template kwargs", "p-tk", p.template_kwargs !== false,
-      "send chat_template_kwargs (Qwen thinking on/off + reasoning effort). Turn OFF for OpenAI, llama-server, Ollama — OpenAI rejects unknown args");
   const test = el("button", "btn ghost", "↻ TEST"); test.type = "button";
   const out = el("span", "prov-test", "");
   test.onclick = async () => {
@@ -5607,7 +5607,6 @@ function provForm() {
       api_key: r.querySelector(".p-key").value.trim() || "none",
       model: r.querySelector(".p-model").value.trim(),
       vision: r.querySelector(".p-vision").checked,
-      template_kwargs: r.querySelector(".p-tk").checked,
     };
   }
   return out;
@@ -5636,7 +5635,7 @@ function provLoad(s) {
   fillModels($("#dl-default-models"), { provider: s.provider });
 }
 $("#btn-prov-add").onclick = () => {
-  $("#prov-list").appendChild(provRow("", { template_kwargs: false }));
+  $("#prov-list").appendChild(provRow("", {}));
   $("#prov-list .prov-row:last-child .p-name").focus();
   cfgDirtyCompute();
 };

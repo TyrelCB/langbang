@@ -36,7 +36,7 @@ def window(msgs: list, cfg: dict) -> list:
     return msgs
 
 
-# thinking OFF regardless of the provider's template_kwargs checkbox (Qwen
+# thinking OFF whatever the thread/CONFIG thinking setting says (Qwen
 # hybrids think by default when the switch isn't sent — minutes of dead air
 # on a phone line). Backends disagree on the switch: sglang/vLLM read
 # chat_template_kwargs; Ollama's /v1 ignores that (and its own "think":false

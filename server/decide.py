@@ -203,8 +203,7 @@ async def _llm(s: dict, cfg: dict, state, questions: dict, timeout: float) -> di
                          {"role": "user", "content": _prompt(state, questions)}],
             "response_format": {"type": "json_schema", "json_schema": {
                 "name": "decision", "schema": _schema(questions), "strict": True}}}
-    if conn.get("template_kwargs", True):
-        body["chat_template_kwargs"] = {"enable_thinking": False}
+    body["chat_template_kwargs"] = {"enable_thinking": False}  # dropped below on a 400
     url = conn["base_url"].rstrip("/") + "/chat/completions"
     async with httpx.AsyncClient(timeout=timeout) as c:
         r = await c.post(url, json=body, headers=_headers(conn.get("api_key")))

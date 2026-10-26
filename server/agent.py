@@ -524,18 +524,26 @@ class SGlangChatOpenAI(ChatOpenAI):
             gc.message.additional_kwargs["reasoning_content"] = rc
         return gc
 
-    # optional_extra: extra_body is a best-effort thinking-off switch (see
-    # no_think) — a provider that 400s on it gets the request again without
-    # it, and is remembered so later calls skip the 400.
-    optional_extra: bool = False
+    # optional_extra: extra_body (thinking switch, effort, budget — see
+    # extra_body()) is best-effort. Every provider gets it; one that 400s
+    # naming a field gets the request again without THAT field, remembered
+    # per base_url so later calls skip the 400. Replaces the per-provider
+    # "template kwargs" checkbox: vLLM/sglang/llama-server/Ollama ignore
+    # what they don't use, only strict APIs (OpenAI) refuse.
+    optional_extra: bool = True
 
     def _drop_optional(self, e: Exception) -> bool:
-        if not (self.optional_extra and self.extra_body and isinstance(e, openai.BadRequestError)
-                and "chat_template_kwargs" in str(e)):
+        if not (self.optional_extra and self.extra_body and isinstance(e, openai.BadRequestError)):
             return False
-        _REJECTS_KWARGS.add(self.openai_api_base or "")
-        logger.warning("%s rejected chat_template_kwargs; asking without it", self.openai_api_base)
-        self.extra_body = None
+        bad = {k for k in self.extra_body if k in str(e)}
+        if not bad:
+            return False
+        if any(k.startswith("reasoning_budget") for k in bad):  # the pair goes together
+            bad |= {k for k in self.extra_body if k.startswith("reasoning_budget")}
+        url = self.openai_api_base or ""
+        _REJECTS_KWARGS.setdefault(url, set()).update(bad)
+        logger.warning("%s rejected %s; asking without", url, sorted(bad))
+        self.extra_body = {k: v for k, v in self.extra_body.items() if k not in bad} or None
         return True
 
     async def _agenerate(self, *a, **kw):  # noqa: ANN002, ANN003
@@ -559,7 +567,7 @@ class SGlangChatOpenAI(ChatOpenAI):
                 yield c
 
 
-_REJECTS_KWARGS: set[str] = set()  # base_urls that 400'd on chat_template_kwargs
+_REJECTS_KWARGS: dict[str, set] = {}  # base_url → extra_body fields it 400'd on
 _VIEWS: dict[str, dict] = {}  # thread → its agent's latest model request (/btw)
 
 
@@ -568,27 +576,27 @@ def no_think(s: dict) -> dict:
     recap, compaction, file assist). A Qwen hybrid thinks by DEFAULT, and
     these calls have small budgets — titles 24 tokens, recap 700 — so a
     thinking model spends all of it reasoning and returns empty content
-    (seen: blank recaps, a compaction summary of "."). So the switch is sent
-    even when the provider's template_kwargs box is off; that box governs
-    the chat's thinking toggle, and an empty background result is never
-    what anyone wants. Providers that reject it are retried without."""
-    if s.get("template_kwargs", True):
-        return {"extra_body": extra_body(s, thinking=False)}
-    if (s.get("base_url") or "") in _REJECTS_KWARGS:
-        return {"extra_body": None}
-    return {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}, "optional_extra": True}
+    (seen: blank recaps, a compaction summary of ".")."""
+    return {"extra_body": extra_body(s, thinking=False)}
 
 
 REASONING_EFFORTS = ("xhigh", "medium", "low")
 COMPACTION_TAG = "lb_compaction"
 
 
+ANSWER_RESERVE = 4096  # output tokens a thinking budget always leaves for the answer
+BUDGET_MESSAGE = ("\n\n(Thinking budget reached — stop reasoning now and give the "
+                  "best answer from what you have.)\n")
+
+
 def extra_body(s: dict, thinking: bool | None = None) -> dict | None:
-    """chat_template_kwargs for providers that take them (sglang / vLLM:
-    the Qwen thinking switch + reasoning effort). Others — OpenAI itself,
-    llama-server, Ollama — get nothing extra: OpenAI 400s on unknown args."""
-    if not s.get("template_kwargs", True):
-        return None
+    """Thinking controls sent to EVERY provider (one request shape; a
+    backend that 400s on a field loses just that field — _drop_optional):
+    - chat_template_kwargs: enable_thinking (Qwen/Nemotron templates; both
+      think by default when it's absent), reasoning_effort (Qwen3.8 only —
+      templates ignore kwargs they don't read), preserve_thinking
+    - reasoning_budget_tokens + reasoning_budget_message (llama-server
+      sampling layer; vLLM/sglang ignore them) while thinking is on."""
     on = bool(s.get("enable_thinking")) if thinking is None else thinking
     kw = {"enable_thinking": on}
     if s.get("keep_reasoning") == "turn":
@@ -600,7 +608,15 @@ def extra_body(s: dict, thinking: bool | None = None) -> dict | None:
     # anything else raises in the template → only pass known values
     if on and s.get("reasoning_effort") in REASONING_EFFORTS:
         kw["reasoning_effort"] = s["reasoning_effort"]
-    return {"chat_template_kwargs": kw}
+    out = {"chat_template_kwargs": kw}
+    budget = int(s.get("thinking_budget") or 0)
+    if on and budget > 0:
+        mt = int(s.get("max_tokens") or 0)
+        if mt:  # the answer keeps ANSWER_RESERVE (or half, for tiny max_tokens)
+            budget = min(budget, max(mt - ANSWER_RESERVE, mt // 2))
+        out.update(reasoning_budget_tokens=budget, reasoning_budget_message=BUDGET_MESSAGE)
+    bad = _REJECTS_KWARGS.get(s.get("base_url") or "", ())
+    return {k: v for k, v in out.items() if k not in bad} or None
 
 
 def model(s: dict) -> ChatOpenAI:
@@ -623,7 +639,7 @@ def model(s: dict) -> ChatOpenAI:
         # prefill, not a dead peer. Kills truly hung connections at 10 min.
         stream_chunk_timeout=600,
         extra_body=extra_body(s),
-        keep_reasoning=(s.get("keep_reasoning") or "off") if s.get("template_kwargs", True) else "off",
+        keep_reasoning=s.get("keep_reasoning") or "off",
         # deepagents' read_file returns media as base64 content blocks and
         # only scrubs block types the profile marks False (missing = assumed
         # supported). Unset, a read_file on a .wav/.mp4 shipped ~350k tokens
@@ -3399,6 +3415,9 @@ async def run_chat(
         tool_t0: dict[str, tuple[float, str | None, object]] = {}
         sub_m_t0: dict[str, float] = {}
         calls: list[tuple[str, dict]] = []  # every tool call's args → projects.observe
+        # the main agent's latest step hit max_tokens with no answer and no
+        # tool call (it thought until the limit) — reported, not a blank
+        cut = False
         graph_in = (
             Command(resume={resume["id"]: resume["value"]}) if resume else {
                 "messages": [
@@ -3503,6 +3522,10 @@ async def run_chat(
                             meta={"text": out_text, "sub": sub_id},
                         )
                         continue
+                    om = ev["data"].get("output")
+                    cut = (outp >= int(s.get("max_tokens") or 0) - 2
+                           and not _text_only(getattr(om, "content", "")).strip()
+                           and not getattr(om, "tool_calls", None))
                     if t0 is not None:
                         now = time.time()
                         ttft = (t_first if t_first else now) - t0
@@ -3626,6 +3649,15 @@ async def run_chat(
         for g in await pending_gates(thread_id):
             await _log(thread_id, turn_id, "gate", meta={"value": g["value"]})
             yield {"type": "gate", "id": g["id"], "value": _safe(g["value"])}
+        if cut:
+            b = (extra_body(s) or {}).get("reasoning_budget_tokens")
+            msg = (f"⚠ The model used all {s.get('max_tokens')} output tokens without answering "
+                   "(it was still thinking). Raise MAX TOKENS, set a lower THINKING BUDGET in "
+                   "CONFIG → REASONING" + (f" (now {b}; this backend may ignore it)" if b else "")
+                   + ", or turn ◈ THINKING off for this thread.")
+            await _log(thread_id, turn_id, "error", meta={"message": msg})
+            yield {"type": "error", "message": msg}
+            return
         yield {"type": "done", "seconds": round(time.time() - t_run0, 1)}
     except GraphRecursionError:
         # LangGraph's own text ("set the recursion_limit config key", docs URL)

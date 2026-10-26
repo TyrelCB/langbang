@@ -139,7 +139,9 @@
               <option value="medium">medium — balanced</option>
               <option value="low">low — brief thinking, straight to the answer</option>
             </select></label>
-          <label title="Send the model's earlier reasoning back to it. sglang/vLLM providers only (template kwargs on); others always get off">Keep reasoning in context
+          <label title="max reasoning tokens per model call (0 = unlimited). llama-server ends the thinking at this point so the model still answers; always leaves 4096 of MAX TOKENS for the answer. vLLM/sglang ignore it — use effort there">Thinking budget (tokens)
+            <input id="set-thinking_budget" type="number" min="0" step="1024"></label>
+          <label title="Send the model's earlier reasoning back to it">Keep reasoning in context
             <select id="set-keep_reasoning">
               <option value="off">off — never (each step only sees its visible text)</option>
               <option value="turn">current turn — this turn's tool steps see their reasoning (Qwen's agentic setup)</option>
