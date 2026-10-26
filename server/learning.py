@@ -43,6 +43,7 @@ INDEX_CAP = 6000          # chars of memory index in the system prompt
 THREAD_PROMPT_CAP = 8000  # chars of per-thread instructions
 TRANSCRIPT_CAP = 60_000   # chars of turn transcript handed to the reviewer
 SKILL_BODY_CAP = 20_000   # chars of an existing skill shown for patching
+SHOWN_TOTAL_CAP = 120_000  # chars budget for auto-shown skill texts in a review
 
 
 def defaults() -> dict:
@@ -611,6 +612,19 @@ async def review(tid: str, s: dict | None = None, auto: bool = False) -> dict:
             real_reads = {os.path.realpath(os.path.expanduser(p)) for p in reads}
             shown = {c["name"] for c in catalog
                      if c["own"] and os.path.realpath(c["path"]) in real_reads}
+            # A skill the turn exercised but never read_file'd (it rode in via
+            # the system-prompt skill list) still deserves patching — show its
+            # text too, up to SHOWN_TOTAL_CAP. Without this, ~1/3 of review
+            # outcomes died on "skill text wasn't shown to the reviewer".
+            budget = SHOWN_TOTAL_CAP
+            for c in catalog:
+                if (c["own"] and c["name"] not in shown and c["name"] in text
+                        and budget > 0):
+                    try:
+                        budget -= min(os.path.getsize(c["path"]), SKILL_BODY_CAP)
+                        shown.add(c["name"])
+                    except OSError:
+                        pass
             listing = "\n".join(
                 f"- {c['name']} [{'LangBang' if c['own'] else 'Hermes, read-only'}]: {c['description']}"
                 for c in catalog) or "(none)"
