@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import queue
+import re
 import secrets
 import shutil
 import subprocess
@@ -75,6 +76,66 @@ MAX_AUDIO_BYTES = 10 * 1024 * 1024
 STREAM_RATE = voice.POCKET_RATE
 FALLBACK_REPLY = "Sorry, I don't have an answer for that."
 ERROR_REPLY = "Sorry, something went wrong on my end. Please try again."
+LINE_CACHE = os.path.join(DATA, "line_cache")  # synthesized audio by (voice, text)
+
+# The telephony loop's synthetic prompts (silence check-in, goodbye, reprompt)
+# always take the same answer — ~10% of all turns ever said. Answering them
+# here skips the model round trip (~0.5 s) and, through the line cache below,
+# the synthesis too: the caller hears them as fast as a file read.
+# (caller transcripts say "Tyrell/Tidal" — the whisper hotwords in mac-stt fix
+# the STT side; these lines are what the caller HEARD as canned before.)
+FASTPATH: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"caller has been silent", re.I), "Are you still there?"),
+    (re.compile(r"caller didn't answer|didn't answer to the check", re.I),
+     "It sounds like you're busy, so I'll let you go. Goodbye."),
+    (re.compile(r"could not hear|recognizer could not hear", re.I),
+     "Sorry, I didn't catch that. Could you say it again?"),
+]
+
+
+def fastpath(said: str) -> str | None:
+    for rx, line in FASTPATH:
+        if rx.search(said):
+            return line
+    return None
+
+
+# ---- cached spoken lines ---------------------------------------------------
+# Fixed lines (greeting, fast-path answers) are synthesized once and played
+# from disk: the caller waits milliseconds, not the ~0.5-1 s of a TTS pass.
+# Keyed by (voice identity, text) so a voice change invalidates cleanly.
+
+def _line_key(text: str) -> str:
+    v = _voice()
+    ident = ((hub.cfg.get("voice_file") or {}).get("sha256")
+             or f"{v.get('tts_provider') or 'gtts'}:{v.get('pocket_voice') or v.get('qwen_voice') or ''}")
+    return hashlib.sha256(f"{ident}|{text}".encode()).hexdigest()[:32]
+
+
+def line_pcm(text: str) -> bytes | None:
+    """Cached mono s16le @ STREAM_RATE for `text`, or None."""
+    try:
+        with open(os.path.join(LINE_CACHE, _line_key(text) + ".pcm"), "rb") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def put_line_pcm(text: str, pcm: bytes) -> None:
+    if len(text) > 240:  # one-off long answers rarely repeat verbatim
+        return
+    os.makedirs(LINE_CACHE, exist_ok=True)
+    p = os.path.join(LINE_CACHE, _line_key(text) + ".pcm")
+    with open(p + ".tmp", "wb") as fh:
+        fh.write(pcm)
+    os.replace(p + ".tmp", p)
+    try:  # keep the cache bounded: evict oldest when over the cap
+        files = sorted((os.path.join(LINE_CACHE, f) for f in os.listdir(LINE_CACHE)
+                        if f.endswith(".pcm")), key=os.path.getmtime)
+        for old in files[:-500]:
+            os.remove(old)
+    except OSError:
+        pass
 
 
 def token() -> str:
@@ -413,14 +474,27 @@ def _voice() -> dict:
 
 
 def speak_pcm(text: str, stop: threading.Event | None = None):
-    """mono s16le @ STREAM_RATE for `text`, as generated. Blocking."""
+    """mono s16le @ STREAM_RATE for `text`, as generated. Blocking.
+    A cached fixed line (see put_line_pcm) short-circuits synthesis."""
     v = _voice()
     clean = voice.prepare(text, {"voice": v})
     if not clean:
         return
     provider = v.get("tts_provider") or "gtts"
     if provider == "pocket":
-        yield from voice.pocket_pcm(clean, v, stop)
+        cached = line_pcm(clean)
+        if cached:
+            yield cached
+            return
+        parts: list[bytes] = []
+        for chunk in voice.pocket_pcm(clean, v, stop):
+            parts.append(chunk)
+            yield chunk
+        if not (stop is not None and stop.is_set()):
+            try:
+                put_line_pcm(clean, b"".join(parts))
+            except OSError:
+                pass
     elif provider == "qwen":
         yield from voice.qwen_pcm(clean, v, stop)
     else:
@@ -599,6 +673,26 @@ async def stream_turn(cid: str, c: dict, said: str, t0: float):
 
 # ---- warm-up ----
 
+async def fast_stream(cid: str, c: dict, said: str, t0: float, line: str):
+    """A fast-path answer: no model, audio straight from the line cache (or
+    one synthesis, which also fills the cache). The exchange still goes into
+    the call history so the model keeps the thread."""
+    ev = {"type": "done", "reply": line, "tools": [], "fastpath": True}
+    try:
+        pcm = line_pcm(line)
+        if pcm is None:
+            pcm = b"".join(await run_in_threadpool(lambda: list(speak_pcm(line))))
+        yield {"type": "text", "text": line}
+        yield {"type": "audio", "pcm": pcm}
+    except Exception as e:  # noqa: BLE001 — degrade to the text-only path
+        logger.warning("fastpath line failed: %s", e)
+    c["msgs"] += [{"role": "user", "content": said}, {"role": "assistant", "content": line}]
+    c["turns"] += 1
+    ev["timings"] = {"first_audio_s": round(time.time() - t0, 2),
+                     "total_s": round(time.time() - t0, 2)}
+    yield ev
+
+
 async def prewarm(with_voice: bool = True) -> None:
     """Pay cold costs before a caller does: the voice, then the prompt
     prefix — the system prompt ALONE, one token, so Ollama checkpoints its
@@ -609,7 +703,14 @@ async def prewarm(with_voice: bool = True) -> None:
     t0 = time.time()
     if with_voice:
         try:
-            await run_in_threadpool(lambda: sum(len(b) for b in speak_pcm("Hello.")))
+            # warm the voice AND pre-synthesize the fixed lines (greeting +
+            # fast-path answers) so the first caller hears them from cache
+            lines = [hub.cfg.get("greeting") or ""] + [ln for _, ln in FASTPATH]
+            def _warm_lines():
+                for ln in lines:
+                    if ln and line_pcm(ln) is None:
+                        sum(len(b) for b in speak_pcm(ln))
+            await run_in_threadpool(_warm_lines)
         except Exception as e:  # noqa: BLE001
             logger.warning("prewarm (voice) failed: %s", e)
     t1 = time.time()
@@ -779,6 +880,17 @@ async def ivr_turn_stream(request: Request, call_id: str = "", fmt: str = "auto"
             audit({"call_id": cid, "event": "turn", "stream": True, "transcript": "", "empty": True,
                    "stt_s": stt_s})
             yield line({"type": "done", "empty": True, "reply": "", "tools": [], "timings": {"stt_s": stt_s}})
+            return
+        fp = fastpath(said)
+        if fp:
+            async for ev in fast_stream(cid, c, said, t0, fp):
+                if ev["type"] == "audio":
+                    ev = {"type": "audio", "pcm": base64.b64encode(ev["pcm"]).decode()}
+                elif ev["type"] == "done":
+                    ev["timings"]["stt_s"] = stt_s
+                    audit({"call_id": cid, "event": "turn", "stream": True, "transcript": said,
+                           "reply": ev["reply"], "tools": [], "fastpath": True, **ev["timings"]})
+                yield line(ev)
             return
         async for ev in stream_turn(cid, c, said, t0):
             if ev["type"] == "audio":
