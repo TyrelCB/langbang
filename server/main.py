@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from . import agent, audioart, backup, comfy, config, decide, fileassist, ivr, learning, mcp, notify, procs, projects, rag, runs, schedule, searchidx, sfxgen, term, ttsjobs, voice
+from . import agent, audioart, backup, comfy, config, decide, fileassist, ivr, learning, mcp, notify, procs, projects, rag, runs, schedule, searchidx, sfxgen, stream, term, ttsjobs, voice
 from .ivr_hub import router as ivr_hub_router
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
@@ -1083,6 +1083,64 @@ class ImageIn(BaseModel):
     width: int = 1024
     height: int = 1024
     seed: int = -1
+
+
+# ---- WATCH: cast + public share (server/stream.py) ----
+
+class StreamCastIn(BaseModel):
+    device: str
+    url: str
+    title: str = "LangBang stream"
+
+
+@app.get("/api/stream/devices")
+async def stream_devices():
+    """mDNS sweep for cast receivers on the LAN (few seconds)."""
+    try:
+        return {"devices": await run_in_threadpool(stream.devices)}
+    except Exception as e:
+        raise HTTPException(502, f"discovery failed: {e}")
+
+
+@app.post("/api/stream/cast")
+async def stream_cast(body: StreamCastIn):
+    try:
+        return await run_in_threadpool(stream.cast, body.device, body.url, body.title)
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+@app.post("/api/stream/cast/stop")
+async def stream_cast_stop(body: dict):
+    try:
+        return await run_in_threadpool(stream.stop_cast, body.get("device", ""))
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+@app.post("/api/stream/share")
+async def stream_share():
+    """Mint a temp https://<slug>.ai.tyrel.cloud pointing at the local HLS
+    proxy (Route53 A record + Caddy snippet, wildcard cert). TTL 6h."""
+    try:
+        return await run_in_threadpool(stream.share)
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(502, f"privileged step failed: {e}")
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+@app.get("/api/stream/shares")
+async def stream_shares():
+    return {"shares": stream.shares()}
+
+
+@app.post("/api/stream/unshare")
+async def stream_unshare(body: dict):
+    try:
+        return await run_in_threadpool(stream.unshare, body.get("slug", ""))
+    except Exception as e:
+        raise HTTPException(502, str(e))
 
 
 @app.post("/api/image")

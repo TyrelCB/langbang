@@ -95,5 +95,64 @@
     if (e.key === "Escape" && !panel.classList.contains("hidden")) close();
   });
 
+  // ---- CAST: enumerate LAN receivers, POST /api/stream/cast ----
+  const castSel = $("#watch-cast");
+  let discovering = false;
+  async function fillDevices() {
+    if (discovering) return;
+    discovering = true;
+    castSel.options[0].textContent = "⤴ SCANNING…";
+    try {
+      const r = await fetch("/api/stream/devices");
+      const { devices } = await r.json();
+      if (!r.ok) throw new Error(devices?.detail || r.status);
+      castSel.replaceChildren(new Option("⤴ CAST TO…", ""));
+      for (const d of devices)
+        castSel.append(new Option(`${d.name}${d.model ? " · " + d.model : ""}`, d.name));
+      if (!devices.length) castSel.replaceChildren(new Option("⤴ NO DEVICES", ""));
+    } catch (e) {
+      castSel.options[0].textContent = "⤴ CAST FAILED";
+    } finally { discovering = false; }
+  }
+  castSel.onfocus = fillDevices;
+  castSel.onchange = async () => {
+    const name = castSel.value;
+    if (!name) return;
+    castSel.disabled = true;
+    say("casting to " + name + "…");
+    try {
+      const r = await fetch("/api/stream/cast", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ device: name, url: urlBox.value, title: "LangBang WATCH" }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.detail || r.status);
+      say("cast to " + name + ": " + j.state);
+    } catch (e) { say("cast failed: " + e.message, true); }
+    castSel.disabled = false;
+  };
+
+  // ---- SHARE: temp public URL under *.ai.tyrel.cloud ----
+  const shared = $("#watch-shared"), shareBtn = $("#btn-watch-share");
+  shareBtn.onclick = async () => {
+    shareBtn.disabled = true; shareBtn.textContent = "…MINTING";
+    try {
+      const r = await fetch("/api/stream/share", { method: "POST" });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.detail || r.status);
+      shared.classList.remove("hidden");
+      shared.replaceChildren();
+      const a = document.createElement("a");
+      a.href = j.url; a.target = "_blank"; a.textContent = j.url;
+      a.style.color = "var(--cyan)";
+      const cp = el("button", "btn ghost sm", "COPY");
+      cp.style.marginLeft = "8px";
+      cp.onclick = () => { navigator.clipboard.writeText(j.url); cp.textContent = "COPIED"; };
+      shared.append("🔗 ", a, cp, el("span", "", "  (6h — plays the same cached feed anywhere)"));
+    } catch (e) { say("share failed: " + e.message, true); }
+    shareBtn.disabled = false; shareBtn.textContent = "🔗 SHARE";
+  };
+
+
   window.langbangWatch = { open, play, stop, close };
 })();

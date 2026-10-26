@@ -726,8 +726,13 @@
         <h2>WATCH</h2>
         <input id="watch-url" type="text" autocomplete="off" spellcheck="false" placeholder="http://…/manifest or any .m3u8 / direct video URL — Enter to play">
         <button id="btn-watch-play" class="btn accent sm" type="button">▶ PLAY</button>
+        <select id="watch-cast" class="btn ghost sm" title="cast this stream to a Chromecast on the LAN">
+          <option value="">⤴ CAST TO…</option>
+        </select>
+        <button id="btn-watch-share" class="btn ghost sm" title="public temp link (https://<slug>.ai.tyrel.cloud, 6h)">🔗 SHARE</button>
         <button id="btn-watch-close" class="btn ghost sm" type="button" title="hide — playback stops">CLOSE</button>
       </div>
+      <div id="watch-shared" class="hint hidden"></div>
       <div id="watch-stage">
         <video id="watch-video" playsinline controls></video>
         <div id="watch-empty" class="term-empty">NOTHING PLAYING — paste an HLS (m3u8) or direct stream URL above, or hit ▶ on a live-stream chip in a reply.</div>
