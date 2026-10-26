@@ -963,6 +963,26 @@ details.block.tool.retried > summary { color: var(--orange); }
 #tprompt-panel { position: fixed; inset: 0; background: rgba(2,6,12,.8); display: flex;
   align-items: center; justify-content: center; z-index: 10; }
 #tprompt-text { width: 100%; box-sizing: border-box; font: inherit; resize: vertical; }
+/* per-thread tools + features (⚙ TOOLS) */
+#btn-topts { font: inherit; font-size: 12px; letter-spacing: 1px; padding: 3px 10px; }
+#btn-topts.on { color: var(--cyan); border-color: var(--cyan-dim); }
+#topts-panel { position: fixed; inset: 0; background: rgba(2,6,12,.8); display: flex;
+  align-items: center; justify-content: center; z-index: 10; }
+#topts-panel .panel-inner { max-height: 92vh; overflow-y: auto; }
+.topts-presets .btn { font-size: 11px; padding: 2px 8px; }
+.panel-inner label.topts-check { display: flex; align-items: baseline; gap: 6px; font-size: 12px; margin: 6px 0; color: var(--text); }
+#topts-panel input[type=checkbox] { width: auto; margin: 0 4px 0 0; flex: none; accent-color: var(--cyan); }
+.panel-inner .topts-list label, .panel-inner .topts-group label { display: inline-flex; align-items: center; margin: 0; }
+.panel-inner .topts-flags label { margin: 0; }
+.topts-flags { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 22ch), 1fr)); gap: 6px 12px; font-size: 12px; }
+.topts-flags select { font: inherit; font-size: 12px; }
+.topts-group { margin: 8px 0 2px; color: var(--muted); font-size: 11px; letter-spacing: 1px; }
+.topts-list { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; }
+.topts-list label { white-space: nowrap; }
+.topts-list label.forced, .topts-forced { color: var(--cyan); }
+.topts-list label.na { color: var(--muted); }
+#topts-tools.dim { opacity: .4; pointer-events: none; }
+.thread .t-badge { color: var(--orange); margin-right: 3px; flex: none; }
 .learn-head { margin: 14px 0 6px; color: var(--cyan); letter-spacing: 2px; font-size: 12px;
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .learn-head .btn { font-size: 11px; padding: 2px 8px; }

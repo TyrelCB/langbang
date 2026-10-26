@@ -322,6 +322,67 @@ def effective(s: dict, override: dict | None = None) -> dict:
             "capabilities": {**(s.get("capabilities") or {}), "vision": bool(p.get("vision"))}}
 
 
+# Per-thread run options (threads.opts JSON, agent.get_thread_opts). Absent
+# key = inherit CONFIG. Applied after effective() so one settings dict drives
+# build_agent, prefetch and the learning review alike.
+#   bare      — no tools at all (system prompt + thread prompt kept); implies
+#               memory/skills/prefetch off and the react graph (no harness)
+#   tools     — {name: bool}; local + ⚙ background tools may be forced either
+#               way, anything else (harness, MCP tools) can only be turned off
+#   mcp       — {server: false} drops that server's tools for this thread
+#               (restrict-only: mcp.get_tools keeps ONE cached client set)
+#   memory / skills / compact / review / prefetch — bool feature switches
+#   ephemeral — throwaway: no learning by default, hidden from other threads'
+#               auto-search hints, swept after EPHEMERAL_TTL idle
+THREAD_OPT_FLAGS = ("memory", "skills", "compact", "review", "prefetch")
+EPHEMERAL_TTL = 24 * 3600
+
+
+def clean_opts(o: dict | None) -> dict:
+    """Normalize a client-sent opts dict; drops unknown keys and non-bools."""
+    o = o or {}
+    out: dict = {}
+    for k in ("bare", "ephemeral", *THREAD_OPT_FLAGS):
+        if isinstance(o.get(k), bool):
+            out[k] = o[k]
+    for k in ("tools", "mcp"):
+        m = {str(n): v for n, v in (o.get(k) or {}).items() if isinstance(v, bool)}
+        if k == "mcp":
+            m = {n: v for n, v in m.items() if v is False}
+        if m:
+            out[k] = m
+    return out
+
+
+def apply_opts(s: dict, opts: dict | None) -> dict:
+    """Settings for one thread's run with its opts layered on (see above)."""
+    o = opts or {}
+    if not o:
+        return s
+    eph = bool(o.get("ephemeral"))
+    flag = lambda k, cur, eph_default=None: (  # noqa: E731
+        o[k] if k in o else (eph_default if eph and eph_default is not None else cur))
+    tools = o.get("tools") or {}
+    s = {**s,
+         "local_tools": {**(s.get("local_tools") or {}), **tools},
+         "lb_tools_off": sorted(n for n, v in tools.items() if v is False),
+         "lb_mcp_off": sorted(o.get("mcp") or {}),
+         "lb_bare": bool(o.get("bare")),
+         "memory_enabled": flag("memory", s.get("memory_enabled", True), False),
+         "skills_enabled": flag("skills", s.get("skills_enabled", True)),
+         "compact_enabled": flag("compact", s.get("compact_enabled", True)),
+         "skill_review": {**(s.get("skill_review") or {}),
+                          "enabled": flag("review", (s.get("skill_review") or {}).get("enabled", True), False)},
+         }
+    rag = s.get("rag") or {}
+    pf = rag.get("prefetch") or {}
+    on = False if s["lb_bare"] else flag("prefetch", pf.get("enabled", True))
+    s["rag"] = {**rag, "prefetch": {**pf, "enabled": on}}
+    if s["lb_bare"]:
+        s.update(memory_enabled=False, skills_enabled=False)
+    return s
+
+
 def _backfill(merged: dict) -> dict:
     # top-level merge can't introduce sub-keys added since a settings file
     # was written — CONFIG builds its LOCAL TOOLS checkboxes from this dict,

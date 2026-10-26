@@ -837,6 +837,13 @@ const SLASH = [
       await openTModel();
       if (a) $("#tmodel-model").value = a;
     } },
+  { name: "tools", desc: "this thread's tools + features (restrict/force tools, bare, auto-learn off)", run: () => openTOpts() },
+  { name: "temp", desc: "new ⌛ temp chat — no auto-learn/memory, deleted after 24 h idle", run: () => {
+      newThread(); draftOpts = { ephemeral: true }; syncTOpts(null); slashNote("⌛ temp chat — the next message creates it");
+    } },
+  { name: "bare", desc: "new ⌛ temp chat with NO tools (∅ bare — raw model test)", run: () => {
+      newThread(); draftOpts = { ephemeral: true, bare: true }; syncTOpts(null); slashNote("∅ bare temp chat — no tools; the next message creates it");
+    } },
   { name: "prompt", args: "[text]", desc: "view or set this thread's prompt (its standing instructions)",
     run: (a) => { if (!slashThread()) return; if (a) return saveTPrompt(a).then(() => slashNote("thread prompt set")); openTPrompt(); } },
   { name: "remember", args: "<fact>", desc: "have the agent save a memory for future chats",
@@ -2280,6 +2287,12 @@ async function refreshThreads() {
                  + (!busy && PROC_WAIT.has(t.id) ? " waiting" : "") + (t.archived ? " archived" : ""));
     d.dataset.tid = t.id;
     d.appendChild(el("span", "ctx", t.context_tokens != null ? fmtTok(t.context_tokens) : ""));
+    const o = t.opts || {};
+    if (o.ephemeral || o.bare) {
+      const bd = el("span", "t-badge", (o.ephemeral ? "⌛" : "") + (o.bare ? "∅" : ""));
+      bd.title = (o.ephemeral ? "temp thread — deleted after 24 h idle unless pinned" : "") + (o.ephemeral && o.bare ? "\n" : "") + (o.bare ? "bare — no tools" : "");
+      d.appendChild(bd);
+    }
     const name = el("span", "t-name", t.title);
     name.title = t.title + (t.project && projName(t.project) ? `\n◫ ${projName(t.project)}` : "")
       + (t.parent ? `\n⑂ forked from “${t.parent.title}”` : "")
@@ -2694,7 +2707,9 @@ async function openThread(t) {
   syncDrift();
   syncTProj();
   draftModel = null; // a pick on an abandoned draft doesn't follow you
+  draftOpts = null;
   syncTModel(t.id);
+  syncTOpts(t.id);
   const msgs = await api.messages(t.id);
   if (seq !== openSeq) return; // superseded by a newer open/newThread — don't paint
   // returning to the thread that is mid-run: re-attach its parked nodes and
@@ -2729,6 +2744,7 @@ async function newThread() {
   syncDraft();
   syncTPrompt(null);
   syncTModel(null);
+  syncTOpts(null);
   syncLock();
   syncDrift();
   syncTProj();
@@ -2756,6 +2772,15 @@ async function createThreadNow() {
       }));
     } catch {}
     syncTModel(t.id);
+  }
+  if (draftOpts) { // same for ⚙ TOOLS picks (bare / temp / tool toggles)
+    const o = draftOpts; draftOpts = null;
+    try {
+      await J(await fetch(`/api/threads/${t.id}/opts`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ opts: o }),
+      }));
+    } catch {}
+    syncTOpts(t.id);
   }
   refreshThreads();
 }
@@ -5746,6 +5771,144 @@ $("#tprompt-text").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); $("#btn-tprompt-save").click(); }
 });
 
+// ---------- per-thread tools + features ----------
+// threads.opts (server: config.apply_opts) — absent key = inherit CONFIG.
+// A New-chat draft keeps its pick client-side (draftOpts) until
+// createThreadNow, exactly like draftModel.
+let toptsSeq = 0, toptsCur = {}, toptsCat = null;
+let draftOpts = null;
+const TOPTS_FLAGS = [["memory", "memory"], ["review", "auto-learn review"],
+  ["skills", "skills"], ["prefetch", "auto-search hints"], ["compact", "context compaction"]];
+const optsSet = (o) => !!o && Object.keys(o).length > 0;
+function paintTOpts(o) {
+  const b = $("#btn-topts");
+  const off = Object.values(o.tools || {}).filter((v) => !v).length + Object.keys(o.mcp || {}).length;
+  const flags = TOPTS_FLAGS.filter(([k]) => k in o).length + Object.values(o.tools || {}).filter((v) => v).length;
+  b.textContent = o.bare ? "∅ BARE" : "⚙ TOOLS" + (off ? ` −${off}` : "") + (flags ? ` ±${flags}` : "");
+  if (o.ephemeral) b.textContent = "⌛ " + b.textContent;
+  b.classList.toggle("on", optsSet(o));
+}
+async function syncTOpts(tid) {
+  const seq = ++toptsSeq;
+  if (!tid) { toptsCur = draftOpts || {}; paintTOpts(toptsCur); return; }
+  toptsCur = {}; paintTOpts(toptsCur);
+  let r;
+  try { r = await J(await fetch(`/api/threads/${tid}/opts`)); } catch { return; }
+  if (seq !== toptsSeq || tid !== threadId) return; // switched away meanwhile
+  toptsCur = r.opts || {}; toptsCat = r.catalog;
+  paintTOpts(toptsCur);
+}
+function toptsRender(o) {
+  const c = toptsCat;
+  $("#topts-bare").checked = !!o.bare;
+  $("#topts-eph").checked = !!o.ephemeral;
+  $("#topts-ttl").textContent = Math.round(c.ephemeral_ttl / 3600) + " h";
+  const fl = $("#topts-flags"); fl.innerHTML = "";
+  for (const [k, label] of TOPTS_FLAGS) {
+    const eph = o.ephemeral && (k === "memory" || k === "review");
+    const def = eph ? "off·temp" : (c.flags[k] ? "on" : "off");
+    const sel = document.createElement("select");
+    sel.dataset.flag = k;
+    sel.append(new Option(`(default: ${def})`, ""), new Option("on", "on"), new Option("off", "off"));
+    sel.value = k in o ? (o[k] ? "on" : "off") : "";
+    const l = el("label", "", label + " ");
+    l.appendChild(sel); fl.appendChild(l);
+  }
+  const box = $("#topts-tools"); box.innerHTML = "";
+  const tools = o.tools || {}, mcpOff = o.mcp || {};
+  const cb = (name, glob, forceable, extra = {}) => {
+    const on = name in tools ? tools[name] : glob;
+    const l = el("label", "");
+    const i = document.createElement("input");
+    i.type = "checkbox"; i.checked = on; i.dataset.tool = name; i.dataset.glob = glob ? "1" : "";
+    if (!glob && !forceable) { i.disabled = true; l.classList.add("na"); l.title = "off in CONFIG — this kind can only be restricted per thread"; }
+    const paint = () => l.classList.toggle("forced", i.checked !== glob);
+    i.onchange = paint; paint();
+    Object.assign(i.dataset, extra);
+    l.append(i, " " + name);
+    return l;
+  };
+  for (const g of c.groups) {
+    if (!g.tools.length) continue;
+    box.appendChild(el("div", "topts-group", g.group.toUpperCase() + (g.forceable ? "" : " (restrict only)")));
+    const list = el("div", "topts-list");
+    for (const tl of g.tools) list.appendChild(cb(tl.name, tl.global, g.forceable));
+    box.appendChild(list);
+  }
+  for (const m of c.mcp) {
+    const head = el("div", "topts-group");
+    const l = el("label", "");
+    const i = document.createElement("input");
+    i.type = "checkbox"; i.dataset.mcp = m.name; i.checked = !(m.name in mcpOff) && m.state === "ok";
+    i.disabled = m.state !== "ok";
+    l.append(i, ` MCP · ${m.name}` + (m.state !== "ok" ? ` (${m.state} in CONFIG)` : ""));
+    const paint = () => l.classList.toggle("topts-forced", m.state === "ok" && !i.checked);
+    i.onchange = () => { paint(); list.classList.toggle("dim", !i.checked); };
+    head.appendChild(l); box.appendChild(head);
+    const list = el("div", "topts-list");
+    for (const n of m.tools) list.appendChild(cb(n, true, false));
+    list.classList.toggle("dim", !i.checked);
+    paint(); box.appendChild(list);
+  }
+  if (!c.groups.some((g) => g.tools.length) && !c.mcp.length) box.appendChild(el("div", "learn-empty", "no tools"));
+  box.classList.toggle("dim", !!o.bare);
+}
+function toptsRead() {
+  const o = {};
+  if ($("#topts-bare").checked) o.bare = true;
+  if ($("#topts-eph").checked) o.ephemeral = true;
+  for (const s of $("#topts-flags").querySelectorAll("select")) if (s.value) o[s.dataset.flag] = s.value === "on";
+  const tools = {}, mcp = {};
+  for (const i of $("#topts-tools").querySelectorAll("input[data-tool]"))
+    if (i.checked !== !!i.dataset.glob) tools[i.dataset.tool] = i.checked;
+  for (const i of $("#topts-tools").querySelectorAll("input[data-mcp]")) if (!i.disabled && !i.checked) mcp[i.dataset.mcp] = false;
+  if (Object.keys(tools).length) o.tools = tools;
+  if (Object.keys(mcp).length) o.mcp = mcp;
+  return o;
+}
+async function openTOpts() {
+  SFX.play("click");
+  $("#topts-msg").textContent = "loading tools…";
+  $("#topts-thread").textContent = threadId ? $("#chat-title").textContent : "NEW CHAT — applies when you send the first message";
+  $("#topts-panel").classList.remove("hidden");
+  try {
+    const r = await J(await fetch(`/api/threads/${threadId || "_"}/opts`));
+    toptsCat = r.catalog;
+    if (threadId) toptsCur = r.opts || {};
+  } catch (e) { $("#topts-msg").textContent = "load failed: " + e.message; return; }
+  toptsRender(toptsCur);
+  $("#topts-msg").textContent = toptsCat.deep_agent ? "" : "CONFIG has deep agent off — the harness group doesn't apply";
+}
+const closeTOpts = () => $("#topts-panel").classList.add("hidden");
+async function saveTOpts(o) {
+  const tid = threadId;
+  if (!tid) { // draft: keep it client-side until createThreadNow
+    draftOpts = optsSet(o) ? o : null;
+    closeTOpts(); SFX.play("settings_saved"); syncTOpts(null); return;
+  }
+  try {
+    await J(await fetch(`/api/threads/${tid}/opts`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ opts: o }),
+    }));
+  } catch (e) { $("#topts-msg").textContent = "save failed: " + e.message; return; }
+  closeTOpts();
+  SFX.play("settings_saved");
+  syncTOpts(tid);
+  refreshThreads(); // ⌛/∅ sidebar badges
+}
+$("#btn-topts").onclick = openTOpts;
+$("#topts-bare").onchange = () => $("#topts-tools").classList.toggle("dim", $("#topts-bare").checked);
+$("#topts-eph").onchange = () => toptsRender(toptsRead()); // repaint the "(default: off — temp)" hints
+$("#btn-topts-bare").onclick = () => toptsRender({ ...toptsRead(), bare: true });
+$("#btn-topts-temp").onclick = () => toptsRender({ ...toptsRead(), ephemeral: true });
+const toptsAll = (on) => { for (const i of $("#topts-tools").querySelectorAll("input[type=checkbox]:not(:disabled)")) { i.checked = on; i.onchange(); } };
+$("#btn-topts-all").onclick = () => toptsAll(true);
+$("#btn-topts-none").onclick = () => toptsAll(false);
+$("#btn-topts-save").onclick = () => saveTOpts(toptsRead());
+$("#btn-topts-default").onclick = () => saveTOpts({});
+$("#btn-topts-cancel").onclick = () => { SFX.play("click"); closeTOpts(); };
+$("#topts-panel").onclick = (e) => { if (e.target.id === "topts-panel") closeTOpts(); };
+
 // ---------- memory & learning (CONFIG) ----------
 const fmtWhen = (ts) => new Date(ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 function learnOpenFile(path) {
@@ -5834,6 +5997,7 @@ document.addEventListener("keydown", (e) => {
   // settings above recap: it can sit on top of it and is the top-most panel
   if (!$("#settings-panel").classList.contains("hidden")) closeSettings(false);
   else if (!$("#tprompt-panel").classList.contains("hidden")) closeTPrompt();
+  else if (!$("#topts-panel").classList.contains("hidden")) closeTOpts();
   else if (!$("#tmodel-panel").classList.contains("hidden")) closeTModel();
   else if (!$("#editor-panel").classList.contains("hidden")) edClose();
   else if (!$("#recap-panel").classList.contains("hidden")) closeRecap();

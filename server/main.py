@@ -373,6 +373,22 @@ async def put_thread_model(tid: str, body: ThreadModelIn):
     return _model_view(s, await agent.get_thread_model(tid))
 
 
+class ThreadOptsIn(BaseModel):
+    opts: dict = {}  # config.clean_opts schema; {} = inherit everything
+
+
+@app.get("/api/threads/{tid}/opts")
+async def get_thread_opts(tid: str):
+    return {"opts": await agent.get_thread_opts(tid), "catalog": await agent.tool_catalog()}
+
+
+@app.put("/api/threads/{tid}/opts")
+async def put_thread_opts(tid: str, body: ThreadOptsIn):
+    if not await agent.set_thread_opts(tid, body.opts):
+        raise HTTPException(404, "no such thread")
+    return {"opts": await agent.get_thread_opts(tid)}
+
+
 class ModelsProbeIn(BaseModel):
     provider: str = ""    # a saved provider…
     base_url: str = ""    # …or an unsaved one from the CONFIG editor

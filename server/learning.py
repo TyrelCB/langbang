@@ -583,7 +583,9 @@ def _qualifies(events: list[dict], s: dict) -> int:
 
 async def after_run(tid: str, events: list[dict]) -> None:
     """runs._produce hook: maybe review the turn that just finished."""
-    s = config.load()
+    from . import agent  # cycle-safe
+    # threads.opts can switch review off (⌛ ephemeral threads default off)
+    s = config.apply_opts(config.load(), await agent.get_thread_opts(tid))
     if not _qualifies(events, s) or tid in _pending:
         return
     try:

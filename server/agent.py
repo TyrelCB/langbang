@@ -145,9 +145,11 @@ async def init() -> None:
     #   nothing merged in; a ⤴ merge archives its branch (git merge + branch -d)
     # threads.project = projects.id (NULL = unfiled); threads.drift = JSON
     #   "this run worked in another repo" suggestion (projects.observe)
+    # threads.opts = JSON per-thread run options (config.apply_opts): tool
+    #   allow/deny, bare mode, feature switches, ephemeral
     for col, typ in (("orig", "TEXT"), ("prompt", "TEXT"), ("model", "TEXT"),
                      ("parent", "TEXT"), ("pinned", "REAL"), ("archived", "REAL"),
-                     ("project", "TEXT"), ("drift", "TEXT")):
+                     ("project", "TEXT"), ("drift", "TEXT"), ("opts", "TEXT")):
         try:
             await _db.execute(f"ALTER TABLE threads ADD COLUMN {col} {typ}")
         except aiosqlite.OperationalError:  # duplicate column — already migrated
@@ -1848,21 +1850,59 @@ def _fs_backend():
     return backends.FilesystemBackend(root_dir=os.path.expanduser("~"), virtual_mode=False)
 
 
+class _ToolFilter(AgentMiddleware):
+    """Per-thread tool deny-list (threads.opts → s["lb_tools_off"]) for the
+    tools build_agent can't drop itself: the deepagents harness (ls, grep,
+    task, write_todos…) and middleware-registered ones (ask_user). Unoffered
+    AND refused if called anyway (history can still show old calls)."""
+
+    def __init__(self, off):
+        super().__init__()
+        self.off = set(off)
+
+    async def awrap_model_call(self, request, handler):  # noqa: ANN001
+        tools = [t for t in request.tools if _tname(t) not in self.off]
+        if len(tools) != len(request.tools):
+            request = request.override(tools=tools)
+        return await handler(request)
+
+    async def awrap_tool_call(self, request, handler):  # noqa: ANN001
+        name = request.tool_call.get("name")
+        if name in self.off:
+            return ToolMessage(content=f"{name} is disabled for this thread by the user.",
+                               name=name, status="error", tool_call_id=request.tool_call["id"])
+        return await handler(request)
+
+
 async def build_agent(s: dict, checkpointer=None, thread_prompt: str = "", project: dict | None = None):
+    cp = checkpointer or _checkpointer
+    if s.get("lb_bare"):
+        # ∅ bare thread (threads.opts): plain chat like llama-server — no
+        # tools, no harness, LangBang's system prompt + thread prompt kept
+        return create_react_agent(
+            model(s), [], checkpointer=cp,
+            prompt=SystemMessage(content=s["system_prompt"] + learning.thread_note(thread_prompt)),
+            pre_model_hook=_compaction_hook(s) if s.get("compact_enabled", True) else None,
+        )
     enabled = s.get("local_tools") or {}
+    off = set(s.get("lb_tools_off") or ())
     deep = bool(s.get("deep_agent", True))
     skip = DEEP_REPLACED_TOOLS if deep else set()
+    mcp_tools = await mcp.get_tools(s.get("mcp_servers") or {})
+    if s.get("lb_mcp_off"):  # restrict-only: the shared client set stays loaded
+        drop = {n for srv in s["lb_mcp_off"] for n in mcp.by_server.get(srv, ())}
+        mcp_tools = [t for t in mcp_tools if t.name not in drop]
     tools = [
         t
         for t in local_tools.LOCAL_TOOLS
         if enabled.get(t.name, True) and t.name not in skip
-    ] + await mcp.get_tools(s.get("mcp_servers") or {})
+    ] + mcp_tools
     if s.get("memory_enabled", True):
         tools += learning.MEMORY_TOOLS
     from . import procs  # imports agent: deferred
     bg = [t for t in procs.TOOLS if enabled.get(t.name, True)]
     tools += bg
-    cp = checkpointer or _checkpointer
+    tools = [t for t in tools if t.name not in off]
     # built per run: memory edits and thread-prompt changes apply next turn
     # (also keeps the system prompt stable — and prefix-cached — mid-run)
     prompt = (s["system_prompt"] + learning.thread_note(thread_prompt)
@@ -1873,7 +1913,8 @@ async def build_agent(s: dict, checkpointer=None, thread_prompt: str = "", proje
         if s.get("compact_enabled", True):
             mw.append(_CompactionMiddleware(s))
         mw.append(_Steer())  # messages typed mid-run → before the next model call
-        mw.append(_TodoReconcile())  # deterministic finish-line gate
+        if "write_todos" not in off:
+            mw.append(_TodoReconcile())  # deterministic finish-line gate
         mw.append(_FileArgAlias())  # repair path->file_path arg drift pre-validation
         mw.append(_MediaReadGuard())  # audio/video base64 never reaches the model
         mw.append(_PrefetchNote())  # auto-search hints on human turns (prefetch.py)
@@ -1892,6 +1933,8 @@ async def build_agent(s: dict, checkpointer=None, thread_prompt: str = "", proje
             hermes = os.path.expanduser(s.get("skills_hermes_dir") or "~/.hermes/skills")
             perms = [FilesystemPermission(
                 operations=["write"], paths=[hermes + "/**"], mode="deny")]
+        if off:
+            mw.append(_ToolFilter(off))  # per-thread deny-list for harness tools
         mw.append(_EmptyAnswerRetry())  # last = innermost, right around the model
         main = model(s)
         main.lb_main_prompt = prompt  # → _capture (/btw replays this view)
@@ -1982,6 +2025,40 @@ async def overview() -> dict:
     }
     _overview_cache = (time.time(), key, out)
     return out
+
+
+async def tool_catalog() -> dict:
+    """What a thread's ⚙ TOOLS panel can toggle: every local / background
+    tool (even globally off — threads may force those on), the harness and
+    loaded MCP tools as on-or-off-only. Built on overview()'s live graph."""
+    from . import procs  # imports agent: deferred
+    s = config.load()
+    ov = await overview()
+    enabled = s.get("local_tools") or {}
+    deep = bool(s.get("deep_agent", True))
+    skip = DEEP_REPLACED_TOOLS if deep else set()
+    bg = [t.name for t in procs.TOOLS]
+    harness = next((g["on"] for g in ov["tools"] if g["group"] == "agent harness"), [])
+    if deep:  # same names as the local tools they replace: overview files them under local
+        harness = sorted({*harness, *DEEP_REPLACED_TOOLS})
+    row = lambda n: {"name": n, "global": bool(enabled.get(n, True))}  # noqa: E731
+    return {
+        "deep_agent": deep,
+        "groups": [
+            {"group": "local", "forceable": True,
+             "tools": [row(t.name) for t in local_tools.LOCAL_TOOLS if t.name not in skip]},
+            {"group": "background", "forceable": True, "tools": [row(n) for n in bg]},
+            {"group": "agent harness", "forceable": False,
+             "tools": [{"name": n, "global": True} for n in harness if n not in bg]},
+        ],
+        "mcp": [{"name": m["name"], "state": m["state"], "tools": m["tools"]} for m in ov["mcp"]],
+        "flags": {"memory": bool(s.get("memory_enabled", True)),
+                  "skills": bool(s.get("skills_enabled", True)),
+                  "compact": bool(s.get("compact_enabled", True)),
+                  "review": bool(learning.review_settings(s)["enabled"]),
+                  "prefetch": bool(((s.get("rag") or {}).get("prefetch") or {}).get("enabled", True))},
+        "ephemeral_ttl": config.EPHEMERAL_TTL,
+    }
 
 
 def _msg_dict(m) -> dict:
@@ -2423,7 +2500,7 @@ async def list_threads() -> list:
     per thread, keyed by its newest checkpoint_id (every superstep / compaction
     writes a new one), so only threads that actually changed are recomputed."""
     cur = await _db.execute("SELECT id,title,created_at,updated_at,orig,pinned,parent,archived,"
-                            "project,drift FROM threads "
+                            "project,drift,opts FROM threads "
                             "ORDER BY pinned IS NULL, updated_at DESC")
     rows = await cur.fetchall()
     cur = await _db.execute(
@@ -2449,7 +2526,8 @@ async def list_threads() -> list:
              # needs a confirm click (see web/app.js refreshThreads)
              "n_msgs": hit[2], "chars": hit[3],
              "pinned": r[5] is not None, "parent": json.loads(r[6]) if r[6] else None,
-             "archived": r[7], "project": r[8], "drift": json.loads(r[9]) if r[9] else None}
+             "archived": r[7], "project": r[8], "drift": json.loads(r[9]) if r[9] else None,
+             "opts": _opts_json(r[10])}
         )
     return out
 
@@ -2686,7 +2764,21 @@ async def _sweep_once() -> int:
             n += 1
     if n:
         logger.warning("swept %d empty New chat thread(s)", n)
-    return n
+    # ⌛ ephemeral (throwaway test) threads: gone after EPHEMERAL_TTL idle,
+    # unless pinned or mid-run
+    from . import runs  # imports agent: deferred
+    eph = await ephemeral_tids()
+    cur = await _db.execute("SELECT id FROM threads WHERE pinned IS NULL AND updated_at<?",
+                            (time.time() - config.EPHEMERAL_TTL,))
+    m = 0
+    for (tid,) in await cur.fetchall():
+        hub = runs.get(tid)
+        if tid in eph and not (hub and not hub.done):
+            await delete_thread(tid)
+            m += 1
+    if m:
+        logger.warning("swept %d idle ephemeral thread(s)", m)
+    return n + m
 
 
 def start_sweeper() -> None:
@@ -2780,6 +2872,33 @@ async def set_thread_model(tid: str, ov: dict | None) -> bool:
                                 (json.dumps(ov) if ov else None, tid))
         hit = cur.rowcount
     return bool(hit)
+
+
+def _opts_json(raw) -> dict:  # noqa: ANN001
+    try:
+        return config.clean_opts(json.loads(raw)) if raw else {}
+    except (ValueError, AttributeError):
+        return {}
+
+
+async def get_thread_opts(tid: str) -> dict:
+    """This thread's run options ({} = inherit CONFIG; see config.apply_opts)."""
+    r = await (await _db.execute("SELECT opts FROM threads WHERE id=?", (tid,))).fetchone()
+    return _opts_json(r[0]) if r else {}
+
+
+async def set_thread_opts(tid: str, opts: dict | None) -> bool:
+    o = config.clean_opts(opts)
+    async with _wt(_db):
+        cur = await _db.execute("UPDATE threads SET opts=? WHERE id=?",
+                                (json.dumps(o) if o else None, tid))
+        hit = cur.rowcount
+    return bool(hit)
+
+
+async def ephemeral_tids() -> set[str]:
+    cur = await _db.execute("SELECT id FROM threads WHERE opts LIKE '%\"ephemeral\": true%'")
+    return {r[0] for r in await cur.fetchall()}
 
 
 async def set_thread_prompt(tid: str, text: str) -> bool:
@@ -3197,23 +3316,26 @@ async def run_chat(
             except Exception as e:  # noqa: BLE001 - a reminder, never a failure
                 logger.warning("staleness %s: %r", thread_id, e)
         t_st = round(time.time() - t_st, 3)
+        # this thread's provider/model override + run options (scheduled tasks
+        # too: each task owns a thread) — resolved per run, so a change
+        # applies next turn. Before prefetch: opts can switch it off.
+        s = config.apply_opts(config.effective(s, await get_thread_model(thread_id)),
+                              await get_thread_opts(thread_id))
         pf_task = None
-        if not resume and user_text and bool(s.get("deep_agent", True)):
+        if not resume and user_text and bool(s.get("deep_agent", True)) and not s.get("lb_bare"):
             from . import prefetch
             # started before build_agent (MCP tool load) so its ~0.3-0.7 s
             # usually costs nothing; read before this turn's own user row.
             # Other projects' threads never ride along as hints.
             pf_task = asyncio.ensure_future(prefetch.gather(
                 user_text, await _prior_user_text(thread_id), s,
-                drop_tids=await projects.others_tids(proj and proj["id"])))
+                drop_tids=set(await projects.others_tids(proj and proj["id"]))
+                | (await ephemeral_tids() - {thread_id})))
         await _log(
             thread_id, turn_id, "user",
             meta={"text": _cap(user_text or "[image]", 800),
                   **({"gate": True} if resume else {}), **({"plan": True} if plan else {})},
         )
-        # this thread's provider/model override (scheduled tasks too: each
-        # task owns a thread) — resolved per run, so a change applies next turn
-        s = config.effective(s, await get_thread_model(thread_id))
         agent = await build_agent(s, thread_prompt=await learning.get_thread_prompt(_db, thread_id),
                                   project=proj)
         deep = bool(s.get("deep_agent", True))
