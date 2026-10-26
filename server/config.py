@@ -332,9 +332,10 @@ def effective(s: dict, override: dict | None = None) -> dict:
 #   mcp       — {server: false} drops that server's tools for this thread
 #               (restrict-only: mcp.get_tools keeps ONE cached client set)
 #   memory / skills / compact / review / prefetch — bool feature switches
+#   thinking  — the model's reasoning switch (enable_thinking) for this thread
 #   ephemeral — throwaway: no learning by default, hidden from other threads'
 #               auto-search hints, swept after EPHEMERAL_TTL idle
-THREAD_OPT_FLAGS = ("memory", "skills", "compact", "review", "prefetch")
+THREAD_OPT_FLAGS = ("memory", "skills", "compact", "review", "prefetch", "thinking")
 EPHEMERAL_TTL = 24 * 3600
 
 
@@ -371,6 +372,7 @@ def apply_opts(s: dict, opts: dict | None) -> dict:
          "memory_enabled": flag("memory", s.get("memory_enabled", True), False),
          "skills_enabled": flag("skills", s.get("skills_enabled", True)),
          "compact_enabled": flag("compact", s.get("compact_enabled", True)),
+         "enable_thinking": flag("thinking", bool(s.get("enable_thinking"))),
          "skill_review": {**(s.get("skill_review") or {}),
                           "enabled": flag("review", (s.get("skill_review") or {}).get("enabled", True), False)},
          }

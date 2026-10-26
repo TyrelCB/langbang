@@ -46,7 +46,7 @@
         <button id="btn-game" class="btn ghost" title="X-SIM platformer — G to open, ESC to bail back to chat">⚔ X-SIM</button>
         <button id="btn-tprompt" class="btn ghost" title="instructions for THIS thread only — appended to the system prompt on every run here (scheduled runs too)" disabled>✎ PROMPT</button>
         <button id="btn-topts" class="btn ghost" title="tools + features for THIS thread only — restrict/force tools, bare mode (no tools), auto-learn off, ⌛ temp throwaway">⚙ TOOLS</button>
-        <button id="btn-reasoning" class="btn ghost" title="Show/hide model reasoning">◈ REASONING: ON</button>
+        <button id="btn-reasoning" class="btn ghost" title="model reasoning for THIS thread — click to toggle">◈ THINKING</button>
         <button id="btn-voice" class="btn ghost" title="OFF → SPEAK (read answers aloud) → TALK (hands-free: listen, send on a pause, read the answer, listen again). Per-message 🔊 works regardless">🔊 VOICE: OFF</button>
         <div id="ctx-tag" title="Tokens the model re-reads on the next call (post-compaction)"></div>
         <button id="model-tag" class="btn ghost" type="button" title="model for THIS thread — click to override the global default"></button>
@@ -130,7 +130,7 @@
       <section class="cfg-card" data-tab="model">
         <h3>REASONING</h3>
         <div class="tools-box col">
-          <label class="chk"><input type="checkbox" id="set-thinking"> enable thinking — model drafts reasoning first (extra tokens per turn)</label>
+          <label class="chk"><input type="checkbox" id="set-thinking"> enable thinking — model drafts reasoning first (extra tokens per turn). Default for threads; ◈ THINKING overrides per thread</label>
         </div>
         <div class="row">
           <label>Reasoning effort (while thinking)

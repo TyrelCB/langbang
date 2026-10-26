@@ -79,7 +79,7 @@ blowups, mangled tool calls, stuck scheduled runs — is documented in the
 - **Image generation & editing** — Qwen-Image via ComfyUI; results render inline
 - **Voice** — read-aloud with local streaming [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) (CPU, voice cloning) or gTTS / Google Cloud, with a text normalizer so dates, times, money and tables are spoken correctly; 🎙 speak your messages, or go hands-free with TALK mode (listen → send on a pause → read the answer → listen again)
 - **Phone assistant (IVR)** — `/api/ivr/*` for a telephony bridge: speech in, speech out, backed by a separate, locked-down agent (its own model and tool allowlist, no shell or file writes) that can search your knowledge base and take messages
-- **Per-thread tools + features** (⚙ TOOLS, `/tools`) — restrict or force tools per thread, ∅ bare mode (no tools at all, like llama-server), switch memory / auto-learn / skills / auto-search / compaction per thread; ⌛ temp threads (`/temp`, `/bare`) skip learning, stay out of other threads' hints and are deleted after 24 h idle
+- **Per-thread tools + features** (⚙ TOOLS, `/tools`) — restrict or force tools per thread, ∅ bare mode (no tools at all, like llama-server), switch memory / auto-learn / skills / auto-search / compaction / ◈ thinking per thread; ⌛ temp threads (`/temp`, `/bare`) skip learning, stay out of other threads' hints and are deleted after 24 h idle
 - **Per-thread prompts**, chat search, recap, inline media for any cited file path, and a hidden X-SIM platformer for waiting on slow models
 
 See **[docs/FEATURES.md](docs/FEATURES.md)** for the full reference.

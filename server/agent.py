@@ -2055,6 +2055,7 @@ async def tool_catalog() -> dict:
         "flags": {"memory": bool(s.get("memory_enabled", True)),
                   "skills": bool(s.get("skills_enabled", True)),
                   "compact": bool(s.get("compact_enabled", True)),
+                  "thinking": bool(s.get("enable_thinking")),
                   "review": bool(learning.review_settings(s)["enabled"]),
                   "prefetch": bool(((s.get("rag") or {}).get("prefetch") or {}).get("enabled", True))},
         "ephemeral_ttl": config.EPHEMERAL_TTL,

@@ -5413,6 +5413,7 @@ async function checkHealth() {
   defaultModel = { model: h.model, vision: !!h.supports_vision };
   if (h.max_images) maxImages = h.max_images;
   if (!threadId) syncTModel(null); // a thread's tag/vision come from its override
+  syncTOpts(threadId); // ◈ THINKING shows CONFIG's (possibly new) default
   checkUiVersion(h.ui_version);
   // attach stays offered without vision: non-image files (and images as
   // plain files) ride the upload path — the agent opens them from disk
@@ -5778,24 +5779,53 @@ $("#tprompt-text").addEventListener("keydown", (e) => {
 let toptsSeq = 0, toptsCur = {}, toptsCat = null;
 let draftOpts = null;
 const TOPTS_FLAGS = [["memory", "memory"], ["review", "auto-learn review"],
-  ["skills", "skills"], ["prefetch", "auto-search hints"], ["compact", "context compaction"]];
+  ["skills", "skills"], ["prefetch", "auto-search hints"], ["compact", "context compaction"],
+  ["thinking", "thinking (◈ button)"]];
 const optsSet = (o) => !!o && Object.keys(o).length > 0;
 function paintTOpts(o) {
   const b = $("#btn-topts");
   const off = Object.values(o.tools || {}).filter((v) => !v).length + Object.keys(o.mcp || {}).length;
-  const flags = TOPTS_FLAGS.filter(([k]) => k in o).length + Object.values(o.tools || {}).filter((v) => v).length;
+  // thinking has its own ◈ button — not counted on ⚙ TOOLS
+  const flags = TOPTS_FLAGS.filter(([k]) => k in o && k !== "thinking").length + Object.values(o.tools || {}).filter((v) => v).length;
   b.textContent = o.bare ? "∅ BARE" : "⚙ TOOLS" + (off ? ` −${off}` : "") + (flags ? ` ±${flags}` : "");
   if (o.ephemeral) b.textContent = "⌛ " + b.textContent;
-  b.classList.toggle("on", optsSet(o));
+  b.classList.toggle("on", Object.keys(o).some((k) => k !== "thinking"));
+  paintThinking();
+}
+// ◈ THINKING: this thread's reasoning switch (opts.thinking; absent =
+// CONFIG's enable_thinking). Cards always render when reasoning exists.
+function paintThinking() {
+  const b = $("#btn-reasoning"), def = !!toptsCat?.flags.thinking;
+  const over = "thinking" in toptsCur, on = over ? !!toptsCur.thinking : def;
+  b.textContent = (over ? "◇ " : "") + "◈ THINKING: " + (on ? "ON" : "OFF");
+  b.classList.toggle("on", on);
+  b.title = `model reasoning for THIS thread — ${on ? "on" : "off"}` + (over ? ` (override; CONFIG default: ${def ? "on" : "off"})` : " (CONFIG default)")
+    + ". Click to toggle; applies from the next message.";
+}
+async function toggleThinking() {
+  if (!toptsCat) return;
+  SFX.play("click");
+  const def = !!toptsCat.flags.thinking;
+  const on = !("thinking" in toptsCur ? toptsCur.thinking : def);
+  const o = { ...toptsCur };
+  if (on === def) delete o.thinking; else o.thinking = on; // back to default = inherit
+  const tid = threadId;
+  if (!tid) { draftOpts = optsSet(o) ? o : null; toptsCur = o; paintTOpts(o); return; }
+  try {
+    const r = await J(await fetch(`/api/threads/${tid}/opts`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ opts: o }),
+    }));
+    if (tid === threadId) { toptsCur = r.opts || {}; paintTOpts(toptsCur); }
+  } catch { SFX.play("error"); }
 }
 async function syncTOpts(tid) {
   const seq = ++toptsSeq;
-  if (!tid) { toptsCur = draftOpts || {}; paintTOpts(toptsCur); return; }
-  toptsCur = {}; paintTOpts(toptsCur);
-  let r;
-  try { r = await J(await fetch(`/api/threads/${tid}/opts`)); } catch { return; }
+  toptsCur = tid ? {} : draftOpts || {}; paintTOpts(toptsCur);
+  let r; // drafts fetch too: the catalog carries CONFIG's defaults (◈ needs them)
+  try { r = await J(await fetch(`/api/threads/${tid || "_"}/opts`)); } catch { return; }
   if (seq !== toptsSeq || tid !== threadId) return; // switched away meanwhile
-  toptsCur = r.opts || {}; toptsCat = r.catalog;
+  toptsCat = r.catalog;
+  toptsCur = tid ? r.opts || {} : draftOpts || {};
   paintTOpts(toptsCur);
 }
 function toptsRender(o) {
@@ -7421,20 +7451,8 @@ $("#btn-sound").onclick = () => {
 if (localStorage.getItem("lb-sound") === "on")
   $("#btn-sound").textContent = "♪ SOUND: ON";
 
-// reasoning-card visibility (per browser; server decides whether the model thinks)
-function applyReasoningVis() {
-  const on = localStorage.getItem("lb-reasoning") !== "off";
-  document.body.classList.toggle("hide-reasoning", !on);
-  $("#btn-reasoning").textContent = "◈ REASONING: " + (on ? "ON" : "OFF");
-  $("#btn-reasoning").classList.toggle("on", on);
-}
-$("#btn-reasoning").onclick = () => {
-  SFX.play("click");
-  localStorage.setItem("lb-reasoning",
-    localStorage.getItem("lb-reasoning") === "off" ? "on" : "off");
-  applyReasoningVis();
-};
-applyReasoningVis();
+$("#btn-reasoning").onclick = toggleThinking;
+try { localStorage.removeItem("lb-reasoning"); } catch {} // retired card-hiding toggle
 
 // read-aloud toggle (per browser; provider is server CONFIG)
 function applyVoiceMode() {

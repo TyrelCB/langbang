@@ -134,7 +134,6 @@ button, .thread .a, .thread .x { touch-action: manipulation; }
 #ctx-tag { white-space: nowrap; }
 #btn-reasoning { font: inherit; font-size: 12px; letter-spacing: 1px; padding: 3px 10px; }
 #btn-reasoning.on { color: var(--cyan); border-color: var(--cyan-dim); }
-body.hide-reasoning .block.thinking { display: none; }
 /* ellipsized so long titles can never re-flow the topbar (phone: one line) */
 #chat-title { color: var(--orange); letter-spacing: 2px; flex: 1; min-width: 90px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
