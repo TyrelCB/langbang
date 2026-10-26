@@ -5974,18 +5974,19 @@ function renderBenchBoard(d) {
   tb.appendChild(head);
   for (const [b, name] of Object.entries(d.benches)) {
     const tr = el("tr"), nm = el("td", "bt-name", name);
-    nm.appendChild(el("span", "hint", `${d.dataset.n || "?"} questions`));
+    const N = (d.dataset[b] || {}).n;
+    nm.appendChild(el("span", "hint", `${N || "?"} ${b === "terminal_bench" ? "tasks" : "questions"}`));
     tr.appendChild(nm);
-    const best = Math.max(...list.map((c) => (c.cells[b] && c.cells[b].done && c.cells[b].r.scored === d.dataset.n) ? c.cells[b].r.acc : -1));
+    const best = Math.max(...list.map((c) => (c.cells[b] && c.cells[b].done && c.cells[b].r.scored === N) ? c.cells[b].r.acc : -1));
     for (const c of list) {
       const cell = c.cells[b], td = el("td");
       if (!cell) { td.textContent = "--"; tr.appendChild(td); continue; }
       const r = cell.r;
       td.appendChild(el("span", "bt-acc", r.acc.toFixed(1) + (cell.done ? "" : "…")));
-      td.appendChild(el("span", "bt-sub", `${r.correct}/${r.scored}` + (r.scored < r.n ? ` of ${r.n}` : "") + (r.n < d.dataset.n ? ` (subset)` : "")
+      td.appendChild(el("span", "bt-sub", `${r.correct}/${r.scored}` + (r.scored < r.n ? ` of ${r.n}` : "") + (r.n < N ? ` (subset)` : "")
         + (r.truncated ? ` · ${r.truncated} cut` : "")));
       td.title = `${r.provider} · ${r.model}\n${benchParamsTxt(r.params)}\nno answer: ${r.no_answer} · truncated: ${r.truncated} · errors: ${r.errors}\navg ${r.avg_tokens ?? "?"} tokens/answer`;
-      if (cell.done && r.scored === d.dataset.n && r.acc === best) td.classList.add("top");
+      if (cell.done && r.scored === N && r.acc === best) td.classList.add("top");
       tr.appendChild(td);
     }
     tb.appendChild(tr);
@@ -6017,14 +6018,31 @@ function renderBenchRuns(d) {
     box.appendChild(card);
   }
 }
-const BENCH_NAMES = {};
+const BENCH_NAMES = {}, BENCH_OF = {};
+const BENCH_ABOUT = {
+  gpqa_diamond: "198 grad-level science MCQs; same seeded question order + answer shuffle for every model",
+  terminal_bench: "89 shell tasks, each in its own container, solved by Harbor's terminus-2 agent with your model; pass = the task's tests pass. Slow: minutes per task",
+};
+function benchFormSync() {
+  const b = $("#bench-bench").value, N = (benchData?.dataset[b] || {}).n || (b === "terminal_bench" ? 89 : 198);
+  $("#bench-about").textContent = BENCH_ABOUT[b] || "";
+  const sel = $("#bench-n"), keep = sel.value;
+  sel.innerHTML = "";
+  for (const v of (b === "terminal_bench" ? [5, 20, 50] : [20, 50, 100]).filter((v) => v < N)) sel.appendChild(new Option(`${v}` + (v <= 20 ? " — quick look" : ""), v));
+  sel.appendChild(new Option(`${N} — full`, N));
+  sel.value = [...sel.options].some((o) => o.value === keep) ? keep : String(N);
+  $("#btn-bench-run").disabled = !(benchData?.dataset[b] || {}).ok;
+}
 async function benchItems(rid, card) {
   let its;
   try { its = (await J(await fetch(`/api/bench/runs/${rid}`))).items; } catch { return; }
   const grid = card.querySelector(".bench-items"); if (!grid) return;
   for (const it of its) {
+    const tb = BENCH_OF[rid] === "terminal_bench";
     const b = el("span", "bi " + (it.error ? "err" : !it.pred ? "none" : it.correct ? "ok" : "bad"));
-    b.title = `#${it.idx + 1} · gold ${it.gold} · answered ${it.pred || "—"}` + (it.finish === "length" ? " · hit max tokens" : "")
+    b.title = tb ? `${it.qid} (${it.gold}) · ${it.pred || "—"}` + (it.finish && it.finish !== "done" ? ` · ${it.finish}` : "")
+      + (it.out_tokens ? ` · ${it.out_tokens} out / ${it.reasoning_chars ?? "?"} in tok` : "") + (it.secs ? ` · ${fmtDur(Math.round(it.secs))}` : "") + (it.error ? `\n${it.error}` : "")
+      : `#${it.idx + 1} · gold ${it.gold} · answered ${it.pred || "—"}` + (it.finish === "length" ? " · hit max tokens" : "")
       + (it.out_tokens ? ` · ${it.out_tokens} tok` : "") + (it.secs ? ` · ${it.secs}s` : "") + (it.error ? `\n${it.error}` : "");
     b.onclick = () => { benchDetail = { rid, idx: it.idx }; benchShowItem(card); };
     grid.appendChild(b);
@@ -6037,9 +6055,13 @@ async function benchShowItem(card) {
   try { it = await J(await fetch(`/api/bench/runs/${rid}/items/${idx}`)); } catch { return; }
   card.querySelector(".bench-detail")?.remove();
   const d = el("div", "bench-detail");
-  d.appendChild(el("div", "", `#${idx + 1} · gold ${it.gold} · answered ${it.pred || "— (no Answer: line)"} · ${it.correct ? "✓" : "✗"}`
+  const tb = BENCH_OF[rid] === "terminal_bench";
+  d.appendChild(el("div", "", tb
+    ? `${it.qid} · ${it.gold} · ${it.correct ? "✓ PASS — tests pass" : it.error ? "⚠ error" : "✗ FAIL"} · ${it.out_tokens ?? "?"} out / ${it.reasoning_chars ?? "?"} in tokens · ${fmtDur(Math.round(it.secs || 0))} · ${it.finish || ""}`
+    : `#${idx + 1} · gold ${it.gold} · answered ${it.pred || "— (no Answer: line)"} · ${it.correct ? "✓" : "✗"}`
     + ` · ${it.out_tokens ?? "?"} tokens (${it.reasoning_chars ?? 0} chars thinking) · ${it.secs}s · finish ${it.finish || "?"}`));
-  const q = el("details"); q.appendChild(el("summary", "", "question")); q.appendChild(el("pre", "", it.prompt)); d.appendChild(q);
+  if (tb) d.appendChild(el("div", "hint", "below: the agent's final terminal screen"));
+  const q = el("details"); q.appendChild(el("summary", "", tb ? "task instruction" : "question")); q.appendChild(el("pre", "", it.prompt)); d.appendChild(q);
   d.appendChild(el("pre", "", it.error || it.text || "(empty answer)"));
   card.appendChild(d);
 }
@@ -6049,20 +6071,30 @@ async function refreshBench() {
   try { d = await J(await fetch("/api/bench")); } catch { return; }
   benchData = d;
   Object.assign(BENCH_NAMES, d.benches);
-  const ds = d.dataset, dsb = $("#bench-ds"); dsb.innerHTML = "";
-  if (ds.ok) dsb.textContent = `GPQA Diamond dataset: ${ds.n} questions (local, data/bench — never committed)`;
-  else {
-    dsb.textContent = ds.has_token ? "GPQA Diamond isn't downloaded yet (gated on Hugging Face; uses your HF token). "
-      : "GPQA Diamond needs a Hugging Face token with access to Idavidrein/gpqa (HF_TOKEN or huggingface-cli login). ";
-    const b = el("button", "btn ghost", "⇩ DOWNLOAD"); b.type = "button";
-    b.onclick = async () => {
-      b.disabled = true; b.textContent = "downloading…";
-      try { await J(await fetch("/api/bench/dataset", { method: "POST" })); } catch (e) { dsb.textContent = "download failed: " + e.message; return; }
-      refreshBench();
-    };
-    dsb.appendChild(b);
-  }
-  $("#btn-bench-run").disabled = !ds.ok;
+  for (const r of d.runs) BENCH_OF[r.id] = r.bench;
+  const dsb = $("#bench-ds"); dsb.innerHTML = "";
+  const line = (bid, txt, dl) => {
+    const row = el("div", "", txt);
+    if (dl) {
+      const b = el("button", "btn ghost", "⇩ DOWNLOAD"); b.type = "button";
+      b.onclick = async () => {
+        b.disabled = true; b.textContent = "downloading…";
+        try { await J(await fetch(`/api/bench/dataset?bench_id=${bid}`, { method: "POST" })); } catch (e) { row.textContent = "download failed: " + e.message; return; }
+        refreshBench();
+      };
+      row.append(" ", b);
+    }
+    dsb.appendChild(row);
+  };
+  const g = d.dataset.gpqa_diamond, t = d.dataset.terminal_bench;
+  line("gpqa_diamond", g.ok ? `GPQA Diamond: ${g.n} questions (local, data/bench — never committed)`
+    : g.has_token ? "GPQA Diamond isn't downloaded yet (gated on Hugging Face; uses your HF token)."
+    : "GPQA Diamond needs a Hugging Face token with access to Idavidrein/gpqa (HF_TOKEN or huggingface-cli login).", !g.ok);
+  line("terminal_bench", !t.harbor ? "Terminal-Bench needs Harbor: run `uv tool install harbor` on this box."
+    : !t.docker ? "Terminal-Bench needs Docker on this box."
+    : t.n ? `Terminal-Bench 2.0: ${t.n} tasks via Harbor + Docker · ${t.free_gb} GB free (task images are removed after each task)`
+    : "Terminal-Bench 2.0 task definitions aren't downloaded yet (≈50 MB; images are pulled per task).", t.harbor && t.docker && !t.n);
+  benchFormSync();
   renderBenchBoard(d);
   renderBenchRuns(d);
 }
@@ -6090,7 +6122,12 @@ async function openBench() {
       fillModels($("#dl-bench-models"), { provider: sel.value });
     };
     sel.onchange = fill; fill();
-    const D = (await J(await fetch("/api/bench"))).defaults;
+    const bd = await J(await fetch("/api/bench")), D = bd.defaults;
+    benchData = bd;
+    const bs = $("#bench-bench");
+    for (const [k, v] of Object.entries(bd.benches)) bs.appendChild(new Option(v, k));
+    bs.onchange = benchFormSync;
+    $("#bench-ctx").value = D.context;
     $("#bench-conc").value = D.concurrency; $("#bench-max").value = D.max_tokens;
     $("#bench-budget").value = D.budget; $("#bench-temp").value = D.temperature;
     $("#bench-thinking").value = D.thinking ? "1" : "0";
@@ -6107,9 +6144,10 @@ $("#bench-panel").onclick = (e) => { if (e.target.id === "bench-panel") closeBen
 $("#btn-bench-run").onclick = async () => {
   SFX.play("click");
   const num = (id, d) => { const v = parseFloat($(id).value); return Number.isFinite(v) ? v : d; };
-  const body = { bench: "gpqa_diamond", provider: $("#bench-provider").value, model: $("#bench-model").value.trim(),
+  const body = { bench: $("#bench-bench").value, provider: $("#bench-provider").value, model: $("#bench-model").value.trim(),
     params: { n: parseInt($("#bench-n").value), concurrency: num("#bench-conc", 1), max_tokens: num("#bench-max", 32768),
-      thinking: $("#bench-thinking").value === "1", budget: num("#bench-budget", 0), temperature: num("#bench-temp", 0.6) } };
+      thinking: $("#bench-thinking").value === "1", budget: num("#bench-budget", 0), temperature: num("#bench-temp", 0.6),
+      context: num("#bench-ctx", 131072) } };
   $("#bench-msg").textContent = "";
   try { await J(await fetch("/api/bench/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })); }
   catch (e) { $("#bench-msg").textContent = "start failed: " + e.message; return; }

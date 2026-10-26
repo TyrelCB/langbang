@@ -407,9 +407,9 @@ async def bench_overview():
 
 
 @app.post("/api/bench/dataset")
-async def bench_dataset():
+async def bench_dataset(bench_id: str = "gpqa_diamond"):
     try:
-        return await bench.download()
+        return await bench.download(bench_id)
     except Exception as e:  # noqa: BLE001 - surfaced to the panel
         raise HTTPException(400, str(e))
 
