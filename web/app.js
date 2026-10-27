@@ -6016,7 +6016,7 @@ function renderBenchBoard(d) {
   for (const [b, name] of Object.entries(d.benches)) {
     const tr = el("tr"), nm = el("td", "bt-name", name);
     const N = (d.dataset[b] || {}).n;
-    nm.appendChild(el("span", "hint", `${N || "?"} ${b === "terminal_bench" ? "tasks" : "questions"}`));
+    nm.appendChild(el("span", "hint", `${N || "?"} ${b === "terminal_bench" ? "tasks" : b === "ifeval" ? "prompts · prompt strict" : "questions"}`));
     tr.appendChild(nm);
     const best = Math.max(...list.map((c) => (c.cells[b] && c.cells[b].done && c.cells[b].r.scored === N) ? c.cells[b].r.acc : -1));
     for (const c of list) {
@@ -6026,7 +6026,9 @@ function renderBenchBoard(d) {
       td.appendChild(el("span", "bt-acc", r.acc.toFixed(1) + (cell.done ? "" : "…")));
       td.appendChild(el("span", "bt-sub", `${r.correct}/${r.scored}` + (r.scored < r.n ? ` of ${r.n}` : "") + (r.n < N ? ` (subset)` : "")
         + (r.truncated ? ` · ${r.truncated} cut` : "")));
-      td.title = `${r.provider} · ${r.model}\n${benchParamsTxt(r.params)}\nno answer: ${r.no_answer} · truncated: ${r.truncated} · errors: ${r.errors}\navg ${r.avg_tokens ?? "?"} tokens/answer`;
+      if (r.inst_strict != null) td.appendChild(el("span", "bt-sub", `inst ${r.inst_strict} · loose ${r.prompt_loose}`));
+      td.title = `${r.provider} · ${r.model}\n${benchParamsTxt(r.params)}`
+        + (r.inst_strict != null ? `\nprompt strict ${r.acc} · inst strict ${r.inst_strict} · prompt loose ${r.prompt_loose} · inst loose ${r.inst_loose}` : "") + `\nno answer: ${r.no_answer} · truncated: ${r.truncated} · errors: ${r.errors}\navg ${r.avg_tokens ?? "?"} tokens/answer`;
       if (cell.done && r.scored === N && r.acc === best) td.classList.add("top");
       tr.appendChild(td);
     }
@@ -6050,6 +6052,7 @@ function renderBenchRuns(d) {
     head.appendChild(el("span", "br-meta",
       `${r.done}/${r.n} answered · ${r.correct} correct` + (r.no_answer ? ` · ${r.no_answer} no answer` : "")
       + (r.truncated ? ` · ${r.truncated} hit max tokens` : "") + (r.errors ? ` · ${r.errors} errors` : "")
+      + (r.inst_strict != null ? ` · inst-strict ${r.inst_strict}% · prompt-loose ${r.prompt_loose}%` : "")
       + (r.avg_tokens ? ` · ~${r.avg_tokens} tok/answer` : "") + ` · ${fmtDur(r.secs)} model time · ${benchParamsTxt(r.params)}`
       + (r.error ? ` · ⚠ ${r.error}` : "")));
     card.appendChild(head);
@@ -6062,6 +6065,7 @@ function renderBenchRuns(d) {
 const BENCH_NAMES = {}, BENCH_OF = {};
 const BENCH_ABOUT = {
   gpqa_diamond: "198 grad-level science MCQs; same seeded question order + answer shuffle for every model",
+  ifeval: "541 prompts with verifiable formatting instructions (word counts, no commas, JSON, sections…), checked by Google's IFEval code. Score = prompt-level strict; greedy (T 0) is the usual setting",
   terminal_bench: "89 shell tasks, each in its own container, solved by Harbor's terminus-2 agent with your model; pass = the task's tests pass. Slow: minutes per task",
 };
 function benchFormSync() {
@@ -6069,19 +6073,25 @@ function benchFormSync() {
   $("#bench-about").textContent = BENCH_ABOUT[b] || "";
   const sel = $("#bench-n"), keep = sel.value;
   sel.innerHTML = "";
-  for (const v of (b === "terminal_bench" ? [5, 20, 50] : [20, 50, 100]).filter((v) => v < N)) sel.appendChild(new Option(`${v}` + (v <= 20 ? " — quick look" : ""), v));
+  for (const v of ({ terminal_bench: [5, 20, 50], ifeval: [50, 100, 200] }[b] || [20, 50, 100]).filter((v) => v < N)) sel.appendChild(new Option(`${v}` + (v <= 20 ? " — quick look" : ""), v));
   sel.appendChild(new Option(`${N} — full`, N));
   sel.value = [...sel.options].some((o) => o.value === keep) ? keep : String(N);
   $("#btn-bench-run").disabled = !(benchData?.dataset[b] || {}).ok;
+}
+function benchBenchChanged() { // IFEval is conventionally greedy; the others sample at 0.6
+  $("#bench-temp").value = $("#bench-bench").value === "ifeval" ? 0 : (benchData?.defaults.temperature ?? 0.6);
+  benchFormSync();
 }
 async function benchItems(rid, card) {
   let its;
   try { its = (await J(await fetch(`/api/bench/runs/${rid}`))).items; } catch { return; }
   const grid = card.querySelector(".bench-items"); if (!grid) return;
   for (const it of its) {
-    const tb = BENCH_OF[rid] === "terminal_bench";
+    const tb = BENCH_OF[rid] === "terminal_bench", ife = BENCH_OF[rid] === "ifeval";
     const b = el("span", "bi " + (it.error ? "err" : !it.pred ? "none" : it.correct ? "ok" : "bad"));
-    b.title = tb ? `${it.qid} (${it.gold}) · ${it.pred || "—"}` + (it.finish && it.finish !== "done" ? ` · ${it.finish}` : "")
+    b.title = ife ? `#${it.idx + 1} · ${it.pred || "—"} instructions followed (strict)` + (it.finish === "length" ? " · hit max tokens" : "")
+      + (it.extra ? "\n" + it.extra.ids.map((id, k) => (it.extra.strict[k] ? "✓ " : "✗ ") + id).join("\n") : "") + (it.error ? `\n${it.error}` : "")
+      : tb ? `${it.qid} (${it.gold}) · ${it.pred || "—"}` + (it.finish && it.finish !== "done" ? ` · ${it.finish}` : "")
       + (it.out_tokens ? ` · ${it.out_tokens} out / ${it.reasoning_chars ?? "?"} in tok` : "") + (it.secs ? ` · ${fmtDur(Math.round(it.secs))}` : "") + (it.error ? `\n${it.error}` : "")
       : `#${it.idx + 1} · gold ${it.gold} · answered ${it.pred || "—"}` + (it.finish === "length" ? " · hit max tokens" : "")
       + (it.out_tokens ? ` · ${it.out_tokens} tok` : "") + (it.secs ? ` · ${it.secs}s` : "") + (it.error ? `\n${it.error}` : "");
@@ -6096,8 +6106,14 @@ async function benchShowItem(card) {
   try { it = await J(await fetch(`/api/bench/runs/${rid}/items/${idx}`)); } catch { return; }
   card.querySelector(".bench-detail")?.remove();
   const d = el("div", "bench-detail");
-  const tb = BENCH_OF[rid] === "terminal_bench";
-  d.appendChild(el("div", "", tb
+  const tb = BENCH_OF[rid] === "terminal_bench", ife = BENCH_OF[rid] === "ifeval";
+  if (ife) {
+    d.appendChild(el("div", "", `#${idx + 1} · ${it.correct ? "✓ all instructions followed" : "✗ missed some"} (strict ${it.pred || "—"})`
+      + ` · ${it.out_tokens ?? "?"} tokens · ${it.secs}s · finish ${it.finish || "?"}`));
+    if (it.extra) for (const [k, id] of it.extra.ids.entries())
+      d.appendChild(el("div", it.extra.strict[k] ? "" : "hint", `${it.extra.strict[k] ? "✓" : it.extra.loose[k] ? "≈" : "✗"} ${id}`
+        + (!it.extra.strict[k] && it.extra.loose[k] ? " (passes loose)" : "")));
+  } else d.appendChild(el("div", "", tb
     ? `${it.qid} · ${it.gold} · ${it.correct ? "✓ PASS — tests pass" : it.error ? "⚠ error" : "✗ FAIL"} · ${it.out_tokens ?? "?"} out / ${it.reasoning_chars ?? "?"} in tokens · ${fmtDur(Math.round(it.secs || 0))} · ${it.finish || ""}`
     : `#${idx + 1} · gold ${it.gold} · answered ${it.pred || "— (no Answer: line)"} · ${it.correct ? "✓" : "✗"}`
     + ` · ${it.out_tokens ?? "?"} tokens (${it.reasoning_chars ?? 0} chars thinking) · ${it.secs}s · finish ${it.finish || "?"}`));
@@ -6127,10 +6143,12 @@ async function refreshBench() {
     }
     dsb.appendChild(row);
   };
-  const g = d.dataset.gpqa_diamond, t = d.dataset.terminal_bench;
+  const g = d.dataset.gpqa_diamond, t = d.dataset.terminal_bench, f = d.dataset.ifeval;
   line("gpqa_diamond", g.ok ? `GPQA Diamond: ${g.n} questions (local, data/bench — never committed)`
     : g.has_token ? "GPQA Diamond isn't downloaded yet (gated on Hugging Face; uses your HF token)."
     : "GPQA Diamond needs a Hugging Face token with access to Idavidrein/gpqa (HF_TOKEN or huggingface-cli login).", !g.ok);
+  line("ifeval", f.ok ? `IFEval: ${f.n} prompts (google/IFEval + nltk punkt_tab, local)`
+    : "IFEval isn't downloaded yet (≈200 KB prompts + nltk tokenizer data).", !f.ok);
   line("terminal_bench", !t.harbor ? "Terminal-Bench needs Harbor: run `uv tool install harbor` on this box."
     : !t.docker ? "Terminal-Bench needs Docker on this box."
     : t.n ? `Terminal-Bench 2.0: ${t.n} tasks via Harbor + Docker · ${t.free_gb} GB free (task images are removed after each task)`
@@ -6167,7 +6185,7 @@ async function openBench() {
     benchData = bd;
     const bs = $("#bench-bench");
     for (const [k, v] of Object.entries(bd.benches)) bs.appendChild(new Option(v, k));
-    bs.onchange = benchFormSync;
+    bs.onchange = benchBenchChanged;
     $("#bench-ctx").value = D.context;
     $("#bench-conc").value = D.concurrency; $("#bench-max").value = D.max_tokens;
     $("#bench-budget").value = D.budget; $("#bench-temp").value = D.temperature;

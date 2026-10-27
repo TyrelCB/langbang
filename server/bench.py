@@ -1,4 +1,4 @@
-"""▤ BENCH — model/provider evaluations: GPQA Diamond + Terminal-Bench 2.0.
+"""▤ BENCH — model/provider evaluations: GPQA Diamond, IFEval, Terminal-Bench 2.0.
 
 GPQA Diamond: 198 graduate-level 4-choice science questions (Rein et al.).
 The dataset is gated on Hugging Face and its authors ask that it never be
@@ -13,6 +13,12 @@ persisted as it lands (running totals, and a stopped / restarted run
 resumes where it left off). Requests go straight to the provider's
 /chat/completions with LangBang's thinking controls (agent.extra_body:
 enable_thinking, reasoning effort, llama-server thinking budget).
+
+IFEval (541 prompts with verifiable formatting instructions, google/IFEval):
+scored by Google's checkers, vendored from lm-eval in server/ifeval/.
+Headline = prompt-level strict accuracy (every instruction in the prompt
+followed); instruction-level and "loose" (lenient on markdown/first/last
+line) are kept per answer in items.extra.
 
 Terminal-Bench 2.0 (89 agentic shell tasks, each in its own container):
 run through Harbor (`uv tool install harbor`) with its reference
@@ -47,11 +53,15 @@ BENCH_DIR = os.path.join(config.DATA_DIR, "bench")
 DB_PATH = os.path.join(config.DATA_DIR, "bench.db")
 GPQA_CSV = os.path.join(BENCH_DIR, "gpqa_diamond.csv")
 GPQA_URL = "https://huggingface.co/datasets/Idavidrein/gpqa/resolve/main/gpqa_diamond.csv"
+IFE_PATH = os.path.join(BENCH_DIR, "ifeval_input_data.jsonl")
+IFE_URL = "https://huggingface.co/datasets/google/IFEval/resolve/main/ifeval_input_data.jsonl"
+NLTK_DIR = os.path.join(BENCH_DIR, "nltk_data")  # punkt_tab for the IFEval checkers
+THINK_RE = re.compile(r"(?s)^.*?</think>\s*")  # reasoning leaked into content (reasoning_format none)
 TB_DIR = os.path.join(BENCH_DIR, "terminal-bench-2.0")
 JOBS_DIR = os.path.join(BENCH_DIR, "jobs")
 TB_DATASET = "terminal-bench@2.0"
 MIN_FREE_GB = 8  # a task image is ≤ ~1.5 GB; stop starting tasks below this
-BENCHES = {"gpqa_diamond": "GPQA Diamond", "terminal_bench": "Terminal-Bench 2.0"}
+BENCHES = {"gpqa_diamond": "GPQA Diamond", "ifeval": "IFEval", "terminal_bench": "Terminal-Bench 2.0"}
 LETTERS = "ABCD"
 # simple-evals' GPQA zero-shot CoT prompt
 PROMPT = ("Answer the following multiple choice question. The last line of your response "
@@ -138,14 +148,35 @@ def tb_tasks() -> list[dict]:
     return out
 
 
+_ife: list[dict] | None = None
+
+
+def ife_items() -> list[dict]:
+    """IFEval prompts in the fixed benchmark order ([] = not downloaded)."""
+    global _ife
+    if _ife is not None:
+        return _ife
+    try:
+        docs = [json.loads(line) for line in open(IFE_PATH, encoding="utf-8") if line.strip()]
+    except (OSError, ValueError):
+        return []
+    out = [{"qid": str(d["key"]), "gold": ",".join(i.split(":")[-1] for i in d["instruction_id_list"]),
+            "domain": "", "prompt": d["prompt"], "doc": d} for d in docs]
+    out.sort(key=lambda x: _h("order:" + x["qid"]))
+    _ife = out or None
+    return out
+
+
 def bench_items(bench: str) -> list[dict]:
-    return items() if bench == "gpqa_diamond" else tb_tasks()
+    return {"gpqa_diamond": items, "ifeval": ife_items}.get(bench, tb_tasks)()
 
 
 def dataset_status() -> dict:
     hb = os.path.exists(harbor_bin())
     return {
         "gpqa_diamond": {"ok": bool(items()), "n": len(items()), "has_token": bool(_hf_token())},
+        "ifeval": {"ok": bool(ife_items()) and os.path.isdir(os.path.join(NLTK_DIR, "tokenizers", "punkt_tab")),
+                   "n": len(ife_items())},
         "terminal_bench": {"ok": bool(tb_tasks()) and hb and bool(shutil.which("docker")),
                            "n": len(tb_tasks()), "harbor": hb, "docker": bool(shutil.which("docker")),
                            "free_gb": round(shutil.disk_usage(config.DATA_DIR).free / 2**30, 1)},
@@ -155,6 +186,8 @@ def dataset_status() -> dict:
 async def download(bench: str = "gpqa_diamond") -> dict:
     if bench == "terminal_bench":
         return await _download_tb()
+    if bench == "ifeval":
+        return await _download_ife()
     global _items
     tok = _hf_token()
     if not tok:
@@ -171,6 +204,20 @@ async def download(bench: str = "gpqa_diamond") -> dict:
     open(tmp, "wb").write(r.content)
     os.replace(tmp, GPQA_CSV)
     _items = None
+    return dataset_status()
+
+
+async def _download_ife() -> dict:
+    global _ife
+    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as c:
+        r = await c.get(IFE_URL)
+    r.raise_for_status()
+    os.makedirs(BENCH_DIR, exist_ok=True)
+    open(IFE_PATH + ".tmp", "wb").write(r.content)
+    os.replace(IFE_PATH + ".tmp", IFE_PATH)
+    from .ifeval import instructions_util  # nltk punkt_tab, into our data dir
+    await asyncio.to_thread(instructions_util.download_nltk_resources, NLTK_DIR)
+    _ife = None
     return dataset_status()
 
 
@@ -220,6 +267,10 @@ async def init() -> None:
           correct INTEGER, out_tokens INTEGER, reasoning_chars INTEGER, secs REAL,
           finish TEXT, error TEXT, text TEXT, PRIMARY KEY(run_id, idx));
     """)
+    try:  # IFEval per-instruction results (JSON); older DBs predate it
+        await _db.execute("ALTER TABLE items ADD COLUMN extra TEXT")
+    except aiosqlite.OperationalError:
+        pass
     # a restart killed whatever was running: answers are kept. GPQA runs
     # carry straight on (only the in-flight questions are re-asked);
     # Terminal-Bench ones wait for a manual RESUME — langbang.service is
@@ -256,7 +307,15 @@ async def _stats(rid: str) -> dict:
         "SUM(finish='length'), AVG(out_tokens), SUM(secs) FROM items WHERE run_id=?", (rid,))
     done, ok, nopred, err, cut, tok, secs = await cur.fetchone()
     scored = (done or 0) - (err or 0)
-    return {"done": done or 0, "correct": ok or 0, "scored": scored,
+    sub = {}
+    cur = await _db.execute("SELECT extra FROM items WHERE run_id=? AND extra IS NOT NULL", (rid,))
+    ex = [json.loads(r[0]) for r in await cur.fetchall()]
+    if ex:  # IFEval: instruction-level + loose (lm-eval's metric definitions)
+        ns = sum(len(e["strict"]) for e in ex)
+        sub = {"inst_strict": round(100 * sum(sum(e["strict"]) for e in ex) / ns, 1) if ns else None,
+               "inst_loose": round(100 * sum(sum(e["loose"]) for e in ex) / ns, 1) if ns else None,
+               "prompt_loose": round(100 * sum(e["prompt_loose"] for e in ex) / len(ex), 1)}
+    return {**sub, "done": done or 0, "correct": ok or 0, "scored": scored,
             "acc": round(100 * (ok or 0) / scored, 1) if scored else None,
             "no_answer": nopred or 0, "errors": err or 0, "truncated": cut or 0,
             "avg_tokens": round(tok) if tok else None, "secs": round(secs or 0)}
@@ -269,11 +328,14 @@ async def list_runs() -> list[dict]:
 
 async def run_items(rid: str, full: bool = False) -> list[dict]:
     cur = await _db.execute(
-        "SELECT idx,qid,gold,pred,correct,out_tokens,reasoning_chars,secs,finish,error"
+        "SELECT idx,qid,gold,pred,correct,out_tokens,reasoning_chars,secs,finish,error,extra"
         + (",text" if full else "") + " FROM items WHERE run_id=? ORDER BY idx", (rid,))
     keys = ["idx", "qid", "gold", "pred", "correct", "out_tokens", "reasoning_chars",
-            "secs", "finish", "error"] + (["text"] if full else [])
-    return [dict(zip(keys, r)) for r in await cur.fetchall()]
+            "secs", "finish", "error", "extra"] + (["text"] if full else [])
+    out = [dict(zip(keys, r)) for r in await cur.fetchall()]
+    for o in out:
+        o["extra"] = json.loads(o["extra"]) if o["extra"] else None
+    return out
 
 
 async def item(rid: str, idx: int) -> dict | None:
@@ -343,7 +405,39 @@ async def _one(c: httpx.AsyncClient, rid: str, idx: int, q: dict, s: dict, p: di
     except Exception as e:  # noqa: BLE001 - one failed question never kills the run
         row = (rid, idx, q["qid"], q["gold"], "", 0, None, None, round(time.time() - t0, 1),
                None, f"{type(e).__name__}: {e}"[:400], "")
-    await _write("INSERT OR REPLACE INTO items VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", row)
+    await _write("INSERT OR REPLACE INTO items VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL)", row)
+
+
+def _ife_score(doc: dict, text: str) -> dict:
+    from .ifeval import instructions_util, utils as ife
+    instructions_util.download_nltk_resources(NLTK_DIR)  # path only; data is there
+    return ife.process_results(doc, [text])
+
+
+async def _one_ife(c: httpx.AsyncClient, rid: str, idx: int, q: dict, s: dict, p: dict) -> None:
+    t0 = time.time()
+    extra = None
+    try:
+        j = await _ask(c, s, q["prompt"], float(p["temperature"]))
+        ch = j["choices"][0]
+        msg = ch.get("message") or {}
+        text = msg.get("content") or ""
+        rc = msg.get("reasoning_content") or msg.get("reasoning") or ""
+        if "</think>" in text:
+            text = THINK_RE.sub("", text, count=1)
+        r = await asyncio.to_thread(_ife_score, q["doc"], text)
+        strict, loose = r["inst_level_strict_acc"], r["inst_level_loose_acc"]
+        extra = json.dumps({"ids": q["doc"]["instruction_id_list"], "strict": strict, "loose": loose,
+                            "prompt_loose": bool(r["prompt_level_loose_acc"])})
+        row = (rid, idx, q["qid"], q["gold"], f"{sum(strict)}/{len(strict)}",
+               int(bool(r["prompt_level_strict_acc"])), (j.get("usage") or {}).get("completion_tokens"),
+               len(rc), round(time.time() - t0, 1), ch.get("finish_reason"), None, text[-TEXT_CAP:])
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        row = (rid, idx, q["qid"], q["gold"], "", 0, None, None, round(time.time() - t0, 1),
+               None, f"{type(e).__name__}: {e}"[:400], "")
+    await _write("INSERT OR REPLACE INTO items VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (*row, extra))
 
 
 async def _run(rid: str) -> None:
@@ -359,7 +453,7 @@ async def _run(rid: str) -> None:
     try:
         # read timeout: a 32k-token thinking answer at ~40 tok/s is ~14 min
         async with httpx.AsyncClient(timeout=httpx.Timeout(3600, connect=15)) as c:
-            one = _one_tb if run["bench"] == "terminal_bench" else _one
+            one = {"terminal_bench": _one_tb, "ifeval": _one_ife}.get(run["bench"], _one)
 
             async def go(i):
                 async with sem:
@@ -465,7 +559,7 @@ async def _one_tb(c, rid: str, idx: int, q: dict, s: dict, p: dict) -> None:  # 
     finally:
         if q["image"] and not had_image:  # disk: drop images this run pulled
             await _docker("rmi", "-f", q["image"])
-    await _write("INSERT OR REPLACE INTO items VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", row)
+    await _write("INSERT OR REPLACE INTO items VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL)", row)
 
 
 def _spawn(rid: str) -> None:

@@ -32,6 +32,19 @@ come from [SGLang](https://github.com/sgl-project/sglang)'s
 `lmsysorg/sglang@sha256:9d2a843c…`), © The SGLang Authors, licensed under the
 [Apache License 2.0](https://github.com/sgl-project/sglang/blob/main/LICENSE).
 
+## IFEval checkers — `server/ifeval/`
+
+`instructions.py`, `instructions_registry.py` and `instructions_util.py` are
+© 2023 The Google Research Authors, Apache-2.0
+([google-research/instruction_following_eval](https://github.com/google-research/google-research/tree/master/instruction_following_eval)),
+taken via [EleutherAI lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness)
+0.4.13 (`lm_eval/tasks/ifeval`). `utils.py` is lm-evaluation-harness code,
+MIT, © 2020 EleutherAI. LangBang's changes are package-relative imports and,
+in `instructions_util.py`, no nltk download at import time; each file
+carries a note saying so under its original header. The IFEval prompts
+(google/IFEval, Apache-2.0) and the GPQA / Terminal-Bench datasets are
+downloaded at runtime into the gitignored data dir, never shipped.
+
 ## Generated assets — `web/sounds/`
 
 Generated with `stabilityai/stable-audio-3-small-sfx` under the Stability AI

@@ -23,6 +23,10 @@ dependencies = [
     "torch>=2.5",
     "pocket-tts>=3.3",
     "faster-whisper>=1.2.1",
+    "langdetect>=1.0.9",
+    "nltk>=3.10.4",
+    "immutabledict>=4.3.1",
+    "packaging>=26.3",
 ]
 
 [project.optional-dependencies]
