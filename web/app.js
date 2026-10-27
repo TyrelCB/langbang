@@ -5576,6 +5576,13 @@ function provRow(name = "", p = {}) {
     sel.value = ["on", "off"].includes(p.vision) ? p.vision : "auto";
     lab.appendChild(sel); flags.appendChild(lab);
   }
+  { // this provider's default reasoning effort ("" = CONFIG's); a thread's ◈ menu beats it
+    const lab = el("label", "chk"); lab.title = "reasoning effort for this provider's models while thinking — templates that don't read it ignore it";
+    const sel = document.createElement("select"); sel.className = "p-effort";
+    sel.append(new Option("effort: CONFIG", ""), new Option("effort: low", "low"), new Option("effort: medium", "medium"), new Option("effort: xhigh", "xhigh"));
+    sel.value = p.effort || "";
+    lab.appendChild(sel); flags.appendChild(lab);
+  }
   const test = el("button", "btn ghost", "↻ TEST"); test.type = "button";
   const out = el("span", "prov-test", "");
   test.onclick = async () => {
@@ -5611,6 +5618,7 @@ function provForm() {
       api_key: r.querySelector(".p-key").value.trim() || "none",
       model: r.querySelector(".p-model").value.trim(),
       vision: r.querySelector(".p-vision").value,
+      ...(r.querySelector(".p-effort").value ? { effort: r.querySelector(".p-effort").value } : {}),
     };
   }
   return out;
@@ -5792,26 +5800,55 @@ function paintTOpts(o) {
   const flags = TOPTS_FLAGS.filter(([k]) => k in o && k !== "thinking").length + Object.values(o.tools || {}).filter((v) => v).length;
   b.textContent = o.bare ? "∅ BARE" : "⚙ TOOLS" + (off ? ` −${off}` : "") + (flags ? ` ±${flags}` : "");
   if (o.ephemeral) b.textContent = "⌛ " + b.textContent;
-  b.classList.toggle("on", Object.keys(o).some((k) => k !== "thinking"));
+  b.classList.toggle("on", Object.keys(o).some((k) => k !== "thinking" && k !== "effort"));
   paintThinking();
 }
-// ◈ THINKING: this thread's reasoning switch (opts.thinking; absent =
-// CONFIG's enable_thinking). Cards always render when reasoning exists.
-function paintThinking() {
-  const b = $("#btn-reasoning"), def = !!toptsCat?.flags.thinking;
-  const over = "thinking" in toptsCur, on = over ? !!toptsCur.thinking : def;
-  b.textContent = (over ? "◇ " : "") + "◈ THINKING: " + (on ? "ON" : "OFF");
-  b.classList.toggle("on", on);
-  b.title = `model reasoning for THIS thread — ${on ? "on" : "off"}` + (over ? ` (override; CONFIG default: ${def ? "on" : "off"})` : " (CONFIG default)")
-    + ". Click to toggle; applies from the next message.";
+// ◈ THINKING: this thread's reasoning switch + effort (opts.thinking /
+// opts.effort; absent = inherited: provider effort, else CONFIG). The menu
+// picks DEFAULT / OFF / LOW / MEDIUM / XHIGH. Cards always render when
+// reasoning exists.
+let toptsInherit = null; // {thinking, effort, provider} with no thread override
+let toptsLoaded = false;  // false while a thread switch's /opts fetch is in flight
+const THINK_LEVELS = ["low", "medium", "xhigh"];
+function thinkState() {
+  const inh = toptsInherit || { thinking: !!toptsCat?.flags.thinking, effort: "xhigh" };
+  const over = "thinking" in toptsCur || "effort" in toptsCur;
+  const on = "thinking" in toptsCur ? !!toptsCur.thinking : inh.thinking;
+  return { inh, over, on, effort: toptsCur.effort || inh.effort };
 }
-async function toggleThinking() {
-  if (!toptsCat) return;
+function paintThinking() {
+  const b = $("#btn-reasoning"), st = thinkState();
+  b.textContent = (st.over ? "◇ " : "") + "◈ THINKING: " + (st.on ? st.effort.toUpperCase() : "OFF");
+  b.classList.toggle("on", st.on);
+  b.title = `model reasoning for THIS thread — ${st.on ? "on, effort " + st.effort : "off"}`
+    + (st.over ? ` (override; default: ${st.inh.thinking ? st.inh.effort : "off"})` : " (default)")
+    + ". Click to choose; applies from the next message.";
+}
+function openThinkMenu() {
+  if (!toptsCat || !toptsLoaded) return; // DEFAULT's label would be the previous thread's
   SFX.play("click");
-  const def = !!toptsCat.flags.thinking;
-  const on = !("thinking" in toptsCur ? toptsCur.thinking : def);
+  const m = $("#think-menu"), st = thinkState();
+  if (!m.classList.contains("hidden")) { m.classList.add("hidden"); return; }
+  m.innerHTML = "";
+  const opt = (v, label, active) => {
+    const o = el("button", "btn ghost" + (active ? " on" : ""), label); o.type = "button";
+    o.onclick = (e) => { e.stopPropagation(); m.classList.add("hidden"); setThinking(v); };
+    m.appendChild(o);
+  };
+  opt("default", `DEFAULT — ${st.inh.thinking ? st.inh.effort : "off"}` + (st.inh.provider ? ` (${st.inh.provider})` : ""), !st.over);
+  opt("off", "OFF", st.over && !st.on);
+  for (const l of THINK_LEVELS) opt(l, l.toUpperCase(), st.over && st.on && st.effort === l);
+  const r = $("#btn-reasoning").getBoundingClientRect();
+  m.style.top = `${r.bottom + 4}px`;
+  m.style.left = `${Math.max(8, Math.min(r.left, document.documentElement.clientWidth - 220))}px`;
+  m.classList.remove("hidden");
+}
+async function setThinking(v) {
+  SFX.play("click");
   const o = { ...toptsCur };
-  if (on === def) delete o.thinking; else o.thinking = on; // back to default = inherit
+  delete o.thinking; delete o.effort;
+  if (v === "off") o.thinking = false;
+  else if (v !== "default") { o.thinking = true; o.effort = v; }
   const tid = threadId;
   if (!tid) { draftOpts = optsSet(o) ? o : null; toptsCur = o; paintTOpts(o); return; }
   try {
@@ -5821,13 +5858,17 @@ async function toggleThinking() {
     if (tid === threadId) { toptsCur = r.opts || {}; paintTOpts(toptsCur); }
   } catch { SFX.play("error"); }
 }
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("#think-menu, #btn-reasoning")) $("#think-menu").classList.add("hidden");
+});
 async function syncTOpts(tid) {
   const seq = ++toptsSeq;
+  toptsLoaded = false;
   toptsCur = tid ? {} : draftOpts || {}; paintTOpts(toptsCur);
   let r; // drafts fetch too: the catalog carries CONFIG's defaults (◈ needs them)
   try { r = await J(await fetch(`/api/threads/${tid || "_"}/opts`)); } catch { return; }
   if (seq !== toptsSeq || tid !== threadId) return; // switched away meanwhile
-  toptsCat = r.catalog;
+  toptsCat = r.catalog; toptsInherit = r.inherit || null; toptsLoaded = true;
   toptsCur = tid ? r.opts || {} : draftOpts || {};
   paintTOpts(toptsCur);
 }
@@ -5887,7 +5928,7 @@ function toptsRender(o) {
   box.classList.toggle("dim", !!o.bare);
 }
 function toptsRead() {
-  const o = {};
+  const o = toptsCur.effort ? { effort: toptsCur.effort } : {}; // ◈ menu's, not in this panel
   if ($("#topts-bare").checked) o.bare = true;
   if ($("#topts-eph").checked) o.ephemeral = true;
   for (const s of $("#topts-flags").querySelectorAll("select")) if (s.value) o[s.dataset.flag] = s.value === "on";
@@ -6131,6 +6172,7 @@ async function openBench() {
     $("#bench-conc").value = D.concurrency; $("#bench-max").value = D.max_tokens;
     $("#bench-budget").value = D.budget; $("#bench-temp").value = D.temperature;
     $("#bench-thinking").value = D.thinking ? "1" : "0";
+    $("#bench-effort").options[0].text = `provider/CONFIG (${s.reasoning_effort})`;
   }
   $("#bench-panel").classList.remove("hidden");
   await refreshBench();
@@ -6147,7 +6189,7 @@ $("#btn-bench-run").onclick = async () => {
   const body = { bench: $("#bench-bench").value, provider: $("#bench-provider").value, model: $("#bench-model").value.trim(),
     params: { n: parseInt($("#bench-n").value), concurrency: num("#bench-conc", 1), max_tokens: num("#bench-max", 32768),
       thinking: $("#bench-thinking").value === "1", budget: num("#bench-budget", 0), temperature: num("#bench-temp", 0.6),
-      context: num("#bench-ctx", 131072) } };
+      context: num("#bench-ctx", 131072), ...($("#bench-effort").value ? { effort: $("#bench-effort").value } : {}) } };
   $("#bench-msg").textContent = "";
   try { await J(await fetch("/api/bench/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })); }
   catch (e) { $("#bench-msg").textContent = "start failed: " + e.message; return; }
@@ -7667,7 +7709,7 @@ $("#btn-sound").onclick = () => {
 if (localStorage.getItem("lb-sound") === "on")
   $("#btn-sound").textContent = "♪ SOUND: ON";
 
-$("#btn-reasoning").onclick = toggleThinking;
+$("#btn-reasoning").onclick = openThinkMenu;
 try { localStorage.removeItem("lb-reasoning"); } catch {} // retired card-hiding toggle
 
 // read-aloud toggle (per browser; provider is server CONFIG)

@@ -299,6 +299,8 @@ def _providers(merged: dict) -> dict:
     for p in provs.values():
         p.setdefault("api_key", "none")
         p["vision"] = caps.mode(p)             # auto | on | off (server/caps.py)
+        if p.get("effort") not in EFFORTS:     # this provider's default effort ("" = CONFIG's)
+            p.pop("effort", None)
         # retired 2026-10-26: thinking/budget fields now go to every provider
         # and are dropped per backend on a 400 (agent._drop_optional)
         p.pop("template_kwargs", None)
@@ -333,6 +335,7 @@ def effective(s: dict, override: dict | None = None) -> dict:
     vision = vm == "on" if vm != "auto" else bool(caps.cached(p["base_url"], model)[0])
     return {**s, "provider": pname, "base_url": p["base_url"], "api_key": p.get("api_key") or "none",
             "model": model, "vision_mode": vm,
+            "reasoning_effort": p.get("effort") if p.get("effort") in EFFORTS else s.get("reasoning_effort"),
             "capabilities": {**(s.get("capabilities") or {}), "vision": vision}}
 
 
@@ -347,9 +350,14 @@ def effective(s: dict, override: dict | None = None) -> dict:
 #               (restrict-only: mcp.get_tools keeps ONE cached client set)
 #   memory / skills / compact / review / prefetch — bool feature switches
 #   thinking  — the model's reasoning switch (enable_thinking) for this thread
+#   effort    — reasoning effort (EFFORTS) for this thread; beats the
+#               provider's "effort", which beats CONFIG reasoning_effort
 #   ephemeral — throwaway: no learning by default, hidden from other threads'
 #               auto-search hints, swept after EPHEMERAL_TTL idle
 THREAD_OPT_FLAGS = ("memory", "skills", "compact", "review", "prefetch", "thinking")
+# chat_template_kwargs.reasoning_effort values LangBang sends; the Qwen3.8
+# template raises on anything else, templates without the kwarg ignore it
+EFFORTS = ("low", "medium", "xhigh")
 EPHEMERAL_TTL = 24 * 3600
 
 
@@ -360,6 +368,8 @@ def clean_opts(o: dict | None) -> dict:
     for k in ("bare", "ephemeral", *THREAD_OPT_FLAGS):
         if isinstance(o.get(k), bool):
             out[k] = o[k]
+    if o.get("effort") in EFFORTS:
+        out["effort"] = o["effort"]
     for k in ("tools", "mcp"):
         m = {str(n): v for n, v in (o.get(k) or {}).items() if isinstance(v, bool)}
         if k == "mcp":
@@ -387,6 +397,7 @@ def apply_opts(s: dict, opts: dict | None) -> dict:
          "skills_enabled": flag("skills", s.get("skills_enabled", True)),
          "compact_enabled": flag("compact", s.get("compact_enabled", True)),
          "enable_thinking": flag("thinking", bool(s.get("enable_thinking"))),
+         "reasoning_effort": o.get("effort") or s.get("reasoning_effort"),
          "skill_review": {**(s.get("skill_review") or {}),
                           "enabled": flag("review", (s.get("skill_review") or {}).get("enabled", True), False)},
          }

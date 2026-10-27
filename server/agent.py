@@ -580,7 +580,7 @@ def no_think(s: dict) -> dict:
     return {"extra_body": extra_body(s, thinking=False)}
 
 
-REASONING_EFFORTS = ("xhigh", "medium", "low")
+REASONING_EFFORTS = config.EFFORTS
 COMPACTION_TAG = "lb_compaction"
 
 

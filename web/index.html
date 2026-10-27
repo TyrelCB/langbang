@@ -47,7 +47,7 @@
         <button id="btn-game" class="btn ghost" title="X-SIM platformer — G to open, ESC to bail back to chat">⚔ X-SIM</button>
         <button id="btn-tprompt" class="btn ghost" title="instructions for THIS thread only — appended to the system prompt on every run here (scheduled runs too)" disabled>✎ PROMPT</button>
         <button id="btn-topts" class="btn ghost" title="tools + features for THIS thread only — restrict/force tools, bare mode (no tools), auto-learn off, ⌛ temp throwaway">⚙ TOOLS</button>
-        <button id="btn-reasoning" class="btn ghost" title="model reasoning for THIS thread — click to toggle">◈ THINKING</button>
+        <button id="btn-reasoning" class="btn ghost" title="model reasoning for THIS thread — click to choose">◈ THINKING</button>
         <button id="btn-voice" class="btn ghost" title="OFF → SPEAK (read answers aloud) → TALK (hands-free: listen, send on a pause, read the answer, listen again). Per-message 🔊 works regardless">🔊 VOICE: OFF</button>
         <div id="ctx-tag" title="Tokens the model re-reads on the next call (post-compaction)"></div>
         <button id="model-tag" class="btn ghost" type="button" title="model for THIS thread — click to override the global default"></button>
@@ -533,6 +533,8 @@
     </div>
   </div>
 
+  <div id="think-menu" class="hidden"></div>
+
   <div id="topts-panel" class="hidden">
     <div class="panel-inner sched-inner">
       <h2>THREAD TOOLS</h2>
@@ -597,6 +599,7 @@
         </div>
         <div class="row bench-form">
           <label>Thinking <select id="bench-thinking"><option value="1">on</option><option value="0">off</option></select></label>
+          <label title="chat_template_kwargs.reasoning_effort while thinking">Effort <select id="bench-effort"><option value="">provider/CONFIG</option><option value="low">low</option><option value="medium">medium</option><option value="xhigh">xhigh</option></select></label>
           <label title="llama-server reasoning_budget_tokens; 0 = unlimited (GPQA wants ≥32k CoT+answer)">Thinking budget <input id="bench-budget" type="number" min="0" step="1024"></label>
           <label>Max tokens <input id="bench-max" type="number" min="256" step="1024"></label>
           <label>Temperature <input id="bench-temp" type="number" min="0" max="2" step="0.05"></label>

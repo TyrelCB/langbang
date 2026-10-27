@@ -381,7 +381,13 @@ class ThreadOptsIn(BaseModel):
 
 @app.get("/api/threads/{tid}/opts")
 async def get_thread_opts(tid: str):
-    return {"opts": await agent.get_thread_opts(tid), "catalog": await agent.tool_catalog()}
+    # "inherit": what this thread gets with no override of its own — its
+    # provider's effort default can differ from CONFIG's (◈ menu labels)
+    eff = config.effective(config.load(), await agent.get_thread_model(tid))
+    return {"opts": await agent.get_thread_opts(tid), "catalog": await agent.tool_catalog(),
+            "inherit": {"thinking": bool(eff.get("enable_thinking")),
+                        "effort": eff.get("reasoning_effort") or "xhigh",
+                        "provider": eff.get("provider")}}
 
 
 @app.put("/api/threads/{tid}/opts")

@@ -1455,3 +1455,9 @@ html[data-theme="light"] .spk-hud-phrase span.on { text-shadow: none; }
 .bench-items .bi.err { background: transparent; border-color: var(--danger); }
 .bench-detail { margin-top: 8px; border-left: 2px solid var(--cyan-dim); padding-left: 10px; font-size: 12px; }
 .bench-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; margin: 6px 0; }
+
+/* ◈ THINKING menu (default / off / effort levels) */
+#think-menu { position: fixed; z-index: 20; display: flex; flex-direction: column; gap: 4px; padding: 6px;
+  background: var(--panel); border: 1px solid var(--cyan-dim); min-width: 200px; }
+#think-menu .btn { font-size: 11px; padding: 4px 10px; text-align: left; }
+#think-menu .btn.on { color: var(--cyan); border-color: var(--cyan); }
