@@ -409,7 +409,7 @@ class BenchRunIn(BaseModel):
 @app.get("/api/bench")
 async def bench_overview():
     return {"benches": bench.BENCHES, "dataset": bench.dataset_status(),
-            "defaults": bench.DEFAULTS, "runs": await bench.list_runs()}
+            "defaults": bench.DEFAULTS, "agents": bench.AGENTS, "harbor": list(bench.HARBOR), "runs": await bench.list_runs()}
 
 
 @app.post("/api/bench/dataset")

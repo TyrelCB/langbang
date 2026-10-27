@@ -25,7 +25,7 @@
     <div class="sidebar-footer">
       <button id="btn-settings" class="btn ghost">⚙ CONFIG</button>
       <button id="btn-schedules" class="btn ghost" title="cron-scheduled agent runs">⏰ SCHEDULES</button>
-      <button id="btn-bench" class="btn ghost" title="benchmark providers/models (GPQA Diamond)">▤ BENCH</button>
+      <button id="btn-bench" class="btn ghost" title="benchmark providers/models (GPQA, IFEval, Terminal-Bench, SWE-bench)">▤ BENCH</button>
       <button id="btn-sound" class="btn ghost" title="sound toggle">♪ SOUND: OFF</button>
       <div id="health" class="health">LINK: …</div>
     </div>
@@ -603,7 +603,11 @@
           <label title="llama-server reasoning_budget_tokens; 0 = unlimited (GPQA wants ≥32k CoT+answer)">Thinking budget <input id="bench-budget" type="number" min="0" step="1024"></label>
           <label>Max tokens <input id="bench-max" type="number" min="256" step="1024"></label>
           <label>Temperature <input id="bench-temp" type="number" min="0" max="2" step="0.05"></label>
-          <label title="Terminal-Bench only: the agent summarizes its history when it nears this many tokens — set it to the model's real context">Context (TB) <input id="bench-ctx" type="number" min="8192" step="8192"></label>
+          <label class="bench-hb" title="terminus-2 only: the agent summarizes its history when it nears this many tokens — set it to the model's real context">Context <input id="bench-ctx" type="number" min="8192" step="8192"></label>
+        </div>
+        <div class="row bench-form bench-hb">
+          <label title="the Harbor agent that drives the task container with your model">Agent <select id="bench-agent"></select></label>
+          <label title="SSH host with Docker + Harbor (~/.local/bin/harbor) that runs the task containers; empty = this box. SWE-bench images are x86_64, 1-3 GB each">Runner host <input id="bench-host" type="text" placeholder="this box" autocomplete="off" spellcheck="false"></label>
         </div>
         <datalist id="dl-bench-models"></datalist>
         <div class="row end"><span id="bench-msg" class="hint"></span><button id="btn-bench-run" class="btn accent">▶ RUN</button></div>
