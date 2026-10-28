@@ -10,12 +10,18 @@ since the last one, then the substring scan is one SQLite LIKE (C speed).
 Rows keep `pos` = the rendered-message index the UI's search-jump scrolls
 to (same skip rule as renderHistory). Own file + own connection: a big
 reindex never holds the main DB's WAL writer lock.
+
+Ranked search (rank()): an FTS5 index over the same rows (BM25, any query
+word, prefix-matched, stopwords dropped) so "the automated browser thread"
+works like a search engine, not one literal substring. main.py fuses it
+with the RAG node's semantic hits over indexed exchanges.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
+import re
 
 import aiosqlite
 
@@ -42,10 +48,33 @@ async def _conn() -> aiosqlite.Connection:
               role TEXT NOT NULL, text TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS ix_docs_tid ON docs(tid, pos);
             CREATE TABLE IF NOT EXISTS meta(tid TEXT PRIMARY KEY, key TEXT);
+            CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
+            CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(
+              text, content='docs', content_rowid='rowid', tokenize='unicode61');
+            CREATE TRIGGER IF NOT EXISTS docs_ai AFTER INSERT ON docs BEGIN
+              INSERT INTO docs_fts(rowid, text) VALUES (new.rowid, new.text); END;
+            CREATE TRIGGER IF NOT EXISTS docs_ad AFTER DELETE ON docs BEGIN
+              INSERT INTO docs_fts(docs_fts, rowid, text) VALUES ('delete', old.rowid, old.text); END;
             """)
+        row = await (await c.execute("SELECT v FROM kv WHERE k='fts'")).fetchone()
+        if not row:  # rows that predate the FTS table
+            logger.warning("searchidx: building FTS index")
+            await c.execute("INSERT INTO docs_fts(docs_fts) VALUES('rebuild')")
+            await c.execute("INSERT OR REPLACE INTO kv VALUES('fts','1')")
         await c.commit()
         _c = c
     return _c
+
+
+async def kv_get(k: str) -> str | None:
+    row = await (await (await _conn()).execute("SELECT v FROM kv WHERE k=?", (k,))).fetchone()
+    return row[0] if row else None
+
+
+async def kv_set(k: str, v: str) -> None:
+    c = await _conn()
+    await c.execute("INSERT OR REPLACE INTO kv VALUES(?,?)", (k, v))
+    await c.commit()
 
 
 async def close() -> None:
@@ -130,3 +159,76 @@ async def query(q: str, tids: list[str], per_thread: int) -> dict[str, list[tupl
     for v in out.values():
         v.sort()
     return out
+
+
+STOP = set("""a an and are as at be but by can do does did for from had has have how i if in
+into is it its just like me my of on or our so some than that the their them then there these
+this to was we were what when where which who why will with you your thread threads chat chats
+conversation looking look find found search searching about session one ones did done get got
+want wanted need remember earlier last before ago was were used use using""".split())
+TOKEN_RE = re.compile(r"[\w][\w.+-]*\w|\w", re.UNICODE)
+ROLE_W = {"human": 1.6, "ai": 1.0, "tool": 0.45}  # what you asked > what it said > tool dumps
+
+
+def terms(q: str) -> list[str]:
+    """Query words worth matching: lowercased, stopwords dropped (all-stopword
+    queries keep their words), FTS-safe (quoted per term below)."""
+    ws = [w for w in TOKEN_RE.findall(q.lower()) if len(w) > 1 or w.isdigit()]
+    keep = [w for w in ws if w not in STOP]
+    return list(dict.fromkeys(keep or ws))[:12]
+
+
+async def rank(q: str, tids: list[str], limit: int = 400) -> list[dict]:
+    """Threads ranked by BM25 over their messages: [{tid, score, cover,
+    pos, role, text}] best first. score = best row (role-weighted) plus a
+    bonus per extra distinct query word the thread covers anywhere."""
+    ts = terms(q)
+    if not ts or not tids:
+        return []
+    await refresh()
+    c = await _conn()
+    match = " OR ".join(f'"{t}"*' for t in ts)
+    keep = set(tids)
+    try:
+        cur = await c.execute(
+            "SELECT d.tid, d.pos, d.role, d.text, bm25(docs_fts) FROM docs_fts "
+            "JOIN docs d ON d.rowid = docs_fts.rowid WHERE docs_fts MATCH ? "
+            "ORDER BY bm25(docs_fts) LIMIT ?", (match, limit * 4))
+        rows = await cur.fetchall()
+    except aiosqlite.OperationalError as e:  # odd input the tokenizer rejects
+        logger.warning("searchidx rank %r: %s", q, e)
+        return []
+    ql = q.strip().lower()
+    by: dict[str, dict] = {}
+    for tid, pos, role, text, bm in rows:
+        if tid not in keep:
+            continue
+        low = text.lower()
+        sc = -bm * ROLE_W.get(role, 1.0) * (2.0 if len(ql) > 3 and ql in low else 1.0)
+        t = by.setdefault(tid, {"tid": tid, "best": 0.0, "words": set(), "hits": 0})
+        t["hits"] += 1
+        t["words"].update(w for w in ts if w in low)
+        if sc > t["best"]:
+            t.update(best=sc, pos=pos, role=role, text=text)
+    out = []
+    for t in by.values():
+        cover = len(t.pop("words"))
+        t["cover"] = cover
+        t["score"] = t.pop("best") * (1 + 0.6 * (cover - 1))
+        out.append(t)
+    out.sort(key=lambda t: -t["score"])
+    return out[:limit]
+
+
+async def pos_of(tid: str, user_text: str) -> int:
+    """Rendered position of the user message that starts with `user_text`
+    (a semantic hit names its exchange by the user's words), -1 if gone."""
+    head = " ".join(user_text.split())[:80]
+    if not head:
+        return -1
+    c = await _conn()
+    cur = await c.execute("SELECT pos, text FROM docs WHERE tid=? AND role='human' ORDER BY pos", (tid,))
+    for pos, text in await cur.fetchall():
+        if " ".join(text.split()).startswith(head):
+            return pos
+    return -1

@@ -187,6 +187,15 @@ function setMarkdown(node, raw) {
   enhanceCodeBlocks(node);
 }
 // escape + wrap first case-insensitive occurrence of q in <mark> (result hl)
+function hlTerms(text, terms) { // <mark> every occurrence of any term (ranked search)
+  const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const ts = (terms || []).filter(Boolean).sort((a, b) => b.length - a.length);
+  if (!ts.length) return esc(text);
+  const re = new RegExp(ts.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "gi");
+  let out = "", i = 0;
+  for (const m of text.matchAll(re)) { out += esc(text.slice(i, m.index)) + "<mark>" + esc(m[0]) + "</mark>"; i = m.index + m[0].length; }
+  return out + esc(text.slice(i));
+}
 function hl(text, q) {
   const esc = (s) =>
     s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -2802,24 +2811,33 @@ async function runSearch() {
   box.innerHTML = "";
   $("#threads").classList.add("hidden");
   box.classList.remove("hidden");
+  const literal = q.length > 2 && q[0] === '"' && q.at(-1) === '"';
   if (!rs.length) {
-    box.appendChild(el("div", "no-results", "// NO MATCHES"));
+    box.appendChild(el("div", "no-results", "// NO MATCHES" + (literal ? " (exact text)" : "")));
     return;
   }
-  box.appendChild(
-    el("div", "no-results", `// ${rs.length} MATCH${rs.length > 1 ? "ES" : ""}` +
-      (rs.length >= 50 ? " (SHOWN, CAP REACHED)" : ""))
-  );
+  const head = el("div", "no-results", literal
+    ? `// ${rs.length} EXACT MATCH${rs.length > 1 ? "ES" : ""}` + (rs.length >= 50 ? " (SHOWN, CAP REACHED)" : "")
+    : `// ${rs.length} THREAD${rs.length > 1 ? "S" : ""}, BEST FIRST`);
+  head.title = literal ? "exact substring search, newest threads first"
+    : "ranked by matching words (any of them, rarer = stronger) + meaning (≈, semantic search over past exchanges).\nWrap the query in \"quotes\" for an exact-text search.";
+  box.appendChild(head);
   for (const r of rs) {
     const d = el("div", "thread result");
     const name = el("div", "t-name");
     name.innerHTML = DOMPurify.sanitize(
-      hl(r.title, q) + (r.role === "title" ? "  ⌕ TITLE" : "")
+      hlTerms(r.title, r.terms) + (r.role === "title" ? "  ⌕ TITLE" : "")
     );
+    if (r.why) {
+      const w = el("span", "r-why", (r.why.includes("meaning") ? "≈" : "") + (r.hits > 1 ? ` ${r.hits}` : ""));
+      w.title = (r.why.includes("words") ? `${r.hits} matching message${r.hits === 1 ? "" : "s"}` : "no word matches")
+        + (r.why.includes("meaning") ? " · ≈ similar in meaning" : "");
+      if (w.textContent) name.appendChild(w);
+    }
     d.appendChild(name);
-    if (r.pos >= 0) {
+    if (r.pos >= 0 || r.why) {
       const snip = el("div", "r-snip");
-      snip.innerHTML = DOMPurify.sanitize(hl(r.snippet, q));
+      snip.innerHTML = DOMPurify.sanitize(hlTerms(r.snippet, r.terms));
       d.appendChild(snip);
     }
     d.onclick = async () => {

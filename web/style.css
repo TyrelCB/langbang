@@ -1461,3 +1461,4 @@ html[data-theme="light"] .spk-hud-phrase span.on { text-shadow: none; }
   background: var(--panel); border: 1px solid var(--cyan-dim); min-width: 200px; }
 #think-menu .btn { font-size: 11px; padding: 4px 10px; text-align: left; }
 #think-menu .btn.on { color: var(--cyan); border-color: var(--cyan); }
+.result .r-why { float: right; color: var(--cyan, #3ad); font-size: 11px; margin-left: 6px; letter-spacing: 0; }

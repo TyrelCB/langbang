@@ -234,6 +234,11 @@ class Store:
                                 (node or self.node, path)).fetchone()
         return r[0] if r else None
 
+    def paths(self, source, node=None):
+        return [r[0] for r in self.rcon().execute(
+            "SELECT DISTINCT path FROM chunks WHERE node=? AND source=? AND deleted=0",
+            (node or self.node, source))]
+
     def is_indexed(self, path, node=None):
         return self.rcon().execute("SELECT 1 FROM chunks WHERE node=? AND path=? AND deleted=0 LIMIT 1",
                                 (node or self.node, path)).fetchone() is not None

@@ -117,6 +117,23 @@ def _written_paths(events):
     return res
 
 
+def _exchange(tid, title, human, turn):
+    """One finished exchange as a RAG doc (None = nothing to index): the
+    user's message + LangBang's final answer, id'd by the HumanMessage."""
+    from langchain_core.messages import AIMessage
+    answer = ""
+    for m in reversed(turn):
+        if isinstance(m, AIMessage) and not m.tool_calls and _text(m.content).strip():
+            answer = _text(m.content).strip()
+            break
+    q = _text(human.content).strip()
+    if not answer or not q or not human.id:
+        return None
+    return {"path": f"lb-thread:{tid}/{human.id}", "source": "thread",
+            "text": (f"THREAD: {title}\n" if title else "") + f"USER: {q[:6000]}\n\nLANGBANG: {answer[:20000]}",
+            "meta": {"tid": tid, "turn": human.id, "title": title}}
+
+
 async def after_run(tid, events):
     """runs._produce hook: index what the run wrote + the exchange itself."""
     try:
@@ -128,19 +145,12 @@ async def after_run(tid, events):
             return
         if any(ev.get("type") in ("error", "shell_result") for ev in events):
             return  # failed/cancelled runs and !cmd shells aren't conversation
-        from langchain_core.messages import AIMessage
         from . import agent, learning
+        if tid in await agent.ephemeral_tids():
+            return  # ⌛ temp threads are throwaway tests: keep them out of search
         msgs = await agent._live_messages(tid)
         turn, human = learning._turn(msgs)
         if human is None:
-            return
-        answer = ""
-        for m in reversed(turn):
-            if isinstance(m, AIMessage) and not m.tool_calls and _text(m.content).strip():
-                answer = _text(m.content).strip()
-                break
-        q = _text(human.content).strip()
-        if not answer or not q:
             return
         title = ""
         try:
@@ -148,9 +158,57 @@ async def after_run(tid, events):
             title = (row[0] if row else "") or ""
         except Exception:  # noqa: BLE001
             pass
-        turn_id = human.id or str(len(msgs))
-        push_docs([{"path": f"lb-thread:{tid}/{turn_id}", "source": "thread",
-                    "text": (f"THREAD: {title}\n" if title else "") + f"USER: {q[:6000]}\n\nLANGBANG: {answer[:20000]}",
-                    "meta": {"tid": tid, "turn": turn_id, "title": title}}], s)
+        doc = _exchange(tid, title, human, turn)
+        if doc:
+            push_docs([doc], s)
     except Exception as e:  # noqa: BLE001 - indexing must never disturb runs
         logger.warning("rag after_run %s: %s: %s", tid, type(e).__name__, e)
+
+
+BACKFILL_V = "1"
+
+
+async def backfill_threads(batch=8, pause=3.0):
+    """Index every past exchange the node doesn't have yet (threads older
+    than index_threads, or turns a down node missed), so ⌕ chat search's
+    semantic half covers all threads. Throttled: `batch` docs per call,
+    waiting for each to embed, then `pause` s — the embeddings run on the
+    shared index backend (Atlas GPU), which bulk work slows for everyone.
+    → docs pushed; raises if the node fails (rerun resumes: ids already on
+    the node are skipped)."""
+    import asyncio
+    s = config.load()
+    if not (_on(s) and settings(s)["index_threads"]):
+        return 0
+    from . import agent, runs
+    try:
+        have = set((await asyncio.to_thread(_req, "GET", "/index/paths?source=thread")).get("paths") or [])
+    except Exception as e:  # node down / older node: the caller retries next start
+        raise RuntimeError(f"can't list the node's indexed threads: {e}") from e
+    eph = await agent.ephemeral_tids()
+    rows = await (await agent._db.execute("SELECT id, title FROM threads")).fetchall()
+    todo = []
+    for tid, title in rows:
+        if tid in eph or runs.get(tid):
+            continue
+        try:
+            msgs = await agent._live_messages(tid)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("rag backfill %s: %s", tid, e)
+            continue
+        starts = [i for i, m in enumerate(msgs) if agent._turn_start(m)]
+        for j, i in enumerate(starts):
+            doc = _exchange(tid, title or "", msgs[i], msgs[i:starts[j + 1] if j + 1 < len(starts) else None])
+            if doc and doc["path"] not in have:
+                todo.append(doc)
+    logger.warning("rag backfill: %d exchanges to index", len(todo))
+    n = 0
+    for k in range(0, len(todo), batch):
+        try:
+            await asyncio.to_thread(_req, "POST", "/index", {"docs": todo[k:k + batch], "wait": True}, 900)
+        except Exception as e:  # rerun skips what landed
+            raise RuntimeError(f"stopped at {n}/{len(todo)}: {e}") from e
+        n += len(todo[k:k + batch])
+        await asyncio.sleep(pause)
+    logger.warning("rag backfill: done, %d exchanges", n)
+    return n

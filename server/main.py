@@ -67,6 +67,16 @@ async def _startup():
             print(f"search warm-up failed: {e!r}", flush=True)
     asyncio.create_task(_warm_search())
 
+    async def _rag_backfill():  # ⌕ semantic half: every past exchange, once (throttled)
+        await asyncio.sleep(90)
+        try:
+            if await searchidx.kv_get("rag_backfill") != rag.BACKFILL_V:
+                await rag.backfill_threads()
+                await searchidx.kv_set("rag_backfill", rag.BACKFILL_V)
+        except Exception as e:  # noqa: BLE001 - search still works keyword-only
+            print(f"rag thread backfill failed: {e!r}", flush=True)
+    asyncio.create_task(_rag_backfill())
+
 
 @app.on_event("shutdown")
 async def _shutdown():
@@ -732,13 +742,15 @@ PER_THREAD_LIMIT = 3  # short queries ("sm") hit dozens of messages per thread;
 
 @app.get("/api/search")
 async def search(q: str = "", project: str = ""):
-    """Case-insensitive substring search over every thread's full transcript
-    (compaction archives included), newest threads first, max PER_THREAD_LIMIT
-    hits per thread so a broad query still surfaces breadth. Served from the
-    ⌕ index (searchidx: only threads changed since the last query are
-    re-read). `project` = a ◫ project id, "none" = unfiled only, "" = all.
-    `pos` is the message's index among rendered messages — exactly the chat
-    DOM child index the UI renders, so a click can scroll straight to the hit."""
+    """⌕ Chat search, one row per thread, best first. Two rankers fused by
+    reciprocal rank: BM25 over every message (searchidx.rank: any query
+    word, stopwords dropped, prefix match) and the RAG node's semantic
+    search over indexed exchanges (source "thread"), so "the automated
+    browser thread" finds the CDP/Chromium chat without its exact words.
+    A query in "double quotes" = the old literal substring search (newest
+    threads first, up to PER_THREAD_LIMIT hits each).
+    `project` = a ◫ project id, "none" = unfiled only, "" = all. `pos` =
+    the message's index among rendered messages (the UI scrolls to it)."""
     q = q.strip()
     if len(q) < 2:
         return []
@@ -747,6 +759,58 @@ async def search(q: str = "", project: str = ""):
         ts = [t for t in ts if not t.get("project")]
     elif project:
         ts = [t for t in ts if t.get("project") == project]
+    if len(q) > 2 and q[0] == q[-1] == '"':
+        return await _search_literal(q[1:-1], ts)
+    by = {t["id"]: t for t in ts}
+    kw_task = asyncio.create_task(searchidx.rank(q, list(by)))
+    try:  # semantic: fast (~0.3 s); a down node just means keyword-only
+        sem = await asyncio.wait_for(asyncio.to_thread(
+            rag.search, q, source="thread", scope="local", top_k=40, timeout=6), 7)
+        sem = sem.get("results") or []
+    except Exception:  # noqa: BLE001
+        sem = []
+    kw = await kw_task
+    sem_by: dict[str, dict] = {}
+    for r in sem:
+        tid = (r.get("meta") or {}).get("tid")
+        if tid in by and tid not in sem_by:
+            sem_by[tid] = r
+    K = 12  # RRF constant: small, so the top few of each ranker dominate
+    fused: dict[str, float] = {}
+    for i, t in enumerate(kw):
+        fused[t["tid"]] = fused.get(t["tid"], 0) + 1 / (K + i)
+    for i, tid in enumerate(list(sem_by)[:25]):
+        fused[tid] = fused.get(tid, 0) + 1 / (K + i)
+    words = searchidx.terms(q)
+    for tid in fused:  # query words in the title: the cheapest strong signal
+        tl = by[tid]["title"].lower()
+        fused[tid] += 0.04 * sum(w in tl for w in words)
+    kw_by = {t["tid"]: t for t in kw}
+    out = []
+    for tid in sorted(fused, key=lambda x: -fused[x])[:SEARCH_LIMIT]:
+        t, k, sm = by[tid], kw_by.get(tid), sem_by.get(tid)
+        why = (["words"] if k else []) + (["meaning"] if sm else [])
+        if k:
+            text, low = k["text"], k["text"].lower()
+            i = min([low.find(w) for w in words if w in low] or [0])
+            a, b = max(0, i - 40), min(len(text), i + 160)
+            snippet = ("… " if a else "") + " ".join(text[a:b].split()) + (" …" if b < len(text) else "")
+            pos, role = k["pos"], k["role"]
+        else:
+            body = sm.get("snippet") or ""
+            m = re.search(r"USER:\s*(.*?)(?:\n\s*LANGBANG:|$)", body, re.S)
+            user = (m.group(1) if m else body).strip()
+            pos, role = await searchidx.pos_of(tid, user), "human"
+            snippet = " ".join(user.split())[:200]
+        out.append({"thread_id": tid, "title": t["title"], "pos": pos, "role": role, "snippet": snippet,
+                    "why": why, "hits": (k or {}).get("hits", 0), "terms": words})
+    return out
+
+
+async def _search_literal(q: str, ts: list[dict]) -> list[dict]:
+    """Case-insensitive substring search over full transcripts (compaction
+    archives included), newest threads first, max PER_THREAD_LIMIT hits per
+    thread so a broad query still surfaces breadth."""
     found = await searchidx.query(q, [t["id"] for t in ts], PER_THREAD_LIMIT)
     ql = q.lower()
     out = []
@@ -758,12 +822,12 @@ async def search(q: str = "", project: str = ""):
             b = min(len(text), i + len(q) + 120)
             snippet = ("… " if a else "") + " ".join(text[a:b].split()) + (" …" if b < len(text) else "")
             hits.append({"thread_id": t["id"], "title": t["title"], "pos": pos,
-                         "role": role, "snippet": snippet})
+                         "role": role, "snippet": snippet, "terms": [q]})
         # title row only when the thread has no message hits — otherwise the
         # title already shows on every hit row and this is pure noise
         if not hits and ql in t["title"].lower():
             hits.append({"thread_id": t["id"], "title": t["title"], "pos": -1,
-                         "role": "title", "snippet": t["title"]})
+                         "role": "title", "snippet": t["title"], "terms": [q]})
         out.extend(hits)
         if len(out) >= SEARCH_LIMIT:
             return out[:SEARCH_LIMIT]

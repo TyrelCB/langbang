@@ -432,6 +432,14 @@ async def index(req: IndexRequest, request: Request):
     return {"queued": len(req.paths) + len(req.docs), "pending": jobs.qsize()}
 
 
+@app.get("/index/paths")
+def indexed_paths(request: Request, source: str):
+    """Synthetic-doc ids this node holds for `source` (LangBang's thread
+    backfill skips exchanges already indexed)."""
+    _require_auth(request)
+    return {"paths": store.paths(source)}
+
+
 @app.delete("/index")
 def unindex(request: Request, path: str | None = None, source: str | None = None,
             tid: str | None = None, path_prefix: str | None = None):
