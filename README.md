@@ -122,6 +122,7 @@ network you trust (see [Security](#security)).
 | `LANGBANG_BASE_URL`, `LANGBANG_MODEL`, `LANGBANG_API_KEY` | first-run default provider (afterwards: CONFIG) |
 | `LANGBANG_DATA_DIR` | where settings, threads, trajectory, uploads and TTS cache live (default `./data`) |
 | `LANGBANG_CRAWL4AI_URL`, `LANGBANG_CRAWL_TIMEOUT` | [crawl4ai](https://github.com/unclecode/crawl4ai) service behind the `crawl_url` tool |
+| `TAVILY_API_KEY`, `LANGBANG_TAVILY_KEY_FILE` | [Tavily](https://tavily.com) key behind the `web_search` tool (env wins; else a plain-text key file, default `~/.config/langbang/tavily.key`) |
 | `LANGBANG_RAG_MCP_URL` | optional RAG MCP server registered by default |
 | `LANGBANG_HERMES_SKILLS` | an existing skill tree to load read-only (default `~/.hermes/skills`) |
 | `LANGCHAIN_API_KEY` + `LANGCHAIN_TRACING_V2=true` | LangSmith tracing |

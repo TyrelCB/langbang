@@ -114,6 +114,7 @@ DEFAULTS = {
         "write_file": True,
         "list_dir": True,
         "crawl_url": True,
+        "web_search": True,  # Tavily; key via TAVILY_API_KEY or data/../tavily.key
         "generate_image": True,  # Qwen-Image 2.1 on ComfyUI (server/comfy.py)
         # RAG node (rag/ package, langbang-rag.service :8900)
         "semantic_search": True,

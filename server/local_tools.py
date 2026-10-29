@@ -21,6 +21,21 @@ CRAWL_API = os.environ.get("LANGBANG_CRAWL4AI_URL", "http://spark-ee93:8088")
 # hard wall-clock cap for one crawl; dead sources should cost seconds, not
 # minutes (180s socket timeouts let wedged upstreams stall whole runs)
 CRAWL_TIMEOUT = int(os.environ.get("LANGBANG_CRAWL_TIMEOUT", "45"))
+# Tavily search key: env wins, else a plain-text key file (same secret style
+# as CRAWL_API's env override — never commit the key itself).
+TAVILY_KEY_FILE = Path(
+    os.environ.get("LANGBANG_TAVILY_KEY_FILE", "~/.config/langbang/tavily.key")
+).expanduser()
+
+
+def _tavily_key() -> str:
+    k = os.environ.get("TAVILY_API_KEY", "").strip()
+    if not k:
+        try:
+            k = TAVILY_KEY_FILE.read_text().strip()
+        except OSError:
+            return ""
+    return k
 
 
 def _trim(s: str) -> str:
@@ -175,6 +190,48 @@ def crawl_url(url: str) -> str:
         f"links: {d.get('internal_links', '?')} in / {d.get('external_links', '?')} out]\n\n"
         + (d.get("markdown") or "")
     )
+
+
+@tool
+def web_search(query: str, max_results: int = 5, topic: str = "general") -> str:
+    """Search the web via Tavily and return ranked result snippets with URLs.
+    Good for 'latest / who / what' questions where you don't have a URL yet —
+    then crawl_url the promising links for full detail. topic: 'general' or
+    'news' (news adds recency weighting). Fails fast if no API key is
+    configured (TAVILY_API_KEY env or ~/.config/langbang/tavily.key)."""
+    key = _tavily_key()
+    if not key:
+        return ("ERROR: no Tavily key — set TAVILY_API_KEY or write it to "
+                f"{TAVILY_KEY_FILE}; fall back to crawl_url on a known URL")
+    body = {
+        "query": query,
+        "max_results": max(1, min(int(max_results), 10)),
+        "topic": topic if topic in ("general", "news") else "general",
+        "include_answer": False,
+    }
+    req = urllib.request.Request(
+        "https://api.tavily.com/search",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            d = json.load(r)
+    except Exception as e:  # noqa: BLE001 - report to model, not crash
+        return f"ERROR: Tavily search failed: {type(e).__name__}: {e}"
+    results = d.get("results") or []
+    if not results:
+        return f"no results for {query!r}"
+    lines = [f"Tavily results for {query!r} ({len(results)}):"]
+    for i, r in enumerate(results, 1):
+        lines.append(
+            f"{i}. {r.get('title', '(untitled)')} — {r.get('url', '')}"
+            f" (published: {r.get('published_date') or 'n/a'}, "
+            f"score: {r.get('score', 0):.2f})\n"
+            f"   {r.get('content', '').strip()}"
+        )
+    return _trim("\n".join(lines))
 
 
 def _fmt(ts) -> str:
@@ -358,7 +415,8 @@ def semantic_search_image(path: str, category: str = "", scope: str = "", top_k:
         return f"ERROR: RAG node unreachable ({type(e).__name__}: {e})"
 
 
-LOCAL_TOOLS = [run_bash, read_file, write_file, list_dir, crawl_url, generate_image,
+LOCAL_TOOLS = [run_bash, read_file, write_file, list_dir, crawl_url, web_search,
+               generate_image,
                semantic_search, semantic_search_image,
                create_scheduled_task, list_scheduled_tasks, update_scheduled_task,
                set_scheduled_task_enabled, run_scheduled_task_now, delete_scheduled_task]
@@ -366,7 +424,9 @@ LOCAL_TOOLS = [run_bash, read_file, write_file, list_dir, crawl_url, generate_im
 TOOLS_NOTE = (
     "\n\nLocal tools available: run_bash (shell, cwd=home), read_file, "
     "write_file, list_dir, crawl_url (fetch any web page as Markdown via "
-    "Crawl4AI on spark-ee93). Prefer them over asking the user to run things. "
+    "Crawl4AI on spark-ee93), web_search (Tavily web search — ranked results "
+    "when you don't have a URL yet; crawl the links for detail). Prefer them "
+    "over asking the user to run things. "
     "Scheduling: any recurring/scheduled work the user asks for goes to "
     "create_scheduled_task (5-field cron to repeat, or run_at "
     "'YYYY-MM-DD HH:MM' for a one-off) — LangBang's own scheduler; do NOT "

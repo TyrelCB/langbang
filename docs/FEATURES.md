@@ -12,7 +12,9 @@ but built on the LangChain/LangGraph ecosystem:
   (default: sglang on `spark-ee93:30000` serving `RadixArk/Qwen3.8-Flash-Next-NVFP4`)
 - **Built-in local tools** (`server/local_tools.py`): `run_bash` (shell on the
   server host, cwd=home, 300s cap), `read_file`, `write_file`, `list_dir`,
-  `crawl_url` (fetch any web page as Markdown)
+  `crawl_url` (fetch any web page as Markdown), `web_search` (Tavily search —
+  ranked result snippets when there's no URL yet; key via `TAVILY_API_KEY` or
+  `~/.config/langbang/tavily.key`)
 - **Deep agent mode** (`deepagents`, on by default; CONFIG toggle): the agent
   gets `write_todos` planning and a `task` tool that spawns autonomous
   sub-agents, and its file tools (`ls`, `read_file`, `write_file`,
