@@ -6095,7 +6095,7 @@ function benchFormSync() {
   $("#bench-about").textContent = BENCH_ABOUT[b] || "";
   const sel = $("#bench-n"), keep = sel.value;
   sel.innerHTML = "";
-  for (const v of ({ terminal_bench_4: [5, 20], terminal_bench: [5, 20, 50], swebench_verified: [5, 20, 50, 100], ifeval: [50, 100, 200] }[b] || [20, 50, 100]).filter((v) => v < N)) sel.appendChild(new Option(`${v}` + (v <= 20 ? " — quick look" : ""), v));
+  for (const v of ({ terminal_bench_4: [1, 5, 20], terminal_bench: [1, 5, 20, 50], swebench_verified: [1, 5, 20, 50, 100], ifeval: [50, 100, 200] }[b] || [20, 50, 100]).filter((v) => v < N)) sel.appendChild(new Option(`${v}` + (v <= 20 ? " — quick look" : ""), v));
   sel.appendChild(new Option(`${N} — full`, N));
   sel.value = [...sel.options].some((o) => o.value === keep) ? keep : String(N);
   $("#btn-bench-run").disabled = !(benchData?.dataset[b] || {}).ok;
