@@ -88,6 +88,10 @@ HARBOR = {"terminal_bench_4": (TB4_DIR, "terminal-bench/terminal-bench@4.0.0", "
           "swebench_verified": (SWE_DIR, "swebench-verified@1.0", "mini-swe-agent")}
 AGENTS = ("terminus-2", "mini-swe-agent")
 REMOTE_ROOT = "langbang-bench"  # under the SSH host's home
+# per model call: LiteLLM's 600 s default kills a long thinking turn on a slow
+# local server (32k tokens at ~25 tok/s ≈ 22 min, more behind a busy slot)
+# and retries it from scratch, so the agent never gets past it
+LLM_TIMEOUT = 3600
 HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]*$")
 LETTERS = "ABCD"
 # simple-evals' GPQA zero-shot CoT prompt
@@ -593,13 +597,14 @@ def _agent_cfg(name: str, s: dict, p: dict) -> dict:
         # _skip_mcp_handler: litellm ≥1.10x imports its MCP bridge (needs the `mcp`
         # package, which Harbor's install doesn't add) on any call with tools
         mk = {"api_base": url, "temperature": float(p["temperature"]), "_skip_mcp_handler": True,
+              "timeout": LLM_TIMEOUT,
               **({"extra_body": eb} if eb else {})}
         return {"name": name, "model_name": "openai/" + s["model"],
                 "kwargs": {"max_tokens": mt, "config": {"model": {"model_kwargs": mk}}}}
     kw = {"temperature": float(p["temperature"]),
           "model_info": {"max_input_tokens": int(p.get("context") or 131072), "max_output_tokens": mt,
                          "input_cost_per_token": 0, "output_cost_per_token": 0},
-          "llm_call_kwargs": {"max_tokens": mt, **({"extra_body": eb} if eb else {})}}
+          "llm_call_kwargs": {"max_tokens": mt, "timeout": LLM_TIMEOUT, **({"extra_body": eb} if eb else {})}}
     return {"name": name, "model_name": "openai/" + s["model"], "base_url": url, "kwargs": kw}
 
 
