@@ -6012,7 +6012,7 @@ function benchParamsTxt(p) {
     + ` · max ${p.max_tokens} · T ${p.temperature} · ×${p.concurrency}`
     + (p.agent ? ` · ${p.agent}` : "") + (p.host ? ` @ ${p.host}` : "");
 }
-const isHarbor = (b) => (benchData?.harbor || ["terminal_bench", "swebench_verified"]).includes(b);
+const isHarbor = (b) => (benchData?.harbor || ["terminal_bench_4", "terminal_bench", "swebench_verified"]).includes(b);
 function renderBenchBoard(d) {
   const box = $("#bench-board"); box.innerHTML = "";
   // best FINISHED (or largest in-progress, marked) run per provider·model per bench
@@ -6086,15 +6086,16 @@ const BENCH_NAMES = {}, BENCH_OF = {};
 const BENCH_ABOUT = {
   gpqa_diamond: "198 grad-level science MCQs; same seeded question order + answer shuffle for every model",
   ifeval: "541 prompts with verifiable formatting instructions (word counts, no commas, JSON, sections…), checked by Google's IFEval code. Score = prompt-level strict; greedy (T 0) is the usual setting",
-  terminal_bench: "89 shell tasks, each in its own container, solved by Harbor's terminus-2 agent with your model; pass = the task's tests pass. Slow: minutes per task",
+  terminal_bench_4: "Terminal-Bench 4.0: 63 hard shell tasks (the 3 GPU tasks are skipped), each in its own container plus a separate verifier container, solved by Harbor's terminus-2 agent with your model; pass = the task's tests pass. Agents get up to 8 h per task — very slow",
+  terminal_bench: "Terminal-Bench 2.0 (superseded by 4.0, kept so older runs stay comparable): 89 shell tasks, each in its own container, solved by Harbor's terminus-2 agent with your model; pass = the task's tests pass. Slow: minutes per task",
   swebench_verified: "500 real GitHub issues (12 Python repos): the agent patches the repo in the task's container, then the hidden tests run. x86_64 images of 1-3 GB each — run them on a roomy x86 runner host. Slow: ~5-30 min per task",
 };
 function benchFormSync() {
-  const b = $("#bench-bench").value, N = (benchData?.dataset[b] || {}).n || (b === "terminal_bench" ? 89 : b === "swebench_verified" ? 500 : 198);
+  const b = $("#bench-bench").value, N = (benchData?.dataset[b] || {}).n || (b === "terminal_bench" ? 89 : b === "terminal_bench_4" ? 63 : b === "swebench_verified" ? 500 : 198);
   $("#bench-about").textContent = BENCH_ABOUT[b] || "";
   const sel = $("#bench-n"), keep = sel.value;
   sel.innerHTML = "";
-  for (const v of ({ terminal_bench: [5, 20, 50], swebench_verified: [5, 20, 50, 100], ifeval: [50, 100, 200] }[b] || [20, 50, 100]).filter((v) => v < N)) sel.appendChild(new Option(`${v}` + (v <= 20 ? " — quick look" : ""), v));
+  for (const v of ({ terminal_bench_4: [5, 20], terminal_bench: [5, 20, 50], swebench_verified: [5, 20, 50, 100], ifeval: [50, 100, 200] }[b] || [20, 50, 100]).filter((v) => v < N)) sel.appendChild(new Option(`${v}` + (v <= 20 ? " — quick look" : ""), v));
   sel.appendChild(new Option(`${N} — full`, N));
   sel.value = [...sel.options].some((o) => o.value === keep) ? keep : String(N);
   $("#btn-bench-run").disabled = !(benchData?.dataset[b] || {}).ok;
@@ -6174,16 +6175,19 @@ async function refreshBench() {
     }
     dsb.appendChild(row);
   };
-  const g = d.dataset.gpqa_diamond, t = d.dataset.terminal_bench, f = d.dataset.ifeval;
+  const g = d.dataset.gpqa_diamond, f = d.dataset.ifeval;
   line("gpqa_diamond", g.ok ? `GPQA Diamond: ${g.n} questions (local, data/bench — never committed)`
     : g.has_token ? "GPQA Diamond isn't downloaded yet (gated on Hugging Face; uses your HF token)."
     : "GPQA Diamond needs a Hugging Face token with access to Idavidrein/gpqa (HF_TOKEN or huggingface-cli login).", !g.ok);
   line("ifeval", f.ok ? `IFEval: ${f.n} prompts (google/IFEval + nltk punkt_tab, local)`
     : "IFEval isn't downloaded yet (≈200 KB prompts + nltk tokenizer data).", !f.ok);
-  line("terminal_bench", !t.harbor ? "Terminal-Bench needs Harbor: run `uv tool install harbor` on this box."
-    : !t.docker ? "Terminal-Bench needs Docker on this box."
-    : t.n ? `Terminal-Bench 2.0: ${t.n} tasks via Harbor + Docker · ${t.free_gb} GB free (task images are removed after each task)`
-    : "Terminal-Bench 2.0 task definitions aren't downloaded yet (≈50 MB; images are pulled per task).", t.harbor && t.docker && !t.n);
+  for (const [k, v] of [["terminal_bench_4", "4.0"], ["terminal_bench", "2.0"]]) {
+    const t = d.dataset[k];
+    if (t) line(k, !t.harbor ? `Terminal-Bench ${v} needs Harbor: run \`uv tool install harbor\` on this box.`
+      : !t.docker ? `Terminal-Bench ${v} needs Docker on this box (or set a runner host).`
+      : t.n ? `Terminal-Bench ${v}: ${t.n} tasks via Harbor + Docker · ${t.free_gb} GB free (task images are removed after each task)`
+      : `Terminal-Bench ${v} task definitions aren't downloaded yet (images are pulled per task).`, t.harbor && t.docker && !t.n);
+  }
   const w = d.dataset.swebench_verified;
   if (w) line("swebench_verified", !w.harbor ? "SWE-bench Verified needs Harbor here to list its tasks: run `uv tool install harbor` on this box."
     : w.n ? `SWE-bench Verified: ${w.n} tasks via Harbor · runs on this box (${w.free_gb} GB free) or any SSH runner host with Docker + Harbor`

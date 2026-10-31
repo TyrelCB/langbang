@@ -1,5 +1,5 @@
-"""▤ BENCH — model/provider evaluations: GPQA Diamond, IFEval, Terminal-Bench 2.0,
-SWE-bench Verified.
+"""▤ BENCH — model/provider evaluations: GPQA Diamond, IFEval, Terminal-Bench
+4.0 (and 2.0, kept for older runs), SWE-bench Verified.
 
 GPQA Diamond: 198 graduate-level 4-choice science questions (Rein et al.).
 The dataset is gated on Hugging Face and its authors ask that it never be
@@ -27,6 +27,9 @@ terminus-2 agent pointed at the provider's OpenAI-compatible endpoint —
 one Harbor job PER TASK, so progress/resume are per task and each task's
 image (0.5-1.5 GB, prebuilt) is removed after its trial unless it was
 already on the box. Reward 1.0 = the task's tests pass.
+Terminal-Bench 4.0 (terminal-bench/terminal-bench@4.0.0, 66 tasks, 8 h agent
+timeouts, separate verifier containers) runs the same way; its 3 GPU tasks
+are left out (63), and the verifier image is removed with the task's.
 
 SWE-bench Verified (500 human-validated GitHub issues from 12 Python repos):
 the same Harbor path with its swebench-verified adapter — the agent edits
@@ -74,12 +77,14 @@ THINK_RE = re.compile(r"(?s)^.*?</think>\s*")  # reasoning leaked into content (
 TB_DIR = os.path.join(BENCH_DIR, "terminal-bench-2.0")
 JOBS_DIR = os.path.join(BENCH_DIR, "jobs")
 TB_DATASET = "terminal-bench@2.0"
+TB4_DIR = os.path.join(BENCH_DIR, "terminal-bench-4.0")
 SWE_DIR = os.path.join(BENCH_DIR, "swebench-verified")
 MIN_FREE_GB = 8  # a task image is ≤ ~3 GB; stop starting tasks below this
-BENCHES = {"gpqa_diamond": "GPQA Diamond", "ifeval": "IFEval", "terminal_bench": "Terminal-Bench 2.0",
-           "swebench_verified": "SWE-bench Verified"}
+BENCHES = {"gpqa_diamond": "GPQA Diamond", "ifeval": "IFEval", "terminal_bench_4": "Terminal-Bench 4.0",
+           "terminal_bench": "Terminal-Bench 2.0", "swebench_verified": "SWE-bench Verified"}
 # Harbor-run benchmarks: local task dir, registry dataset, default agent
-HARBOR = {"terminal_bench": (TB_DIR, TB_DATASET, "terminus-2"),
+HARBOR = {"terminal_bench_4": (TB4_DIR, "terminal-bench/terminal-bench@4.0.0", "terminus-2"),
+          "terminal_bench": (TB_DIR, TB_DATASET, "terminus-2"),
           "swebench_verified": (SWE_DIR, "swebench-verified@1.0", "mini-swe-agent")}
 AGENTS = ("terminus-2", "mini-swe-agent")
 REMOTE_ROOT = "langbang-bench"  # under the SSH host's home
@@ -154,8 +159,9 @@ FROM_RE = re.compile(r"(?im)^\s*FROM\s+(\S+)")
 
 def harbor_tasks(bench: str) -> list[dict]:
     """A Harbor benchmark's tasks in the fixed order ([] = not downloaded).
-    `image` = the prebuilt image, else the Dockerfile's FROM (removed after
-    the trial for disk; Harbor itself drops the image it builds on top)."""
+    `images` = the prebuilt image (+ a separate verifier's), else the
+    Dockerfile's FROM (removed after the trial for disk; Harbor itself drops
+    the image it builds on top). GPU tasks are skipped: no runner has one."""
     if bench in _hb:
         return _hb[bench]
     root, out = HARBOR[bench][0], []
@@ -165,6 +171,8 @@ def harbor_tasks(bench: str) -> list[dict]:
         except (OSError, tomllib.TOMLDecodeError):
             continue
         m, env = d.get("metadata") or {}, d.get("environment") or {}
+        if env.get("gpus"):
+            continue
         image = env.get("docker_image") or ""
         if not image:
             try:
@@ -173,7 +181,8 @@ def harbor_tasks(bench: str) -> list[dict]:
             except OSError:
                 pass
         out.append({"qid": os.path.basename(os.path.dirname(p)), "gold": m.get("difficulty") or "",
-                    "domain": m.get("category") or "", "image": image,
+                    "domain": m.get("category") or "",
+                    "images": [i for i in (image, (d.get("verifier") or {}).get("environment", {}).get("docker_image")) if i],
                     "dir": os.path.relpath(os.path.dirname(p), root),
                     "timeout": float((d.get("agent") or {}).get("timeout_sec") or 900)})
     out.sort(key=lambda x: _h("order:" + x["qid"]))
@@ -563,12 +572,15 @@ async def _host_prep(host: str, bench: str) -> None:
 async def _cleanup_trial(host: str, job_dir: str) -> None:
     """Remove containers of this job's trial(s): a STOP / timeout kill can
     leave Harbor's compose project (named <trial>__env) running, and the
-    image it built for the task (<trial>__env-main, GBs) behind."""
+    image it built for the task (<trial>__env-main, GBs) behind; a separate
+    verifier runs as its own project (<trial>__verifier__<key>)."""
     _, ls = await _sh(host, "ls", job_dir)
+    _, ps = await _docker(host, "ps", "-a", "--filter", "label=com.docker.compose.project",
+                          "--format", '{{.ID}} {{.Label "com.docker.compose.project"}}')
     for t in [x for x in ls.split() if "__" in x]:
-        _, ids = await _docker(host, "ps", "-aq", "--filter", f"label=com.docker.compose.project={t.lower()}__env")
-        if ids.split():
-            await _docker(host, "rm", "-f", *ids.split())
+        ids = [c[0] for c in (ln.split() for ln in ps.splitlines()) if len(c) == 2 and c[1].startswith(t.lower() + "__")]
+        if ids:
+            await _docker(host, "rm", "-f", *ids)
         await _docker(host, "rmi", "-f", f"{t.lower()}__env-main")
 
 
@@ -633,7 +645,7 @@ async def _one_harbor(c, rid: str, idx: int, q: dict, s: dict, p: dict, bench: s
            "agents": [_agent_cfg(p.get("agent") or HARBOR[bench][2], s, p)], "tasks": [{"path": task}]}
     shutil.rmtree(job_dir, ignore_errors=True)  # a resumed task starts clean
     os.makedirs(os.path.dirname(job_dir), exist_ok=True)
-    had_image = bool(q["image"]) and (await _docker(host, "image", "inspect", q["image"]))[0] == 0
+    pulled = [i for i in q["images"] if (await _docker(host, "image", "inspect", i))[0] != 0]
     key = s.get("api_key") or "none"
     row = proc = None
     try:
@@ -695,8 +707,8 @@ async def _one_harbor(c, rid: str, idx: int, q: dict, s: dict, p: dict, bench: s
         row = (rid, idx, q["qid"], q["gold"], "", 0, None, None, round(time.time() - t0, 1),
                None, f"{type(e).__name__}: {e}"[:400], "")
     finally:
-        if q["image"] and not had_image:  # disk: drop images this run pulled
-            await _docker(host, "rmi", "-f", q["image"])
+        for i in pulled:  # disk: drop images this run pulled
+            await _docker(host, "rmi", "-f", i)
         if host:
             await _sh(host, script=f"rm -rf {rjob} {rjob}.json {rjob}.pid {rjob}.log; "
                                    f"rmdir {os.path.dirname(rjob)} 2>/dev/null", timeout=60)
