@@ -39,7 +39,8 @@ leaderboard harness); terminus-2 also works. The images are x86_64 and
 1-3 GB each, so a Harbor run can go to another box: params.host = an SSH
 host with Docker + Harbor (~/.local/bin/harbor). LangBang then copies the
 job config over, runs `harbor run` there (task definitions downloaded into
-~/langbang-bench/ on first use), and rsyncs the trial dir back for scoring.
+~/langbang-bench/ on first use), and streams the trial dir back (ssh + tar)
+for scoring.
 """
 
 import asyncio
@@ -637,7 +638,7 @@ def _trial_text(trial: str) -> str:
 
 async def _one_harbor(c, rid: str, idx: int, q: dict, s: dict, p: dict, bench: str) -> None:  # noqa: ANN001
     """One task = one Harbor job, here or on p.host. Remote: config (and the
-    API key, via stdin) go over ssh, the trial dir is rsynced back after."""
+    API key, via stdin) go over ssh, the trial dir is copied back after."""
     t0 = time.time()
     host, root = p.get("host") or "", HARBOR[bench][0]
     job_dir = os.path.join(JOBS_DIR, rid, q["qid"])  # local copy, parsed below
@@ -673,10 +674,13 @@ async def _one_harbor(c, rid: str, idx: int, q: dict, s: dict, p: dict, bench: s
         # task timeout (agent + verifier + image pull) with headroom
         out, _ = await asyncio.wait_for(proc.communicate(stdin), q["timeout"] * 2.5 + 900)
         if host:
-            rc, msg = await _sh("", "rsync", "-a", "-e", shlex.join(["ssh", *SSH_OPTS]),
-                                f"{host}:{rjob}/", job_dir + "/", timeout=300)
+            # ssh + tar, not rsync: under the systemd unit SELinux puts
+            # /usr/bin/rsync in rsync_t, which may not exec ssh
+            os.makedirs(job_dir, exist_ok=True)
+            rc, msg = await _sh("", "bash", "-o", "pipefail", "-c", shlex.join(["ssh", *SSH_OPTS, host, f"tar -C {rjob} -cf - ."])
+                                + " | " + shlex.join(["tar", "-xf", "-", "-C", job_dir]), timeout=300)
             if rc != 0:
-                raise RuntimeError(f"rsync from {host} failed: {msg[-200:]}")
+                raise RuntimeError(f"copying the trial back from {host} failed: {msg[-200:]}")
         res = glob.glob(os.path.join(job_dir, "*__*", "result.json"))
         if not res:
             raise RuntimeError("harbor produced no trial result: " + out.decode(errors="replace")[-300:])
