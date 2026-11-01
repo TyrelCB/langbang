@@ -6098,7 +6098,11 @@ function benchFormSync() {
   for (const v of ({ terminal_bench_4: [1, 5, 20], terminal_bench: [1, 5, 20, 50], swebench_verified: [1, 5, 20, 50, 100], ifeval: [50, 100, 200] }[b] || [20, 50, 100]).filter((v) => v < N)) sel.appendChild(new Option(`${v}` + (v <= 20 ? " — quick look" : ""), v));
   sel.appendChild(new Option(`${N} — full`, N));
   sel.value = [...sel.options].some((o) => o.value === keep) ? keep : String(N);
-  $("#btn-bench-run").disabled = !(benchData?.dataset[b] || {}).ok;
+  const ready = !!(benchData?.dataset[b] || {}).ok, why = ready ? "" : `${BENCH_NAMES[b] || b} isn't downloaded yet: use DOWNLOAD in the dataset list above`;
+  $("#btn-bench-run").disabled = !ready;
+  $("#btn-bench-run").title = why;
+  const msg = $("#bench-msg");
+  if (why || msg.dataset.why) msg.textContent = why, msg.dataset.why = why;
   const hb = isHarbor(b);
   for (const e of document.querySelectorAll(".bench-hb")) e.classList.toggle("hidden", !hb);
   if (hb && benchFormBench !== b) { // per-bench agent + runner host (remembered in this browser)
