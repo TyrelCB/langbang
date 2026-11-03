@@ -248,10 +248,20 @@ points at them:
   (same chars/4 estimator as compaction) and a topbar `CTX ~N` for the open
   thread: what the *next* model call re-prefills (post-compaction state, not
   the full UI transcript).
-- **Chat search** — `⌕ SEARCH CHATS` scans every thread's full transcript
-  (compaction archives, thinking and tool-call args included, capped at 50
-  hits); clicking a hit opens the thread and scrolls to the matching message
-  with a flash highlight. Deep-linkable with `?q=`.
+- **Chat search** — `⌕ SEARCH CHATS` ranks threads best-first by fusing two
+  searches (reciprocal rank fusion):
+  - **Words:** an SQLite FTS5 index (`server/searchidx.py`, `data/search.db`)
+    with BM25. Your messages weigh more than the agent's, and tool output
+    weighs least. Threads matching more of the query words rank higher.
+  - **Meaning:** the RAG node holds one doc per exchange (`lb-thread:` paths,
+    source `thread`), so "the thread with the browser CDP session" finds a
+    thread that only ever said "persistent browser" and "LinkedIn".
+  - A one-time backfill indexed older threads; new exchanges are indexed as
+    they finish. Temp threads are skipped.
+  - Each hit highlights every matched term. A badge shows `≈` for a meaning
+    match and the number of matching messages; hover it for details. A `"quoted"` query falls back to the old exact-substring scan.
+  - Clicking a hit opens the thread and scrolls to the matching message with
+    a flash highlight. Deep-linkable with `?q=`.
 - **Thread titles** — every sidebar row carries ✎ (manual inline rename), ⚡
   (LLM auto-title from the conversation) and ⟲ (restore the *initial* title —
   the first message's seed or the scheduled task's name). Nothing is locked:
@@ -590,3 +600,47 @@ curl -s localhost:8123/v1/systemone -H 'content-type: application/json' -d '{
   - Probes and runs use key auth only: no password prompt can hang a request.
 - **Phones:** a key row (Esc, Tab, ^C, ^D, ^Z, ^L, arrows, `| ~ /`) appears on touch
   screens. The fleet list starts hidden there; ◫ FLEET toggles it.
+
+## ▤ BENCH — model evaluations (`server/bench.py`)
+
+▤ BENCH runs a benchmark against any provider/model with LangBang's own
+sampling and thinking controls (thinking on/off, effort, budget, max tokens,
+temperature). Every answer is saved as it lands, so a stopped run or a
+restart resumes where it left off, and errored items are redone on RESUME.
+Each bench uses a fixed seeded order, so an N-item quick look is the same N
+items for every model. Datasets and outputs live under `data/bench/` and
+`data/bench.db` and are never committed.
+
+| Bench | Items | Scoring |
+|---|---|---|
+| GPQA Diamond | 198 four-choice science questions | letter match. Gated on Hugging Face: downloaded with your HF token, never published |
+| IFEval | 541 prompts with verifiable instructions | Google's checkers (vendored in `server/ifeval/`). Headline = prompt-level strict; instruction-level and loose are kept per answer |
+| Terminal-Bench 4.0 | 63 of 66 shell tasks (the 3 GPU tasks skipped) | the task's tests pass, run in a separate verifier container. Agents get up to 8 h per task |
+| Terminal-Bench 2.0 | 89 shell tasks | kept so older runs stay comparable |
+| SWE-bench Verified | 500 GitHub issues from 12 Python repos | the hidden FAIL_TO_PASS / PASS_TO_PASS tests pass |
+
+**Harbor benches** (Terminal-Bench, SWE-bench):
+- They run through [Harbor](https://github.com/laude-institute/harbor)
+  (`uv tool install harbor` + Docker), one Harbor job per task.
+- The agent is terminus-2 (TB default) or mini-swe-agent (SWE default),
+  pointed at the provider's OpenAI-compatible endpoint.
+- Each model call may take up to 1 h, because LiteLLM's 600 s default
+  cut off long thinking turns on slow local servers.
+- Task images that a run pulled are removed after the task, the separate
+  verifier's included. STOP also removes the trial's containers.
+
+**Runner hosts:**
+- Set Runner host to an SSH alias, e.g. an x86 box with disk for SWE-bench's
+  1-3 GB x86_64 images.
+- That host needs Docker and `~/.local/bin/harbor`.
+- LangBang downloads the task definitions there (`~/langbang-bench/`),
+  sends the job config and API key over ssh stdin, and runs `harbor run`
+  detached.
+- When the task ends, the trial dir streams back as `ssh host tar | tar -x`.
+  Not rsync: under the systemd unit SELinux confines rsync (`rsync_t`),
+  which may not exec ssh.
+
+**Sizing:** a TB 4.0 task can take hours at local-model speeds, so the
+Questions menu offers 1-task quick looks. Set Context to the model server's
+real context window: terminus-2 condenses its history only near that limit,
+and mini-swe-agent never condenses it.

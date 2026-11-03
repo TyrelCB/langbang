@@ -56,7 +56,7 @@ blowups, mangled tool calls, stuck scheduled runs — is documented in the
 ## Features
 
 **Agent**
-- **Deep agent** ([deepagents](https://github.com/langchain-ai/deepagents)) on LangGraph: `write_todos` planning, sub-agent delegation, file tools, shell, web crawl — with a live to-do panel
+- **Deep agent** ([deepagents](https://github.com/langchain-ai/deepagents)) on LangGraph: `write_todos` planning, sub-agent delegation, file tools, shell, web search ([Tavily](https://tavily.com)) + crawl — with a live to-do panel
 - **Plan mode + human gates** — the agent asks you structured questions (`ask_user`) and, in plan mode, investigates read-only and waits for you to approve the plan
 - **MCP servers** (stdio / SSE / streamable-HTTP) managed in the UI — test connection, enable/park, import from Claude Desktop configs
 - **Skills** ([Agent Skills](https://agentskills.io) spec) — the agent writes and improves its own skills, and can read your existing Hermes skill tree
@@ -80,8 +80,9 @@ blowups, mangled tool calls, stuck scheduled runs — is documented in the
 - **Voice** — read-aloud with local streaming [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) (CPU, voice cloning) or gTTS / Google Cloud, with a text normalizer so dates, times, money and tables are spoken correctly; 🎙 speak your messages, or go hands-free with TALK mode (listen → send on a pause → read the answer → listen again)
 - **Phone assistant (IVR)** — `/api/ivr/*` for a telephony bridge: speech in, speech out, backed by a separate, locked-down agent (its own model and tool allowlist, no shell or file writes) that can search your knowledge base and take messages
 - **Per-thread tools + features** (⚙ TOOLS, `/tools`) — restrict or force tools per thread, ∅ bare mode (no tools at all, like llama-server), switch memory / auto-learn / skills / auto-search / compaction / ◈ thinking per thread; ⌛ temp threads (`/temp`, `/bare`) skip learning, stay out of other threads' hints and are deleted after 24 h idle
-- **▤ BENCH** — benchmark any provider/model on GPQA Diamond (dataset downloaded at runtime with your HF token, never committed), IFEval (Google's instruction checkers, vendored in `server/ifeval/`) and Terminal-Bench 4.0 (63 containerized shell tasks, the 3 GPU ones skipped; 2.0 kept for older runs) via [Harbor](https://github.com/laude-institute/harbor)'s terminus-2 agent (`uv tool install harbor` + Docker) and SWE-bench Verified (500 GitHub issues, mini-swe-agent or terminus-2 via Harbor; Harbor runs can go to any SSH runner host with Docker + Harbor, e.g. an x86 box with disk for the 1-3 GB images); per-answer persistence, resumable runs, leaderboard
-- **Per-thread prompts**, chat search, recap, inline media for any cited file path, and a hidden X-SIM platformer for waiting on slow models
+- **▤ BENCH** — benchmark any provider/model on GPQA Diamond (dataset downloaded at runtime with your HF token, never committed), IFEval (Google's instruction checkers, vendored in `server/ifeval/`) and Terminal-Bench 4.0 (63 containerized shell tasks, the 3 GPU ones skipped; 2.0 kept for older runs) via [Harbor](https://github.com/laude-institute/harbor)'s terminus-2 agent (`uv tool install harbor` + Docker) and SWE-bench Verified (500 GitHub issues, mini-swe-agent or terminus-2 via Harbor). Harbor runs can go to any SSH runner host with Docker + Harbor, e.g. an x86 box with disk for the 1-3 GB images; 1-task quick looks for the slow agentic benches; per-answer persistence, resumable runs, leaderboard — [docs/FEATURES.md](docs/FEATURES.md#-bench--model-evaluations-serverbenchpy)
+- **Chat search** — ranked, not literal: keyword (BM25) and meaning (RAG) matches fused, so "the thread with the browser CDP session" finds it; `"quotes"` for an exact match
+- **Per-thread prompts**, recap, inline media for any cited file path, and a hidden X-SIM platformer for waiting on slow models
 
 See **[docs/FEATURES.md](docs/FEATURES.md)** for the full reference.
 
@@ -166,7 +167,7 @@ live run and replay what they missed.
 | `server/config.py` | settings, providers, per-run resolution |
 | `server/learning.py` | per-thread prompts, memory, post-run skill/memory review |
 | `server/mcp.py` | MCP client with per-server timeouts and isolation |
-| `server/local_tools.py` | shell, files, crawl, image generation, scheduling tools |
+| `server/local_tools.py` | shell, files, web search, crawl, image generation, scheduling tools |
 | `server/voice.py`, `server/ttsjobs.py`, `server/ttsnorm.py` | TTS providers, streaming jobs, text normalization |
 | `server/comfy.py` | ComfyUI workflow builder (Qwen-Image text-to-image + edit) |
 | `server/audioart.py` | audio metadata, tempo/key/energy analysis, images-from-audio prompts |
@@ -174,7 +175,9 @@ live run and replay what they missed.
 | `server/decide.py` | `/v1/systemone` decision endpoint: System 1 backends (Laya) in order, chat-model fallback/escalation |
 | `server/ivr.py` | phone assistant: STT → restricted agent → TTS, call log |
 | `server/notify.py` | toasts / desktop / ntfy push |
-| `server/rag.py` | RAG node client: search tools backend + fire-and-forget ingest pushes |
+| `server/rag.py` | RAG node client: search tools backend + fire-and-forget ingest pushes (one doc per chat exchange) |
+| `server/searchidx.py` | chat-search keyword index (SQLite FTS5, BM25) |
+| `server/bench.py` | ▤ BENCH: datasets, runs, scoring, Harbor runner hosts |
 | `rag/` | the RAG node (own service): embedder backends, vector store, indexer, federation, search UI |
 | `server/fileassist.py`, `server/sfxgen.py` | FILES AI edit bar; UI sound-effect regeneration |
 | `web/` | `index.html`, `app.js`, `style.css`, `term.js` (▮ TERM), `viz.js` (audio visualizer), `game.js` (X-SIM), `sfx.js`, vendored JS, sounds |
