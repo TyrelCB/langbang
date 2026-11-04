@@ -325,9 +325,13 @@ async def _tick() -> None:
                 async with agent._wt(agent._db):
                     await agent._db.execute("UPDATE procs SET woke=? WHERE id=?", (time.time(), p["id"]))
         elif p["wake"] == "match" and p["state"] != "running" and not p["woke"]:
-            # the match never came; nobody is waiting on an exit — just close it
-            await agent._db.execute("UPDATE procs SET woke=? WHERE id=?", (time.time(), p["id"]))
-            await agent._db.commit()
+            # the match never came, but the agent ended its turn waiting for it:
+            # tell it the process is gone (the panel says "woke the thread")
+            what = (f"exited with code {p['exit']}" if p["state"] == "exited"
+                    else "was killed before it could record an exit code (timeout, OOM or reboot)")
+            if await _wake(p, f"{what} without ever printing a line matching /{p['wake_match']}/"):
+                async with agent._wt(agent._db):
+                    await agent._db.execute("UPDATE procs SET woke=? WHERE id=?", (time.time(), p["id"]))
 
 
 _poller: asyncio.Task | None = None

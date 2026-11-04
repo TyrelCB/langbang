@@ -23,7 +23,7 @@ import json
 import time
 from typing import AsyncIterator
 
-from . import agent, learning, notify, rag
+from . import agent, config, learning, notify, rag
 
 MAX_ACTIVE = 4       # concurrent runs across ALL threads (shared Spark)
 GRACE = 300.0        # seconds a finished hub lingers for late reopen/replay
@@ -143,6 +143,23 @@ async def _produce(hub: Hub, events: AsyncIterator[dict]) -> None:
     # run's generator is exhausted → every checkpoint put has committed, and
     # this thread just left the active set → cheap moment to bound the tables
     agent.schedule_prune()
+    agent._spawn(_late_steers(hub.tid))
+
+
+async def _late_steers(tid: str) -> None:
+    """A steer (typed, or a background-process wake) that arrived after the
+    run's last steer check — while it filed the thread, checked gates or
+    finished up, still Busy — would otherwise be dropped by the next run's
+    start. It starts the next turn instead. A pending question/plan keeps
+    the thread waiting on the user, so it is left alone."""
+    if not agent._STEERS.get(tid) or await agent.pending_gates(tid):
+        return
+    left = agent.steer_take(tid)
+    try:
+        start(tid, agent.run_chat(tid, "\n\n".join(left), config.load()))
+    except (Busy, TooMany):  # someone else started it: deliver there instead
+        for t in left:
+            agent.steer_put(tid, t)
 
 
 async def _on_cancel(hub: Hub) -> None:
