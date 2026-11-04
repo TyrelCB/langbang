@@ -11,15 +11,78 @@ call): a dead or slow server must not take the agent down with it.
   and agent.py's tool guard turns it into an error result the model reads.
 """
 import asyncio
+import json
 import logging
+import threading
+import time
+import urllib.parse
+import urllib.request
+from pathlib import Path
 
+import httpx
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 logger = logging.getLogger("langbang.mcp")
 
 LOAD_TIMEOUT = 15.0     # connect + list tools, per server
 CALL_TIMEOUT = 300.0    # one tool call; override per server: "call_timeout": 1800
-LANGBANG_KEYS = ("disabled", "call_timeout")  # ours — never passed to the client
+LANGBANG_KEYS = ("disabled", "call_timeout", "oauth_file")  # ours — never passed to the client
+
+
+class FileBearerAuth(httpx.Auth):
+    """Bearer auth from an OAuth token JSON file, refreshed on expiry (401-safe).
+
+    Config: "oauth_file": "~/.path/token.json" — the file must carry
+    access_token (+ optionally refresh_token, expires_at, client_id,
+    token_endpoint, resource). The refreshed token is written back.
+    """
+
+    _locks: dict[str, threading.Lock] = {}
+
+    def __init__(self, path: str):
+        self.path = Path(path).expanduser()
+        self._lock = self._locks.setdefault(str(self.path), threading.Lock())
+
+    def _refresh(self, d: dict) -> dict:
+        data = {"grant_type": "refresh_token", "refresh_token": d["refresh_token"],
+                "client_id": d.get("client_id", "")}
+        if d.get("scope"):
+            data["scope"] = d["scope"]
+        if d.get("resource"):
+            data["resource"] = d["resource"]
+        req = urllib.request.Request(
+            d["token_endpoint"], data=urllib.parse.urlencode(data).encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded",
+                     "User-Agent": "Mozilla/5.0"})  # CF blocks the urllib UA
+        with urllib.request.urlopen(req, timeout=30) as r:
+            new = json.load(r)
+        d = {**d, **new,
+             "expires_at": time.time() + int(new.get("expires_in", 3600)) - 60}
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(d, indent=2))
+        tmp.chmod(0o600)
+        tmp.replace(self.path)
+        logger.info("MCP oauth: refreshed token for %s", self.path.name)
+        return d
+
+    def token(self) -> str:
+        with self._lock:
+            d = json.loads(self.path.read_text())
+            if time.time() >= float(d.get("expires_at", 0)) and d.get("refresh_token"):
+                d = self._refresh(d)
+            return d["access_token"]
+
+    async def async_auth_flow(self, request):
+        token = await asyncio.to_thread(self.token)
+        request.headers["Authorization"] = f"Bearer {token}"
+        response = yield request
+        if response.status_code == 401:
+            with self._lock:  # force one refresh, then retry once
+                d = json.loads(self.path.read_text())
+                d = self._refresh(d) if d.get("refresh_token") else d
+                token = d["access_token"]
+            request.headers["Authorization"] = f"Bearer {token}"
+            yield request
 
 _client: MultiServerMCPClient | None = None
 _tools: list = []
@@ -39,7 +102,10 @@ def _active(servers: dict) -> dict:
 
 
 def _client_cfg(cfg: dict) -> dict:
-    return {k: v for k, v in cfg.items() if k not in LANGBANG_KEYS}
+    out = {k: v for k, v in cfg.items() if k not in LANGBANG_KEYS}
+    if cfg.get("oauth_file"):
+        out["auth"] = FileBearerAuth(cfg["oauth_file"])
+    return out
 
 
 def _root(e: BaseException) -> str:
