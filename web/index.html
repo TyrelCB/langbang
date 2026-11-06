@@ -584,9 +584,9 @@
     <div class="panel-inner bench-inner">
       <h2>BENCHMARKS</h2>
       <section class="cfg-card wide">
-        <h3>LEADERBOARD <span class="hint">accuracy % · best finished run per model · <b>bold</b> = top</span></h3>
+        <h3>LEADERBOARD <span class="hint">accuracy % · best finished run per model · <b>bold</b> = top · hover a cell for details</span></h3>
         <div id="bench-board"></div>
-        <div id="bench-ds" class="hint"></div>
+        <details id="bench-ds-box"><summary id="bench-ds-sum">DATASETS</summary><div id="bench-ds" class="hint"></div></details>
       </section>
       <section class="cfg-card wide">
         <h3>NEW RUN <span class="hint" id="bench-about"></span></h3>
@@ -612,7 +612,12 @@
         <datalist id="dl-bench-models"></datalist>
         <div class="row end"><span id="bench-msg" class="hint"></span><button id="btn-bench-run" class="btn accent">▶ RUN</button></div>
       </section>
-      <div id="bench-runs"></div>
+      <section class="cfg-card wide">
+        <h3>RUNS <span class="hint" id="bench-runs-count"></span>
+          <select id="bench-runs-filter" title="show runs of one benchmark"><option value="">all benchmarks</option></select></h3>
+        <div id="bench-runs"></div>
+        <div class="row end"><button id="btn-bench-more" class="btn ghost hidden" type="button"></button></div>
+      </section>
       <div class="row end"><button id="btn-bench-close" class="btn ghost">CLOSE</button></div>
     </div>
   </div>

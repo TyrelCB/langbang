@@ -79,12 +79,15 @@ TB_DIR = os.path.join(BENCH_DIR, "terminal-bench-2.0")
 JOBS_DIR = os.path.join(BENCH_DIR, "jobs")
 TB_DATASET = "terminal-bench@2.0"
 TB4_DIR = os.path.join(BENCH_DIR, "terminal-bench-4.0")
+TB21_DIR = os.path.join(BENCH_DIR, "terminal-bench-2.1")
 SWE_DIR = os.path.join(BENCH_DIR, "swebench-verified")
 MIN_FREE_GB = 8  # a task image is ≤ ~3 GB; stop starting tasks below this
 BENCHES = {"gpqa_diamond": "GPQA Diamond", "ifeval": "IFEval", "terminal_bench_4": "Terminal-Bench 4.0",
-           "terminal_bench": "Terminal-Bench 2.0", "swebench_verified": "SWE-bench Verified"}
+           "terminal_bench_21": "Terminal-Bench 2.1", "terminal_bench": "Terminal-Bench 2.0",
+           "swebench_verified": "SWE-bench Verified"}
 # Harbor-run benchmarks: local task dir, registry dataset, default agent
 HARBOR = {"terminal_bench_4": (TB4_DIR, "terminal-bench/terminal-bench@4.0.0", "terminus-2"),
+          "terminal_bench_21": (TB21_DIR, "terminal-bench/terminal-bench-2-1", "terminus-2"),
           "terminal_bench": (TB_DIR, TB_DATASET, "terminus-2"),
           "swebench_verified": (SWE_DIR, "swebench-verified@1.0", "mini-swe-agent")}
 AGENTS = ("terminus-2", "mini-swe-agent")

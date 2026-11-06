@@ -6012,53 +6012,82 @@ function benchParamsTxt(p) {
     + ` · max ${p.max_tokens} · T ${p.temperature} · ×${p.concurrency}`
     + (p.agent ? ` · ${p.agent}` : "") + (p.host ? ` @ ${p.host}` : "");
 }
-const isHarbor = (b) => (benchData?.harbor || ["terminal_bench_4", "terminal_bench", "swebench_verified"]).includes(b);
+const isHarbor = (b) => (benchData?.harbor || ["terminal_bench_4", "terminal_bench_21", "terminal_bench", "swebench_verified"]).includes(b);
+const BENCH_SHORT = { gpqa_diamond: "GPQA-D", ifeval: "IFEval", terminal_bench_4: "TB 4.0", terminal_bench_21: "TB 2.1",
+  terminal_bench: "TB 2.0", swebench_verified: "SWE-V" };
+const benchUnit = (b) => isHarbor(b) ? "tasks" : b === "ifeval" ? "prompts" : "questions";
 function renderBenchBoard(d) {
   const box = $("#bench-board"); box.innerHTML = "";
-  // best FINISHED (or largest in-progress, marked) run per provider·model per bench
-  const cols = new Map();
+  // best FINISHED (or largest in-progress, marked) run per provider·model per bench;
+  // rows = models, most recently run first (d.runs is newest first)
+  const rows = new Map();
   for (const r of d.runs) {
     if (r.acc == null) continue;
     const k = r.provider + "\u0000" + r.model;
-    const c = cols.get(k) || { provider: r.provider, model: r.model, cells: {} };
+    const c = rows.get(k) || { provider: r.provider, model: r.model, cells: {} };
     const cur = c.cells[r.bench];
     const done = r.state === "done";
     const better = !cur || (done && !cur.done) || (done === cur.done && (r.scored > cur.r.scored || (r.scored === cur.r.scored && r.acc > cur.r.acc)));
     if (better) c.cells[r.bench] = { r, done };
-    cols.set(k, c);
+    rows.set(k, c);
   }
-  if (!cols.size) { box.appendChild(el("div", "learn-empty", "no results yet — start a run below")); return; }
+  if (!rows.size) { box.appendChild(el("div", "learn-empty", "no results yet — start a run below")); return; }
+  const list = [...rows.values()], benches = Object.entries(d.benches);
   const tb = el("table", "bench-table"), head = el("tr");
-  head.appendChild(el("th", "", ""));
-  const list = [...cols.values()];
-  for (const c of list) { const th = el("th", "", c.model); th.appendChild(el("span", "bt-prov", c.provider)); head.appendChild(th); }
+  head.appendChild(el("th", "bt-model", "model"));
+  for (const [b, name] of benches) {
+    const N = (d.dataset[b] || {}).n, th = el("th", "", BENCH_SHORT[b] || name);
+    th.title = `${name}: ${N || "?"} ${benchUnit(b)}` + (b === "ifeval" ? " · score = prompt-level strict" : "");
+    th.appendChild(el("span", "bt-prov", `${N || "?"}`));
+    head.appendChild(th);
+  }
   tb.appendChild(head);
-  for (const [b, name] of Object.entries(d.benches)) {
-    const tr = el("tr"), nm = el("td", "bt-name", name);
+  const best = {};
+  for (const [b] of benches) {
     const N = (d.dataset[b] || {}).n;
-    nm.appendChild(el("span", "hint", `${N || "?"} ${isHarbor(b) ? "tasks" : b === "ifeval" ? "prompts · prompt strict" : "questions"}`));
+    best[b] = Math.max(...list.map((c) => (c.cells[b] && c.cells[b].done && c.cells[b].r.scored === N) ? c.cells[b].r.acc : -1));
+  }
+  for (const c of list) {
+    const tr = el("tr"), nm = el("td", "bt-name", c.model);
+    nm.title = `${c.provider} · ${c.model}`;
+    nm.appendChild(el("span", "hint", c.provider));
     tr.appendChild(nm);
-    const best = Math.max(...list.map((c) => (c.cells[b] && c.cells[b].done && c.cells[b].r.scored === N) ? c.cells[b].r.acc : -1));
-    for (const c of list) {
+    for (const [b, name] of benches) {
       const cell = c.cells[b], td = el("td");
-      if (!cell) { td.textContent = "--"; tr.appendChild(td); continue; }
-      const r = cell.r;
+      if (!cell) { td.textContent = "--"; td.className = "bt-none"; tr.appendChild(td); continue; }
+      const r = cell.r, N = (d.dataset[b] || {}).n, part = r.n < N;
       td.appendChild(el("span", "bt-acc", r.acc.toFixed(1) + (cell.done ? "" : "…")));
-      td.appendChild(el("span", "bt-sub", `${r.correct}/${r.scored}` + (r.scored < r.n ? ` of ${r.n}` : "") + (r.n < N ? ` (subset)` : "")
-        + (r.truncated ? ` · ${r.truncated} cut` : "")));
-      if (r.inst_strict != null) td.appendChild(el("span", "bt-sub", `inst ${r.inst_strict} · loose ${r.prompt_loose}`));
-      td.title = `${r.provider} · ${r.model}\n${benchParamsTxt(r.params)}`
-        + (r.inst_strict != null ? `\nprompt strict ${r.acc} · inst strict ${r.inst_strict} · prompt loose ${r.prompt_loose} · inst loose ${r.inst_loose}` : "") + `\nno answer: ${r.no_answer} · truncated: ${r.truncated} · errors: ${r.errors}\navg ${r.avg_tokens ?? "?"} tokens/answer`;
-      if (cell.done && r.scored === N && r.acc === best) td.classList.add("top");
+      td.appendChild(el("span", "bt-sub", `${r.correct}/${r.scored}` + (r.scored < r.n ? ` of ${r.n}` : "")));
+      if (part) td.classList.add("part");
+      td.title = `${name} · ${r.provider} · ${r.model}\n${r.correct}/${r.scored} correct` + (part ? ` — a ${r.n}-${benchUnit(b).replace(/s$/, "")} subset of ${N}` : "")
+        + `\n${benchParamsTxt(r.params)}`
+        + (r.inst_strict != null ? `\nprompt strict ${r.acc} · inst strict ${r.inst_strict} · prompt loose ${r.prompt_loose} · inst loose ${r.inst_loose}` : "")
+        + `\nno answer: ${r.no_answer} · hit max tokens: ${r.truncated} · errors: ${r.errors}\navg ${r.avg_tokens ?? "?"} tokens/answer`;
+      if (cell.done && r.scored === N && r.acc === best[b]) td.classList.add("top");
       tr.appendChild(td);
     }
     tb.appendChild(tr);
   }
   box.appendChild(tb);
 }
+const BENCH_RUNS_SHOWN = 6;
+let benchShowAll = false;
 function renderBenchRuns(d) {
   const box = $("#bench-runs"); box.innerHTML = "";
-  for (const r of d.runs) {
+  const fsel = $("#bench-runs-filter"), fv = fsel.value, counts = {};
+  for (const r of d.runs) counts[r.bench] = (counts[r.bench] || 0) + 1;
+  fsel.length = 1; fsel.options[0].text = `all benchmarks (${d.runs.length})`;
+  for (const [b, name] of Object.entries(d.benches)) if (counts[b]) fsel.appendChild(new Option(`${name} (${counts[b]})`, b));
+  fsel.value = [...fsel.options].some((o) => o.value === fv) ? fv : "";
+  const runs = d.runs.filter((r) => !fsel.value || r.bench === fsel.value);
+  // newest few + anything running or expanded; the rest behind ▾ MORE
+  const shown = benchShowAll ? runs : runs.filter((r, i) => i < BENCH_RUNS_SHOWN || r.state === "running" || r.id === benchOpen);
+  $("#bench-runs-count").textContent = `${runs.length} · newest first`;
+  const more = $("#btn-bench-more");
+  more.classList.toggle("hidden", runs.length <= BENCH_RUNS_SHOWN);
+  more.textContent = benchShowAll ? "▴ SHOW FEWER" : `▾ ${runs.length - shown.length} OLDER`;
+  if (!runs.length) box.appendChild(el("div", "learn-empty", "no runs yet"));
+  for (const r of shown) {
     const card = el("div", "bench-run" + (r.state === "running" ? " running" : ""));
     const head = el("div", "br-head");
     head.appendChild(el("span", "br-title", `${BENCH_NAMES[r.bench] || r.bench} · ${r.provider} · ${benchLabel(r)}`));
@@ -6087,18 +6116,21 @@ const BENCH_ABOUT = {
   gpqa_diamond: "198 grad-level science MCQs; same seeded question order + answer shuffle for every model",
   ifeval: "541 prompts with verifiable formatting instructions (word counts, no commas, JSON, sections…), checked by Google's IFEval code. Score = prompt-level strict; greedy (T 0) is the usual setting",
   terminal_bench_4: "Terminal-Bench 4.0: 63 hard shell tasks (the 3 GPU tasks are skipped), each in its own container plus a separate verifier container, solved by Harbor's terminus-2 agent with your model; pass = the task's tests pass. Agents get up to 8 h per task — very slow",
-  terminal_bench: "Terminal-Bench 2.0 (superseded by 4.0, kept so older runs stay comparable): 89 shell tasks, each in its own container, solved by Harbor's terminus-2 agent with your model; pass = the task's tests pass. Slow: minutes per task",
+  terminal_bench_21: "Terminal-Bench 2.1: the 89 tasks of 2.0 with 26 of them fixed (bugs, timeouts, reward hacks), each in its own container, solved by Harbor's terminus-2 agent with your model; pass = the task's tests pass. Slow: minutes per task",
+  terminal_bench: "Terminal-Bench 2.0 (superseded by 2.1/4.0, kept so older runs stay comparable): 89 shell tasks, each in its own container, solved by Harbor's terminus-2 agent with your model; pass = the task's tests pass. Slow: minutes per task",
   swebench_verified: "500 real GitHub issues (12 Python repos): the agent patches the repo in the task's container, then the hidden tests run. x86_64 images of 1-3 GB each — run them on a roomy x86 runner host. Slow: ~5-30 min per task",
 };
 function benchFormSync() {
-  const b = $("#bench-bench").value, N = (benchData?.dataset[b] || {}).n || (b === "terminal_bench" ? 89 : b === "terminal_bench_4" ? 63 : b === "swebench_verified" ? 500 : 198);
+  const b = $("#bench-bench").value, N = (benchData?.dataset[b] || {}).n || (b === "terminal_bench" || b === "terminal_bench_21" ? 89 : b === "terminal_bench_4" ? 63 : b === "swebench_verified" ? 500 : 198);
   $("#bench-about").textContent = BENCH_ABOUT[b] || "";
   const sel = $("#bench-n"), keep = sel.value;
   sel.innerHTML = "";
-  for (const v of ({ terminal_bench_4: [1, 5, 20], terminal_bench: [1, 5, 20, 50], swebench_verified: [1, 5, 20, 50, 100], ifeval: [50, 100, 200] }[b] || [20, 50, 100]).filter((v) => v < N)) sel.appendChild(new Option(`${v}` + (v <= 20 ? " — quick look" : ""), v));
+  for (const v of ({ terminal_bench_4: [1, 5, 20], terminal_bench_21: [1, 5, 20, 50], terminal_bench: [1, 5, 20, 50], swebench_verified: [1, 5, 20, 50, 100], ifeval: [50, 100, 200] }[b] || [20, 50, 100]).filter((v) => v < N)) sel.appendChild(new Option(`${v}` + (v <= 20 ? " — quick look" : ""), v));
   sel.appendChild(new Option(`${N} — full`, N));
   sel.value = [...sel.options].some((o) => o.value === keep) ? keep : String(N);
   const ready = !!(benchData?.dataset[b] || {}).ok, why = ready ? "" : `${BENCH_NAMES[b] || b} isn't downloaded yet: use DOWNLOAD in the dataset list above`;
+  if (!ready && benchData && benchDsFor !== b) $("#bench-ds-box").open = true;
+  benchDsFor = b;
   $("#btn-bench-run").disabled = !ready;
   $("#btn-bench-run").title = why;
   const msg = $("#bench-msg");
@@ -6112,7 +6144,7 @@ function benchFormSync() {
     $("#bench-host").value = h;
   }
 }
-let benchFormBench = null;
+let benchFormBench = null, benchDsFor = null;
 function benchBenchChanged() { // IFEval is conventionally greedy; the others sample at 0.6
   $("#bench-temp").value = $("#bench-bench").value === "ifeval" ? 0 : (benchData?.defaults.temperature ?? 0.6);
   benchFormSync();
@@ -6185,17 +6217,20 @@ async function refreshBench() {
     : "GPQA Diamond needs a Hugging Face token with access to Idavidrein/gpqa (HF_TOKEN or huggingface-cli login).", !g.ok);
   line("ifeval", f.ok ? `IFEval: ${f.n} prompts (google/IFEval + nltk punkt_tab, local)`
     : "IFEval isn't downloaded yet (≈200 KB prompts + nltk tokenizer data).", !f.ok);
-  for (const [k, v] of [["terminal_bench_4", "4.0"], ["terminal_bench", "2.0"]]) {
-    const t = d.dataset[k];
-    if (t) line(k, !t.harbor ? `Terminal-Bench ${v} needs Harbor: run \`uv tool install harbor\` on this box.`
-      : !t.docker ? `Terminal-Bench ${v} needs Docker on this box (or set a runner host).`
-      : t.n ? `Terminal-Bench ${v}: ${t.n} tasks via Harbor + Docker · ${t.free_gb} GB free (task images are removed after each task)`
-      : `Terminal-Bench ${v} task definitions aren't downloaded yet (images are pulled per task).`, t.harbor && t.docker && !t.n);
+  for (const k of d.harbor || []) {
+    const t = d.dataset[k], nm = d.benches[k];
+    if (!t) continue;
+    if (k === "swebench_verified") line(k, !t.harbor ? `${nm} needs Harbor here to list its tasks: run \`uv tool install harbor\` on this box.`
+      : t.n ? `${nm}: ${t.n} tasks via Harbor · runs on this box (${t.free_gb} GB free) or any SSH runner host with Docker + Harbor`
+      : `${nm} task definitions aren't downloaded yet (≈25 MB; a runner host fetches its own copy).`, t.harbor && !t.n);
+    else line(k, !t.harbor ? `${nm} needs Harbor: run \`uv tool install harbor\` on this box.`
+      : !t.docker ? `${nm} needs Docker on this box (or set a runner host).`
+      : t.n ? `${nm}: ${t.n} tasks via Harbor + Docker (task images are removed after each task)`
+      : `${nm} task definitions aren't downloaded yet (images are pulled per task).`, t.harbor && t.docker && !t.n);
   }
-  const w = d.dataset.swebench_verified;
-  if (w) line("swebench_verified", !w.harbor ? "SWE-bench Verified needs Harbor here to list its tasks: run `uv tool install harbor` on this box."
-    : w.n ? `SWE-bench Verified: ${w.n} tasks via Harbor · runs on this box (${w.free_gb} GB free) or any SSH runner host with Docker + Harbor`
-    : "SWE-bench Verified task definitions aren't downloaded yet (≈25 MB; a runner host fetches its own copy).", w.harbor && !w.n);
+  const ds = Object.keys(d.benches).map((k) => d.dataset[k] || {}), ready = ds.filter((t) => t.ok).length;
+  const free = ds.find((t) => t.free_gb != null)?.free_gb;
+  $("#bench-ds-sum").textContent = `DATASETS · ${ready}/${ds.length} downloaded` + (free != null ? ` · ${free} GB free` : "");
   benchFormSync();
   renderBenchBoard(d);
   renderBenchRuns(d);
@@ -6243,6 +6278,8 @@ async function openBench() {
 }
 function closeBench() { $("#bench-panel").classList.add("hidden"); clearInterval(benchTimer); }
 $("#btn-bench").onclick = openBench;
+$("#bench-runs-filter").onchange = () => { benchShowAll = false; refreshBench(); };
+$("#btn-bench-more").onclick = () => { benchShowAll = !benchShowAll; refreshBench(); };
 $("#btn-bench-close").onclick = () => { SFX.play("click"); closeBench(); };
 $("#bench-panel").onclick = (e) => { if (e.target.id === "bench-panel") closeBench(); };
 $("#btn-bench-run").onclick = async () => {

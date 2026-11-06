@@ -1429,14 +1429,25 @@ html[data-theme="light"] .spk-hud-phrase span.on { text-shadow: none; }
 .bench-form input, .bench-form select { width: 100%; box-sizing: border-box; }
 #bench-board { overflow-x: auto; }
 .bench-table { border-collapse: collapse; font-size: 12px; min-width: 100%; }
-.bench-table th, .bench-table td { border: 1px solid var(--line); padding: 8px 10px; text-align: center; }
-.bench-table th { color: var(--cyan); font-weight: 600; max-width: 18ch; overflow-wrap: anywhere; }
+.bench-table th, .bench-table td { border: 1px solid var(--line); padding: 6px 10px; text-align: center; }
+.bench-table th { color: var(--cyan); font-weight: 600; white-space: nowrap; cursor: help; }
 .bench-table th .bt-prov { display: block; color: var(--muted); font-weight: 400; font-size: 10px; }
-.bench-table td.bt-name { text-align: left; color: var(--text); white-space: nowrap; }
-.bench-table td.bt-name .hint { display: block; }
-.bench-table td .bt-acc { font-size: 15px; color: var(--text); }
+.bench-table th.bt-model { text-align: left; color: var(--muted); font-weight: 400; cursor: default; }
+/* model column stays put while the bench columns scroll sideways (phones) */
+.bench-table .bt-name, .bench-table th.bt-model { position: sticky; left: 0; background: var(--panel); z-index: 1; }
+.bench-table td.bt-name { text-align: left; color: var(--text); min-width: 16ch; max-width: 34ch; overflow-wrap: anywhere; font-size: 12px; }
+.bench-table td.bt-name .hint { display: block; font-size: 10px; }
+.bench-table td { cursor: default; }
+.bench-table td.bt-none { color: var(--muted); opacity: .5; }
+.bench-table td .bt-acc { font-size: 14px; color: var(--text); }
+.bench-table td.part .bt-acc { color: var(--muted); }  /* a subset run: indicative only */
 .bench-table td.top .bt-acc { font-weight: 700; color: var(--cyan); }
-.bench-table td .bt-sub { display: block; color: var(--muted); font-size: 10px; margin-top: 2px; }
+.bench-table td .bt-sub { display: block; color: var(--muted); font-size: 10px; margin-top: 1px; white-space: nowrap; }
+.bench-table tr:hover td:not(.bt-name) { background: rgba(80,200,255,.04); }
+#bench-ds-box { margin-top: 8px; }
+#bench-ds-box > summary { cursor: pointer; color: var(--muted); font-size: 11px; letter-spacing: 1px; }
+#bench-ds-box[open] > summary { color: var(--text); margin-bottom: 4px; }
+#bench-runs-filter { font-size: 11px; margin-left: 8px; padding: 1px 4px; }
 .bench-run { border: 1px solid var(--line); background: var(--panel); padding: 10px 12px; margin-bottom: 10px; clip-path: var(--clip); }
 .bench-run.running { border-color: var(--orange); }
 .bench-run .br-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; }

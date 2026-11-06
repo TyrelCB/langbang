@@ -616,8 +616,21 @@ items for every model. Datasets and outputs live under `data/bench/` and
 | GPQA Diamond | 198 four-choice science questions | letter match. Gated on Hugging Face: downloaded with your HF token, never published |
 | IFEval | 541 prompts with verifiable instructions | Google's checkers (vendored in `server/ifeval/`). Headline = prompt-level strict; instruction-level and loose are kept per answer |
 | Terminal-Bench 4.0 | 63 of 66 shell tasks (the 3 GPU tasks skipped) | the task's tests pass, run in a separate verifier container. Agents get up to 8 h per task |
+| Terminal-Bench 2.1 | 89 shell tasks: 2.0 with 26 tasks fixed (bugs, timeouts, reward hacks) | the task's tests pass |
 | Terminal-Bench 2.0 | 89 shell tasks | kept so older runs stay comparable |
 | SWE-bench Verified | 500 GitHub issues from 12 Python repos | the hidden FAIL_TO_PASS / PASS_TO_PASS tests pass |
+
+**The panel:**
+- The leaderboard has one row per model, newest first, and one column per
+  bench. A grey score is a subset run; hover a cell for the run's settings,
+  the instruction-level IFEval scores and the truncated/error counts.
+- DATASETS folds away the download lines. It opens by itself when the
+  chosen bench isn't downloaded yet.
+- RUNS shows the newest 6 runs (plus any running), with a bench filter and
+  ▾ OLDER for the rest.
+
+LiveBench 2.0 isn't here: its questions aren't public (Hugging Face stops at
+the 2024-11-25 v1 release), so it can't be run locally.
 
 **Harbor benches** (Terminal-Bench, SWE-bench):
 - They run through [Harbor](https://github.com/laude-institute/harbor)
