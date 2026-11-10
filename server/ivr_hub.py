@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import time
 import wave
 
@@ -177,7 +178,7 @@ def transcript(call_id: str, ev: list, stem: str, agent_words: list, node: str) 
     """Same layout as ivr-audio's ivr_report.py."""
     lines = [f"IVR call report — call {call_id}" + (f" (node {node})" if node else ""),
              f"when: {time.strftime('%Y-%m-%d %H:%M:%S %Z')}",
-             f"recording: {stem} (stereo: caller L / agent R; both legs also attached as mono wavs)", "",
+             f"recording: {stem} (stereo: caller L / agent R; both legs attached as mono tracks, all compressed)", "",
              "--- conversation (caller words are utterance-relative) ---"]
     for d in ev:
         if d.get("transcript"):
@@ -206,6 +207,33 @@ def transcript(call_id: str, ev: list, stem: str, agent_words: list, node: str) 
     return "\n".join(lines)
 
 
+FFMPEG = os.environ.get("FFMPEG", "ffmpeg")
+
+
+def _compress_attachment(path: str) -> str:
+    """Return a small, email-safe attachment for a recorded file.
+
+    Gmail rejects any message whose attachments total >25 MB, which silently
+    bounced reports for long calls (the raw mono wav legs run ~2 MB/min each).
+    Anything not already a compressed audio container (the mono .wav legs) is
+    transcoded to 32 kbps mono AAC (.m4a) beside the source and that is sent
+    instead; already-compressed inputs (the stereo m4a mix) pass through.
+    Falls back to the original file if ffmpeg is missing or fails, so a report
+    never dies on compression."""
+    if not path.lower().endswith(".wav"):
+        return path
+    out = path[:-4] + ".m4a"
+    try:
+        subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-i", path,
+                        "-ac", "1", "-b:a", "32k", out],
+                       check=True, capture_output=True, timeout=180)
+        if os.path.getsize(out) > 0:
+            return out
+    except Exception as e:  # noqa: BLE001 — never fails the report
+        ivr.logger.warning("report: attachment compress failed (%s): %s", path, e)
+    return path
+
+
 @router.post("/api/ivr/node/report")
 async def post_node_report(request: Request):
     s, _ = _gate(request)
@@ -222,10 +250,12 @@ async def post_node_report(request: Request):
     agent = _stem_path(stem, "agent")
     words = await run_in_threadpool(_agent_words, agent, s) if os.path.exists(agent) else []
     body = transcript(call_id, _turns(call_id), stem, words, node)
+    # shrink the raw wav legs before attaching so long calls don't bounce (Gmail 25 MB)
+    attach = await run_in_threadpool(lambda: [_compress_attachment(p) for p in files])
     payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                "params": {"name": "send_email_with_attachments",
                           "arguments": {"to": REPORT_TO, "subject": f"IVR call recording: {call_id}",
-                                        "body": body, "attachment_paths": files}}}
+                                        "body": body, "attachment_paths": attach}}}
     try:
         async with httpx.AsyncClient(timeout=90) as cl:
             r = await cl.post(GMAIL_MCP, json=payload,
@@ -233,4 +263,4 @@ async def post_node_report(request: Request):
         resp = r.text[:300]
     except httpx.HTTPError as e:
         raise HTTPException(502, f"gmail-mcp unreachable: {e}")
-    return {"ok": "Message ID" in resp, "resp": resp, "files": files, "turns": body.count("CALLER")}
+    return {"ok": "Message ID" in resp, "resp": resp, "files": attach, "turns": body.count("CALLER")}
