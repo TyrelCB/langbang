@@ -580,7 +580,7 @@ def qwen_pcm(text: str, v: dict, stop: threading.Event | None = None,
     exact byte span gives word timings like Pocket's chunks. Holds no lock —
     the service serializes internally, ttsjobs serializes jobs."""
     import httpx
-    from .ivr import Sentences
+    from .ivr_core import Sentences
 
     base = _qwen_base(v)
     payload = {"text": text, "voice": (v.get("qwen_voice") or "Tyrel").strip(),

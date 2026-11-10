@@ -48,6 +48,7 @@ import wave
 from array import array
 
 import ivr_audio_io as aio
+import ivr_hangup
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BASE = os.environ.get("IVR_BASE", "https://ai.tyrel.cloud")
@@ -71,7 +72,25 @@ END_S = 1.2                 # this much quiet ends it. 0.8 (2026-10-16) and 1.0 
                             # both cut callers off mid-thought and replied over them
 PREROLL_S = 0.3             # audio kept from before the start, so onsets aren't clipped
 MIN_UTTER_S = 0.4
-MAX_UTTER_S = 15.0
+MAX_UTTER_S = 30.0          # was 15: the loop doesn't listen while a turn is being answered,
+                            # so the rest of a longer sentence was lost (3135e375750b, 11-02:
+                            # "...you need to say," — "that he will call you back" never heard).
+                            # Whisper takes 40 s of phone audio in ~2 s.
+# The far end hung up: GV sends digital zeros (a live line is never exactly
+# zero for long, -77 dB at its quietest) — but a muted/held caller does too
+# (ae9a8e0ee367: 17 s, 476cb07b14a6: 29 s, then they talked again), so zeros
+# alone end nothing: after GONE_S of them we ask GV whether the call panel is
+# still up. Before: ~25 s of "didn't catch that / are you still there?" to an
+# empty line on every call the caller ended (11-02..11-03).
+GONE_S = 1.0
+# Quiet also means "this far below the caller's own speech level": on a noisy
+# line (fan, street, TV at -25..-50 dB) the absolute threshold calls the noise
+# speech and END_S never ends the turn — 162520672c68 (11-01) waited 12 s on
+# "Hey Ty." until a dropout, swallowing the caller's "Hello?". Level = 90th
+# percentile of the utterance's voiced frames, so one click can't raise it.
+END_DROP_DB = float(os.environ.get("IVR_END_DROP_DB", "20"))
+END_REL_S = float(os.environ.get("IVR_END_REL_S", "2.0"))   # longer than END_S: natural
+                            # pauses over room noise must not cut a caller off
 # Barge-in wants ~1 s of sustained speech: at 0.42 s in 0.6 s, room noise,
 # our own echo off the caller's phone and a bare "hello?" all cut replies
 # mid-sentence (22 of 36 replies on 2026-10-16), and the agent then answered
@@ -86,6 +105,11 @@ MAX_GAIN_DB = 24.0
 REPLY_RATE = 24000          # streamed reply audio: s16le mono
 
 FRAME_BYTES = int(SR * FRAME_S) * 2
+ZERO_FRAME = bytes(FRAME_BYTES)
+
+
+class CallerGone(Exception):
+    """The far end hung up (see GONE_S)."""
 
 
 def now():
@@ -123,6 +147,8 @@ class Downlink:
         # recent frames: pre-roll for a barge-in (covers the BARGE_S that triggered it)
         self.ring = collections.deque(maxlen=int((PREROLL_S + BARGE_WIN_S) / FRAME_S))
         self.floor = -60.0          # running noise-floor estimate (dB)
+        self.zeros = 0              # consecutive all-zero frames (see GONE_S)
+        self.probed = False         # asked GV about this run of zeros already
         threading.Thread(target=self._read, daemon=True).start()
 
     def _read(self):
@@ -142,10 +168,29 @@ class Downlink:
         if item is None:
             raise EOFError("downlink tap ended")
         self.ring.append(item[0])
+        self._zero(item[0])
         # floor: follows quiet frames down fast, creeps up slowly through speech
         db = max(item[1], -90.0)
         self.floor = db if db < self.floor else self.floor + 0.002 * (db - self.floor)
         return item
+
+    def _zero(self, f: bytes):
+        if f == ZERO_FRAME:
+            self.zeros += 1
+        else:
+            self.zeros, self.probed = 0, False
+
+    def caller_gone(self) -> bool:
+        """GONE_S+ of digital zeros AND GV no longer shows the call. Asks GV
+        once per run of zeros; never in tests (no GV)."""
+        if self.zeros * FRAME_S < GONE_S or self.probed or os.environ.get("IVR_NO_GV") == "1":
+            return False
+        self.probed = True
+        up = ivr_hangup.call_panel_up()
+        log(f"{self.zeros * FRAME_S:.1f}s of digital silence — GV call panel "
+            + {True: "still up (muted/hold?): staying", False: "gone: the caller hung up",
+               None: "unknown: staying"}[up])
+        return up is False
 
     def threshold(self, over: float = 0.0) -> float:
         return min(max(self.floor + SPEECH_OVER_FLOOR, SPEECH_DB_MIN), SPEECH_DB_MAX) + over
@@ -162,6 +207,7 @@ class Downlink:
             if item is None:
                 raise EOFError("downlink tap ended")
             self.ring.append(item[0])
+            self._zero(item[0])
             dbs.append(item[1])
 
     def close(self):
@@ -175,7 +221,9 @@ def listen(dl: Downlink, deadline_s: float, started_with: list | None = None):
     listen.peak = -120.0                     # loudest frame while waiting (for "why no speech?")
     speech: list[bytes] = list(started_with or [])
     win = collections.deque(maxlen=int(START_WIN_S / FRAME_S))   # recent (frame, voiced)
-    quiet = 0
+    quiet = rel_quiet = 0
+    levels: list[float] = []                 # dB of the utterance's voiced frames
+    level = -120.0                           # their 90th percentile
     while True:
         if not speech and time.time() > end:
             return None
@@ -184,6 +232,8 @@ def listen(dl: Downlink, deadline_s: float, started_with: list | None = None):
             continue
         f, db = item
         listen.peak = max(listen.peak, db)
+        if not speech and dl.caller_gone():
+            raise CallerGone
         voiced = db > dl.threshold()
         if not speech:                       # waiting for a start
             win.append((f, voiced))
@@ -193,9 +243,15 @@ def listen(dl: Downlink, deadline_s: float, started_with: list | None = None):
                 win.clear()
             continue
         speech.append(f)
+        if voiced:
+            levels.append(db)
+            if len(levels) % 5 == 1:
+                level = sorted(levels)[int(0.9 * (len(levels) - 1))]
         quiet = 0 if voiced else quiet + 1
+        rel_quiet = 0 if voiced and db >= level - END_DROP_DB else rel_quiet + 1
         dur = len(speech) * FRAME_S
-        if quiet * FRAME_S >= END_S or dur >= MAX_UTTER_S:
+        if quiet * FRAME_S >= END_S or rel_quiet * FRAME_S >= END_REL_S or dur >= MAX_UTTER_S:
+            quiet = max(quiet, rel_quiet)
             if dur - quiet * FRAME_S >= MIN_UTTER_S:
                 return b"".join(speech)
             speech = []                      # a blip: keep waiting
@@ -535,6 +591,8 @@ def answer_loop(dl: Downlink, cid: str, g: dict, spoken: list, barge: bool,
             continue
         if not said:
             r.close()
+            if dl.caller_gone():             # GV's disconnect burst, then zeros
+                raise CallerGone
             # A burst with no words: stay silent for noise/beeps, but if it
             # swung like speech the caller IS talking and deserves an answer —
             # dead air after a question reads as a broken line (call
@@ -595,7 +653,19 @@ def main():
     dl = Downlink(DOWNLINK)
     # IVR_CALL_ID: tests name their calls (suite-…) so the call log can tell them apart
     cid_q = f"&call_id={os.environ['IVR_CALL_ID']}" if os.environ.get("IVR_CALL_ID") else ""
-    g = api(f"/api/ivr/start?out=wav&rate={REPLY_RATE}{cid_q}")
+    # start is safe to retry (it only creates a session; request() above
+    # doesn't retry 5xx because mid-call 502s could double-process a turn).
+    # A transient hub TTS 502 on 2026-11-09 crashed the loop mid-call and the
+    # caller sat in silence: retry those here.
+    for attempt in range(3):
+        try:
+            g = api(f"/api/ivr/start?out=wav&rate={REPLY_RATE}{cid_q}")
+            break
+        except urllib.error.HTTPError as e:
+            if e.code not in (500, 502, 504) or attempt == 2:
+                raise
+            log(f"start got HTTP {e.code} — retrying ({attempt + 1}/3)")
+            time.sleep(1.5 * (attempt + 1))
     cid = g["call_id"]
     greeting = wav_pcm(g["audio_b64"]) if g.get("audio_b64") else b""
     log("call", cid, f"(greeting synth {g.get('tts_s')}s) — tapping {DOWNLINK}, replies -> {PLAY_SINK}")
@@ -674,6 +744,8 @@ def main():
             spoken.append(g.get("reply") or "")
             log("greeted" + (" (caller talked over it)" if carry else ""))
         answer_loop(dl, cid, g, spoken, barge, args, carry)
+    except CallerGone:
+        log("caller hung up — ending the call")
     except KeyboardInterrupt:
         log("interrupted")
     finally:

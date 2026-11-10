@@ -256,6 +256,7 @@ def main():
         nonlocal loop
         if loop is None:
             return
+        dead = loop.poll() is not None
         try:
             loop.stdin.write(cmd + "\n")
             loop.stdin.close()
@@ -263,6 +264,11 @@ def main():
             pass                                # loop died at startup: its log says why
         loop.wait()
         loop = None
+        if dead and cmd == "go":
+            # accepted, but the conversation loop died at startup (bad hub
+            # reply, audio device gone): don't leave the caller in dead air
+            log("loop died at startup — hanging up instead of dead air")
+            subprocess.run([sys.executable, os.path.join(HERE, "ivr_hangup.py")])
     log("watching Google Voice for an incoming call"
         f" (window {args.secs}s, replies from {LOOP.BASE})")
 
