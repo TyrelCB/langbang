@@ -1151,8 +1151,8 @@ html[data-theme="light"] ::highlight(lb-speak) { background-color: rgba(11, 126,
 /* ▮ TERM — tmux-backed terminals + fleet hosts (web/term.js) */
 #term-panel { position: fixed; inset: 0; background: rgba(2,6,12,.8); display: flex;
   align-items: center; justify-content: center; z-index: 45; }
-.term-inner { max-height: none; width: min(1500px, 97vw); height: 92vh; height: 92dvh; display: flex;
-  flex-direction: column; overflow: hidden; }
+.term-inner { max-height: none; width: calc(100vw - 16px); height: calc(100vh - 16px);
+  height: calc(100dvh - 16px); padding: 12px 14px; display: flex; flex-direction: column; overflow: hidden; }
 .term-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; min-width: 0; }
 .term-head h2 { margin: 0; }
 #term-tabs { flex: 1; min-width: 0; display: flex; gap: 4px; overflow-x: auto; scrollbar-width: thin; }
