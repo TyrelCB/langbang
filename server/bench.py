@@ -334,6 +334,14 @@ async def init() -> None:
     cut = await cur.fetchall()
     await _db.execute("UPDATE runs SET state='lost' WHERE state='running'")
     await _db.commit()
+    # scored Harbor fails that weren't the model's fault (stalls, image pulls)
+    # become errors, so the card shows them and offers RESUME
+    cur = await _db.execute("SELECT id FROM runs WHERE bench IN (%s)" % ",".join("?" * len(HARBOR)), tuple(HARBOR))
+    for (rid,) in await cur.fetchall():
+        try:
+            await _restall(rid)
+        except Exception:  # noqa: BLE001 - never block startup on this
+            logger.exception("bench: re-checking %s failed", rid)
     for rid, b in cut:
         if b == "gpqa_diamond":
             logger.warning("bench: resuming %s after restart", rid)
@@ -495,21 +503,20 @@ async def _one_ife(c: httpx.AsyncClient, rid: str, idx: int, q: dict, s: dict, p
 
 
 async def _restall(rid: str) -> None:
-    """Re-check this run's scored AgentTimeoutError fails against their trial
-    results on disk; server stalls become errors so this RESUME re-runs them."""
+    """Re-check this run's scored Harbor fails against their trial results on
+    disk (rows from before _not_model existed, or before it caught a case):
+    ones that weren't the model's fault become errors, so RESUME re-runs them."""
     cur = await _db.execute("SELECT idx,qid FROM items WHERE run_id=? AND error IS NULL "
-                            "AND finish='AgentTimeoutError'", (rid,))
+                            "AND correct=0 AND finish IS NOT 'done'", (rid,))
     for idx, qid in await cur.fetchall():
         res = glob.glob(os.path.join(JOBS_DIR, rid, qid, "*__*", "result.json"))
         try:
             t = json.load(open(res[0])) if res else {}
         except (OSError, ValueError):
             continue
-        m = re.search(r"after ([\d.]+) seconds", str((t.get("exception_info") or {}).get("exception_message")))
-        tmo = float(m.group(1)) if m else 900.0
-        if stall := _stalled(t, tmo):
+        if why := _not_model(t, os.path.dirname(res[0])):
             await _write("UPDATE items SET pred='', error=? WHERE run_id=? AND idx=?",
-                         (f"server stalled: {stall} — retried on RESUME", rid, idx))
+                         (f"{why} — retried on RESUME", rid, idx))
 
 
 async def _run(rid: str) -> None:
@@ -635,14 +642,51 @@ def _agent_cfg(name: str, s: dict, p: dict) -> dict:
 PYTEST_SUM_RE = re.compile(r"(?m)^=+ .*\b(?:passed|failed|error)\b.* =+$")
 
 
-def _stalled(t: dict, timeout: float) -> str | None:
-    """Why an AgentTimeoutError trial was the SERVER's fault, or None. Then
-    the task is recorded as an error (unscored, re-run on RESUME) instead of
-    a fail. Evidence from Harbor's own timings: the model never answered
-    once, or one call hung for a quarter of the agent budget (≥ 5 min) —
-    a busy/stuck backend, not a slow model thinking long."""
-    if (t.get("exception_info") or {}).get("exception_type") != "AgentTimeoutError":
+def _iso(ts: str) -> float:
+    from datetime import datetime
+    return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+
+
+def _not_model(t: dict, trial: str) -> str | None:
+    """Why a failed Harbor trial is NOT the model's fault, or None. Such a
+    task is recorded as an error (unscored, re-run on RESUME), not a fail:
+    - the task never ran: an exception and no verifier verdict (image pull /
+      docker compose failure, network down);
+    - AgentTimeoutError where the server stalled, from Harbor's timings: no
+      model call ever came back, one completed call hung for a quarter of
+      the agent budget (≥ 5 min), or the call in flight at the timeout had
+      been hanging that long (time since the last step, minus the
+      durations of that step's commands)."""
+    exc = t.get("exception_info") or {}
+    et = exc.get("exception_type")
+    if not et:
         return None
+    if et != "AgentTimeoutError":
+        if ((t.get("verifier_result") or {}).get("rewards") or {}).get("reward") is None:
+            msg = str(exc.get("exception_message") or "")
+            hit = [ln.strip() for ln in msg.splitlines()
+                   if re.search(r"(?i)fail|error|unreachable|timeout|denied|not found", ln) and "[=" not in ln]
+            return f"task never ran ({et}): " + (hit[-1] if hit else msg.strip())[-240:]
+        return None
+    m = re.search(r"after ([\d.]+) seconds", str(exc.get("exception_message")))
+    timeout = float(m.group(1)) if m else 900.0
+    limit = max(300.0, timeout / 4)
+    ar = t.get("agent_result") or {}
+    times = [x / 1000 for x in ((ar.get("metadata") or {}).get("api_request_times_msec") or [])]
+    if not times and not ar.get("n_output_tokens"):
+        return f"server stalled: no model response in {timeout:.0f}s"
+    if (worst := max(times, default=0)) >= limit:
+        return f"server stalled: one model call took {worst:.0f}s of the {timeout:.0f}s budget"
+    try:
+        steps = json.load(open(os.path.join(trial, "agent", "trajectory.json")))["steps"]
+        last = steps[-1]
+        cmd = sum(float((c.get("arguments") or {}).get("duration") or 0) for c in last.get("tool_calls") or [])
+        hung = _iso(exc["occurred_at"]) - _iso(last["timestamp"]) - cmd
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        return None
+    if hung >= limit:
+        return f"server stalled: the model call in flight at the timeout had hung {hung:.0f}s"
+    return None
     ar = t.get("agent_result") or {}
     times = [x / 1000 for x in ((ar.get("metadata") or {}).get("api_request_times_msec") or [])]
     if not times and not ar.get("n_output_tokens"):
@@ -731,10 +775,10 @@ async def _one_harbor(c, rid: str, idx: int, q: dict, s: dict, p: dict, bench: s
         exc = t.get("exception_info") or None
         ok = reward is not None and float(reward) >= 1.0
         etype = (exc or {}).get("exception_type") if isinstance(exc, dict) else (str(exc)[:60] if exc else None)
-        stall = None if ok else _stalled(t, q["timeout"])
-        row = (rid, idx, q["qid"], q["gold"], "" if stall else "pass" if ok else "fail", int(ok),
+        why = None if ok else _not_model(t, os.path.dirname(res[0]))
+        row = (rid, idx, q["qid"], q["gold"], "" if why else "pass" if ok else "fail", int(ok),
                ar.get("n_output_tokens"), ar.get("n_input_tokens"), round(time.time() - t0, 1),
-               etype or "done", f"server stalled: {stall} — retried on RESUME" if stall else None,
+               etype or "done", f"{why} — retried on RESUME" if why else None,
                _trial_text(os.path.dirname(res[0])))
     except asyncio.CancelledError:
         if proc and proc.returncode is None:
