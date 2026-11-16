@@ -6187,7 +6187,8 @@ async function benchShowItem(card) {
   if (tb) d.appendChild(el("div", "hint", /^exit: /.test(it.text || "") ? "below: the agent's closing message, then the hidden tests' verdict"
     : "below: the agent's final terminal screen"));
   const q = el("details"); q.appendChild(el("summary", "", tb ? "task instruction" : "question")); q.appendChild(el("pre", "", it.prompt)); d.appendChild(q);
-  d.appendChild(el("pre", "", it.error || it.text || "(empty answer)"));
+  if (it.error) d.appendChild(el("pre", "err", it.error));
+  if (it.text || !it.error) d.appendChild(el("pre", "", it.text || "(empty answer)"));
   card.appendChild(d);
 }
 async function refreshBench() {

@@ -494,11 +494,31 @@ async def _one_ife(c: httpx.AsyncClient, rid: str, idx: int, q: dict, s: dict, p
     await _write("INSERT OR REPLACE INTO items VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (*row, extra))
 
 
+async def _restall(rid: str) -> None:
+    """Re-check this run's scored AgentTimeoutError fails against their trial
+    results on disk; server stalls become errors so this RESUME re-runs them."""
+    cur = await _db.execute("SELECT idx,qid FROM items WHERE run_id=? AND error IS NULL "
+                            "AND finish='AgentTimeoutError'", (rid,))
+    for idx, qid in await cur.fetchall():
+        res = glob.glob(os.path.join(JOBS_DIR, rid, qid, "*__*", "result.json"))
+        try:
+            t = json.load(open(res[0])) if res else {}
+        except (OSError, ValueError):
+            continue
+        m = re.search(r"after ([\d.]+) seconds", str((t.get("exception_info") or {}).get("exception_message")))
+        tmo = float(m.group(1)) if m else 900.0
+        if stall := _stalled(t, tmo):
+            await _write("UPDATE items SET pred='', error=? WHERE run_id=? AND idx=?",
+                         (f"server stalled: {stall} — retried on RESUME", rid, idx))
+
+
 async def _run(rid: str) -> None:
     cur = await _db.execute("SELECT * FROM runs WHERE id=?", (rid,))
     run = _row(await cur.fetchone())
     p = {**DEFAULTS, **run["params"]}
     qs = bench_items(run["bench"])[: run["n"]]
+    if run["bench"] in HARBOR:  # timeouts recorded before stall detection existed
+        await _restall(rid)
     cur = await _db.execute("SELECT idx FROM items WHERE run_id=? AND error IS NULL", (rid,))
     have = {r[0] for r in await cur.fetchall()}
     todo = [i for i in range(len(qs)) if i not in have]
@@ -615,6 +635,24 @@ def _agent_cfg(name: str, s: dict, p: dict) -> dict:
 PYTEST_SUM_RE = re.compile(r"(?m)^=+ .*\b(?:passed|failed|error)\b.* =+$")
 
 
+def _stalled(t: dict, timeout: float) -> str | None:
+    """Why an AgentTimeoutError trial was the SERVER's fault, or None. Then
+    the task is recorded as an error (unscored, re-run on RESUME) instead of
+    a fail. Evidence from Harbor's own timings: the model never answered
+    once, or one call hung for a quarter of the agent budget (≥ 5 min) —
+    a busy/stuck backend, not a slow model thinking long."""
+    if (t.get("exception_info") or {}).get("exception_type") != "AgentTimeoutError":
+        return None
+    ar = t.get("agent_result") or {}
+    times = [x / 1000 for x in ((ar.get("metadata") or {}).get("api_request_times_msec") or [])]
+    if not times and not ar.get("n_output_tokens"):
+        return f"no model response in {timeout:.0f}s"
+    worst = max(times, default=0)
+    if worst >= max(300.0, timeout / 4):
+        return f"one model call took {worst:.0f}s of the {timeout:.0f}s budget"
+    return None
+
+
 def _trial_text(trial: str) -> str:
     """What the answer view shows: terminus-2's last terminal screen, or
     mini-swe-agent's closing message + the verdict lines of the test run.
@@ -693,9 +731,11 @@ async def _one_harbor(c, rid: str, idx: int, q: dict, s: dict, p: dict, bench: s
         exc = t.get("exception_info") or None
         ok = reward is not None and float(reward) >= 1.0
         etype = (exc or {}).get("exception_type") if isinstance(exc, dict) else (str(exc)[:60] if exc else None)
-        row = (rid, idx, q["qid"], q["gold"], "pass" if ok else "fail", int(ok),
+        stall = None if ok else _stalled(t, q["timeout"])
+        row = (rid, idx, q["qid"], q["gold"], "" if stall else "pass" if ok else "fail", int(ok),
                ar.get("n_output_tokens"), ar.get("n_input_tokens"), round(time.time() - t0, 1),
-               etype or "done", None, _trial_text(os.path.dirname(res[0])))
+               etype or "done", f"server stalled: {stall} — retried on RESUME" if stall else None,
+               _trial_text(os.path.dirname(res[0])))
     except asyncio.CancelledError:
         if proc and proc.returncode is None:
             if host:  # the remote harbor is its own process group (setsid)
