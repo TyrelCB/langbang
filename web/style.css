@@ -1455,8 +1455,9 @@ html[data-theme="light"] .spk-hud-phrase span.on { text-shadow: none; }
 .bench-run .br-acc { color: var(--cyan); font-size: 15px; }
 .bench-run .br-meta { color: var(--muted); font-size: 11px; width: 100%; }
 .bench-run .br-head .btn { font-size: 11px; padding: 2px 8px; }
-.bench-bar { height: 4px; background: var(--line); margin: 8px 0 2px; }
+.bench-bar { height: 4px; background: var(--line); margin: 8px 0 2px; display: flex; }
 .bench-bar > i { display: block; height: 100%; background: var(--cyan); }
+.bench-bar > i.err, .bench-run.running .bench-bar > i.err { background: var(--danger); opacity: .55; }
 .bench-run.running .bench-bar > i { background: var(--orange); }
 .bench-items { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 8px; }
 .bench-items .bi { width: 14px; height: 14px; border: 1px solid var(--line); cursor: pointer; }

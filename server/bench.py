@@ -366,7 +366,7 @@ def _row(r) -> dict:  # noqa: ANN001
 
 async def _stats(rid: str) -> dict:
     cur = await _db.execute(
-        "SELECT COUNT(*), SUM(correct), SUM(pred=''), SUM(error IS NOT NULL), "
+        "SELECT COUNT(*), SUM(correct), SUM(pred='' AND error IS NULL), SUM(error IS NOT NULL), "
         "SUM(finish='length'), AVG(out_tokens), SUM(secs) FROM items WHERE run_id=?", (rid,))
     done, ok, nopred, err, cut, tok, secs = await cur.fetchone()
     scored = (done or 0) - (err or 0)

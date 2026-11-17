@@ -6099,14 +6099,17 @@ function renderBenchRuns(d) {
     btn(benchOpen === r.id ? "▾ ANSWERS" : "▸ ANSWERS", () => { benchOpen = benchOpen === r.id ? null : r.id; benchDetail = null; refreshBench(); });
     btn("✕", () => benchDel(r.id, card), "delete this run and its answers");
     head.appendChild(el("span", "br-meta",
-      `${r.done}/${r.n} answered · ${r.correct} correct` + (r.no_answer ? ` · ${r.no_answer} no answer` : "")
-      + (r.truncated ? ` · ${r.truncated} hit max tokens` : "") + (r.errors ? ` · ${r.errors} errors` : "")
+      `${r.done - r.errors}/${r.n} answered · ${r.correct} correct` + (r.no_answer ? ` · ${r.no_answer} no answer` : "")
+      + (r.truncated ? ` · ${r.truncated} hit max tokens` : "")
+      + (r.errors ? ` · ${r.errors} errors${r.state === "running" ? " (retrying)" : ""}` : "")
       + (r.inst_strict != null ? ` · inst-strict ${r.inst_strict}% · prompt-loose ${r.prompt_loose}%` : "")
       + (r.avg_tokens ? ` · ~${r.avg_tokens} tok/answer` : "") + ` · ${fmtDur(r.secs)} model time · ${benchParamsTxt(r.params)}`
       + (r.error ? ` · ⚠ ${r.error}` : "")));
     card.appendChild(head);
-    const bar = el("div", "bench-bar"), fill = el("i"); fill.style.width = `${Math.round(100 * r.done / r.n)}%`;
-    bar.appendChild(fill); card.appendChild(bar);
+    // answered (cyan/orange) then errored (red) — errors aren't progress: a RESUME re-asks them
+    const bar = el("div", "bench-bar"), fill = el("i"), errs = el("i", "err");
+    fill.style.width = `${100 * (r.done - r.errors) / r.n}%`; errs.style.width = `${100 * r.errors / r.n}%`;
+    bar.append(fill, errs); card.appendChild(bar);
     if (benchOpen === r.id) card.appendChild(el("div", "bench-items")), benchItems(r.id, card);
     box.appendChild(card);
   }
