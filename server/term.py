@@ -264,6 +264,20 @@ def kill(sid: str) -> bool:
     return _tmux("kill-session", "-t", "=" + sid, check=False).returncode == 0
 
 
+def capture(sid: str, lines: int = 500) -> str | None:
+    """Plain text of a terminal: its last `lines` of scrollback + the screen,
+    wrapped lines re-joined (-J), trailing blank rows dropped. Works for ssh
+    tabs too — the tmux session runs here, ssh inside it. None = no such
+    terminal."""
+    if not SID_RE.match(sid):
+        return None
+    lines = max(1, min(int(lines), 50000))
+    r = _tmux("capture-pane", "-p", "-J", "-t", "=" + sid + ":", "-S", str(-lines), check=False)
+    if r.returncode != 0:
+        return None
+    return "\n".join(ln.rstrip() for ln in r.stdout.splitlines()).rstrip("\n")
+
+
 def exists(sid: str) -> bool:
     return bool(SID_RE.match(sid)) and _tmux("has-session", "-t", "=" + sid, check=False).returncode == 0
 

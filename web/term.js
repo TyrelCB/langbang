@@ -13,6 +13,7 @@ const TERM = {
   editing: null,     // host name being edited, "" = new
   poll: null,
   out: null,         // last run-on-many {command, results}
+  clip: null,        // last copied terminal text {text, at} (tmux drag / Ctrl+C)
 };
 const T_THEME = {
   background: "#060a12", foreground: "#cfe6f5", cursor: "#3fd6ff", cursorAccent: "#060a12",
@@ -95,6 +96,33 @@ function tAdd(s) {
   term.loadAddon(fit);
   term.loadAddon(new WebLinksAddon.WebLinksAddon());
   term.open(box);
+  // tmux has `mouse on`, so a plain drag selects INSIDE tmux (copy-mode) and
+  // tmux hands the text over via OSC 52 (set-clipboard on) — xterm.js core
+  // ignores OSC 52, which is why drag-copy did nothing. Catch it here.
+  term.parser.registerOscHandler(52, (data) => {
+    const b64 = data.slice(data.indexOf(";") + 1);
+    if (!b64 || b64 === "?") return true; // a clipboard READ request: never answered
+    try {
+      const text = new TextDecoder().decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)));
+      TERM.clip = { text, at: Date.now() };
+      copyText(text).then((ok) => { tFlash($("#btn-term-copy"), ok ? "✓ COPIED" : "✕ COPY FAILED"); t.term.focus(); });
+    } catch {}
+    return true;
+  });
+  // Shift+drag = xterm's own selection (bypasses tmux). Ctrl+Shift+C copies
+  // it; plain Ctrl+C copies too WHILE something is selected (else it stays ^C)
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type !== "keydown" || !e.ctrlKey || e.altKey || e.metaKey || e.code !== "KeyC") return true;
+    if (!e.shiftKey && !term.hasSelection()) return true;
+    e.preventDefault();
+    if (term.hasSelection()) {
+      const text = term.getSelection();
+      TERM.clip = { text, at: Date.now() };
+      copyText(text).then((ok) => tFlash($("#btn-term-copy"), ok ? "✓ COPIED" : "✕ COPY FAILED"));
+      term.clearSelection();
+    }
+    return false;
+  });
   const t = { sid: s.id, title: s.title, host: s.host, term, fit, box, tab, ws: null, dead: false, retry: 0 };
   TERM.tabs.set(s.id, t);
   term.onData((d) => { if (t.ws && t.ws.readyState === 1) t.ws.send(new TextEncoder().encode(d)); });
@@ -185,6 +213,52 @@ function tShow(sid) {
   const t = TERM.tabs.get(sid);
   if (t) requestAnimationFrame(() => { try { t.fit.fit(); } catch {} t.term.focus(); });
 }
+
+// ---- getting output OUT: ⧉ COPY / → CHAT ----
+function tFlash(b, label) {
+  if (!b) return;
+  if (!b.dataset.label) b.dataset.label = b.textContent;
+  b.textContent = label;
+  clearTimeout(b._ft);
+  b._ft = setTimeout(() => (b.textContent = b.dataset.label), 1600);
+}
+// what to export: a live xterm selection, else a tmux drag-copy from the last
+// minute, else the terminal's last 500 lines (server-side tmux capture — the
+// browser's own buffer only holds what tmux last painted)
+async function tOutputText() {
+  const t = TERM.tabs.get(TERM.active);
+  if (!t) return null;
+  if (t.term.hasSelection()) return t.term.getSelection();
+  if (TERM.clip && Date.now() - TERM.clip.at < 60000) return TERM.clip.text;
+  const r = await fetch(`/api/term/${t.sid}/capture?lines=500`);
+  if (!r.ok) return null;
+  return (await r.json()).text;
+}
+async function tCopyOut() {
+  const text = await tOutputText().catch(() => null);
+  const ok = !!text && await copyText(text);
+  tFlash($("#btn-term-copy"), ok ? `✓ ${text.split("\n").length} LINE${text.includes("\n") ? "S" : ""}` : "✕ NOTHING");
+  const t = TERM.tabs.get(TERM.active);
+  if (t) t.term.focus();
+}
+async function tToChat() {
+  const text = await tOutputText().catch(() => null);
+  if (!text) { tFlash($("#btn-term-chat"), "✕ NOTHING"); return; }
+  const t = TERM.tabs.get(TERM.active);
+  TERM.clip = null; // used — the next → CHAT shouldn't resend it
+  if (t) t.term.clearSelection();
+  const where = t && t.host && t.host !== "local" ? ` (${t.host})` : "";
+  const fence = text.includes("```") ? "~~~~" : "```";
+  const inp = $("#input");
+  const block = `Terminal output${where}:\n${fence}console\n${text}\n${fence}\n`;
+  inp.value = inp.value.trim() ? inp.value.replace(/\s*$/, "\n\n") + block : block;
+  closeTerm();
+  inp.dispatchEvent(new Event("input"));
+  inp.focus();
+  inp.setSelectionRange(inp.value.length, inp.value.length);
+}
+$("#btn-term-copy").onclick = tCopyOut;
+$("#btn-term-chat").onclick = tToChat;
 
 function tRename(t) {
   const name = t.tab.querySelector(".tt-name");

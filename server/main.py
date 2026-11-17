@@ -1025,6 +1025,15 @@ async def term_rename(sid: str, body: TermPatch):
     return {"ok": True}
 
 
+@app.get("/api/term/{sid}/capture")
+async def term_capture(sid: str, lines: int = 500):
+    """▮ TERM ⧉ COPY / → CHAT: the terminal's recent output as plain text."""
+    text = await asyncio.to_thread(term.capture, sid, lines)
+    if text is None:
+        raise HTTPException(404, "no such terminal")
+    return {"text": text}
+
+
 @app.delete("/api/term/{sid}")
 async def term_kill(sid: str):
     if not await asyncio.to_thread(term.kill, sid):
