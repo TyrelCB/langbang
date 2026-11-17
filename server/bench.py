@@ -448,6 +448,14 @@ async def _ask(c: httpx.AsyncClient, s: dict, prompt: str, temperature: float) -
                 for k in bad:
                     body.pop(k)
                 continue
+            # a 400 we can't fix by dropping fields (e.g. max_tokens > the served
+            # context): the server's message names the real cause — carry it into
+            # the item error so a dead-on-arrival run is legible from the panel.
+            try:
+                msg = (r.json().get("error") or {}).get("message") or r.text[:300]
+            except ValueError:
+                msg = r.text[:300]
+            raise RuntimeError(f"backend 400: {msg}")
         if r.status_code in (429, 502, 503) and attempt < 5:  # busy backend (sglang caps ~4 streams)
             await asyncio.sleep(5 * (attempt + 1))
             continue
