@@ -596,7 +596,11 @@ def extra_body(s: dict, thinking: bool | None = None) -> dict | None:
       think by default when it's absent), reasoning_effort (Qwen3.8 only —
       templates ignore kwargs they don't read), preserve_thinking
     - reasoning_budget_tokens + reasoning_budget_message (llama-server
-      sampling layer; vLLM/sglang ignore them) while thinking is on."""
+      sampling layer; vLLM/sglang ignore them) while thinking is on
+    - thinking_token_budget: the same cap for vLLM (needs --reasoning-parser;
+      at the cap it forces the server's --reasoning-config reasoning_end_str,
+      plain </think> by default — no wrap-up message). llama-server/sglang
+      ignore it; a vLLM without a reasoning parser 400s → dropped."""
     on = bool(s.get("enable_thinking")) if thinking is None else thinking
     kw = {"enable_thinking": on}
     if s.get("keep_reasoning") == "turn":
@@ -614,7 +618,8 @@ def extra_body(s: dict, thinking: bool | None = None) -> dict | None:
         mt = int(s.get("max_tokens") or 0)
         if mt:  # the answer keeps ANSWER_RESERVE (or half, for tiny max_tokens)
             budget = min(budget, max(mt - ANSWER_RESERVE, mt // 2))
-        out.update(reasoning_budget_tokens=budget, reasoning_budget_message=BUDGET_MESSAGE)
+        out.update(reasoning_budget_tokens=budget, reasoning_budget_message=BUDGET_MESSAGE,
+                   thinking_token_budget=budget)
     bad = _REJECTS_KWARGS.get(s.get("base_url") or "", ())
     return {k: v for k, v in out.items() if k not in bad} or None
 

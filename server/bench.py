@@ -13,7 +13,7 @@ questions of a FIXED seeded order (so a 20-question quick run is the same
 persisted as it lands (running totals, and a stopped / restarted run
 resumes where it left off). Requests go straight to the provider's
 /chat/completions with LangBang's thinking controls (agent.extra_body:
-enable_thinking, reasoning effort, llama-server thinking budget).
+enable_thinking, reasoning effort, thinking budget for llama-server + vLLM).
 
 IFEval (541 prompts with verifiable formatting instructions, google/IFEval):
 scored by Google's checkers, vendored from lm-eval in server/ifeval/.
@@ -436,7 +436,7 @@ async def _ask(c: httpx.AsyncClient, s: dict, prompt: str, temperature: float) -
         r = await c.post(url, json=body, headers=hdr)
         if r.status_code == 400:  # a field this backend refuses: drop it (like _drop_optional)
             bad = [k for k in ("chat_template_kwargs", "reasoning_budget_tokens",
-                               "reasoning_budget_message") if k in body and k in r.text]
+                               "reasoning_budget_message", "thinking_token_budget") if k in body and k in r.text]
             if bad:
                 for k in bad:
                     body.pop(k)
