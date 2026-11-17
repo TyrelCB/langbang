@@ -642,59 +642,25 @@ def _agent_cfg(name: str, s: dict, p: dict) -> dict:
 PYTEST_SUM_RE = re.compile(r"(?m)^=+ .*\b(?:passed|failed|error)\b.* =+$")
 
 
-def _iso(ts: str) -> float:
-    from datetime import datetime
-    return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
-
-
-def _not_model(t: dict, trial: str) -> str | None:
-    """Why a failed Harbor trial is NOT the model's fault, or None. Such a
-    task is recorded as an error (unscored, re-run on RESUME), not a fail:
-    - the task never ran: an exception and no verifier verdict (image pull /
-      docker compose failure, network down);
-    - AgentTimeoutError where the server stalled, from Harbor's timings: no
-      model call ever came back, one completed call hung for a quarter of
-      the agent budget (≥ 5 min), or the call in flight at the timeout had
-      been hanging that long (time since the last step, minus the
-      durations of that step's commands)."""
+def _not_model(t: dict, trial: str) -> str | None:  # noqa: ARG001
+    """Why a failed Harbor trial is NOT the model's fault, or None: the task
+    never ran (an exception and no verifier verdict — image pull / docker
+    compose failure, network down). Recorded as an error (unscored, re-run
+    on RESUME) instead of a fail.
+    AgentTimeoutError always counts as a fail: every timeout checked against
+    the vLLM log (11-16) had 0 requests waiting and the server generating
+    throughout — the "hung" calls were the model's own 32k-token runaways,
+    not a stalled backend."""
     exc = t.get("exception_info") or {}
     et = exc.get("exception_type")
-    if not et:
+    if not et or et == "AgentTimeoutError":
         return None
-    if et != "AgentTimeoutError":
-        if ((t.get("verifier_result") or {}).get("rewards") or {}).get("reward") is None:
-            msg = str(exc.get("exception_message") or "")
-            hit = [ln.strip() for ln in msg.splitlines()
-                   if re.search(r"(?i)fail|error|unreachable|timeout|denied|not found", ln) and "[=" not in ln]
-            return f"task never ran ({et}): " + (hit[-1] if hit else msg.strip())[-240:]
+    if ((t.get("verifier_result") or {}).get("rewards") or {}).get("reward") is not None:
         return None
-    m = re.search(r"after ([\d.]+) seconds", str(exc.get("exception_message")))
-    timeout = float(m.group(1)) if m else 900.0
-    limit = max(300.0, timeout / 4)
-    ar = t.get("agent_result") or {}
-    times = [x / 1000 for x in ((ar.get("metadata") or {}).get("api_request_times_msec") or [])]
-    if not times and not ar.get("n_output_tokens"):
-        return f"server stalled: no model response in {timeout:.0f}s"
-    if (worst := max(times, default=0)) >= limit:
-        return f"server stalled: one model call took {worst:.0f}s of the {timeout:.0f}s budget"
-    try:
-        steps = json.load(open(os.path.join(trial, "agent", "trajectory.json")))["steps"]
-        last = steps[-1]
-        cmd = sum(float((c.get("arguments") or {}).get("duration") or 0) for c in last.get("tool_calls") or [])
-        hung = _iso(exc["occurred_at"]) - _iso(last["timestamp"]) - cmd
-    except (OSError, ValueError, KeyError, IndexError, TypeError):
-        return None
-    if hung >= limit:
-        return f"server stalled: the model call in flight at the timeout had hung {hung:.0f}s"
-    return None
-    ar = t.get("agent_result") or {}
-    times = [x / 1000 for x in ((ar.get("metadata") or {}).get("api_request_times_msec") or [])]
-    if not times and not ar.get("n_output_tokens"):
-        return f"no model response in {timeout:.0f}s"
-    worst = max(times, default=0)
-    if worst >= max(300.0, timeout / 4):
-        return f"one model call took {worst:.0f}s of the {timeout:.0f}s budget"
-    return None
+    msg = str(exc.get("exception_message") or "")
+    hit = [ln.strip() for ln in msg.splitlines()
+           if re.search(r"(?i)fail|error|unreachable|timeout|denied|not found", ln) and "[=" not in ln]
+    return f"task never ran ({et}): " + (hit[-1] if hit else msg.strip())[-240:]
 
 
 def _trial_text(trial: str) -> str:
