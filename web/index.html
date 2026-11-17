@@ -70,6 +70,12 @@
     <!-- trajectory + todo panel are SIBLINGS of #chat: search-jump keys off
          #chat child indices and server pos-counting, so nothing may nest in there -->
     <div id="trajectory" class="hidden">
+      <div id="traj-thread">
+        <span class="tt-label">THREAD</span> <code id="traj-tid">—</code>
+        <button id="traj-copy-id" class="cb-btn" title="copy the thread ID">⧉ ID</button>
+        <button id="traj-copy-thread" class="cb-btn" title="copy the complete thread (meta + full transcript + trajectory) as JSON">⧉ THREAD JSON</button>
+        <button id="traj-save-thread" class="cb-btn" title="download the complete thread as a .json file">⬇ SAVE</button>
+      </div>
       <input id="traj-search" type="text" placeholder="⌕ FILTER TRAJECTORY…" autocomplete="off">
       <div id="traj-body"></div>
     </div>

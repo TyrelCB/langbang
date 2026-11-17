@@ -124,6 +124,11 @@ const api = {
   async messages(id) { return J(await fetch(`/api/threads/${id}/messages`)); },
   async todos(id) { return J(await fetch(`/api/threads/${id}/todos`)); },
   async trajectory(id) { return J(await fetch(`/api/threads/${id}/trajectory`)); },
+  async exportThread(id) {
+    const r = await fetch(`/api/threads/${id}/export`);
+    if (!r.ok) throw new Error(`export HTTP ${r.status}`);
+    return r.json();
+  },
   async search(q) {
     return J(await fetch("/api/search?q=" + encodeURIComponent(q) + (projPick ? "&project=" + encodeURIComponent(projPick) : "")));
   },
@@ -2183,8 +2188,40 @@ function trajCopyBtn(getText, tip) {
   return b;
 }
 
+// ---- trajectory thread bar: ID + whole-thread export ----
+function flashBtn(b, ok) {
+  const lbl = b.dataset.label || (b.dataset.label = b.textContent);
+  b.textContent = ok ? "✓ COPIED" : "✕ FAILED";
+  setTimeout(() => (b.textContent = lbl), 1400);
+}
+async function threadExportText() {
+  return JSON.stringify(await api.exportThread(threadId), null, 2);
+}
+$("#traj-copy-id").onclick = async (e) => {
+  if (threadId) flashBtn(e.currentTarget, await copyText(threadId));
+};
+$("#traj-copy-thread").onclick = async (e) => {
+  const b = e.currentTarget;
+  if (!threadId) return;
+  // fetch first, copy after: a slow fetch can outlive the click's user
+  // activation, and copyText falls back to execCommand then
+  let ok = false;
+  try { ok = await copyText(await threadExportText()); } catch {}
+  flashBtn(b, ok);
+};
+$("#traj-save-thread").onclick = async (e) => {
+  const b = e.currentTarget;
+  if (!threadId) return;
+  try {
+    const url = URL.createObjectURL(new Blob([await threadExportText()], { type: "application/json" }));
+    const a = el("a"); a.href = url; a.download = `langbang-thread-${threadId}.json`;
+    a.click(); setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch { flashBtn(b, false); }
+};
+
 function renderTraj() {
   const body = $("#traj-body");
+  $("#traj-tid").textContent = threadId || "—";
   const keepScroll = body.scrollTop; // live refresh rebuilds the DOM — hold the view
   body.innerHTML = "";
   const q = $("#traj-search").value.trim().toLowerCase();

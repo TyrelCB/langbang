@@ -2482,6 +2482,29 @@ async def trajectory(thread_id: str) -> dict:
     }
 
 
+
+async def export_thread(thread_id: str) -> dict | None:
+    """Whole thread as one JSON document for analysis in another tool: thread
+    row, the FULL chat transcript (/messages — uncapped, binary blobs slimmed
+    to notes) and the trajectory telemetry (rows capped by design: model text
+    ~500 chars, tool I/O ~2 KB). None for an unknown thread."""
+    row = await (await _db.execute(
+        "SELECT id,title,created_at,updated_at,project,parent,archived,opts"
+        " FROM threads WHERE id=?", (thread_id,))).fetchone()
+    if not row:
+        return None
+    return {
+        "format": "langbang-thread-export/1",
+        "exported_at": time.time(),
+        "thread": {"id": row[0], "title": row[1], "created_at": row[2],
+                   "updated_at": row[3], "project": row[4],
+                   "parent": json.loads(row[5]) if row[5] else None,
+                   "archived": row[6], "opts": _opts_json(row[7])},
+        "messages": await history(thread_id),
+        "trajectory": await trajectory(thread_id),
+    }
+
+
 # ---- thread bookkeeping ----
 
 async def create_thread(title: str = "New chat", project: str | None = None) -> dict:

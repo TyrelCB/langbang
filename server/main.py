@@ -339,6 +339,16 @@ async def trajectory(tid: str):
     return await agent.trajectory(tid)
 
 
+@app.get("/api/threads/{tid}/export")
+async def export_thread(tid: str):
+    """Complete thread (meta + full transcript + trajectory) as one JSON doc —
+    the trajectory tab's ⧉ THREAD / ⬇ SAVE buttons."""
+    d = await agent.export_thread(tid)
+    if d is None:
+        raise HTTPException(404, "no such thread")
+    return d
+
+
 class ThreadRenameIn(BaseModel):
     title: str
 
