@@ -17,7 +17,9 @@ from . import comfy, config, rag, schedule  # cycle-safe: only used at call time
 
 HOME = Path.home()
 MAX_OUT = 12_000  # chars — keep tool output off Spark's prefill budget
-CRAWL_API = os.environ.get("LANGBANG_CRAWL4AI_URL", "http://spark-ee93:8088")
+# Workbench runs on THIS box by default (crawl outputs are then plain-local
+# read_file targets); point the env var at spark-ee93:8088 to use the remote one.
+CRAWL_API = os.environ.get("LANGBANG_CRAWL4AI_URL", "http://localhost:8088")
 # hard wall-clock cap for one crawl; dead sources should cost seconds, not
 # minutes (180s socket timeouts let wedged upstreams stall whole runs)
 CRAWL_TIMEOUT = int(os.environ.get("LANGBANG_CRAWL_TIMEOUT", "45"))
@@ -166,9 +168,10 @@ def _crawl_once(url: str) -> dict:
 @tool
 def crawl_url(url: str) -> str:
     """Crawl a public web page and return its readable Markdown, using the
-    Crawl4AI workbench running on spark-ee93. Good for docs/articles; blocks
-    private-network targets. Slow/dead sources fail within ~45s — crawl
-    independent URLs as parallel calls in ONE message, not turn by turn."""
+    Crawl4AI workbench (local by default, see LANGBANG_CRAWL4AI_URL). Good for
+    docs/articles; blocks private-network targets. Slow/dead sources fail
+    within ~45s — crawl independent URLs as parallel calls in ONE message,
+    not turn by turn."""
     ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
         d = ex.submit(_crawl_once, url).result(timeout=CRAWL_TIMEOUT)
@@ -424,7 +427,7 @@ LOCAL_TOOLS = [run_bash, read_file, write_file, list_dir, crawl_url, web_search,
 TOOLS_NOTE = (
     "\n\nLocal tools available: run_bash (shell, cwd=home), read_file, "
     "write_file, list_dir, crawl_url (fetch any web page as Markdown via "
-    "Crawl4AI on spark-ee93), web_search (Tavily web search — ranked results "
+    "Crawl4AI, local workbench on :8088), web_search (Tavily web search — ranked results "
     "when you don't have a URL yet; crawl the links for detail). Prefer them "
     "over asking the user to run things. "
     "Scheduling: any recurring/scheduled work the user asks for goes to "
