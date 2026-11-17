@@ -694,6 +694,22 @@ function attachFork(msg, role, text) {
   };
   if (role === "user") msg.appendChild(b);
   else msg.insertBefore(b, msg._speakBtn || null);
+  attachCopy(msg, text);
+}
+
+// ⧉ copies the bubble's raw markdown (not the rendered DOM text) — rides
+// right after ⑂, same in-bubble contract
+function attachCopy(msg, text) {
+  if (!text || msg.querySelector(".copy-btn")) return;
+  const c = el("button", "cb-btn copy-btn", "⧉");
+  c.title = "Copy this message (markdown) to the clipboard";
+  c.onclick = async (e) => {
+    e.stopPropagation();
+    const ok = await copyText(text);
+    c.textContent = ok ? "✓" : "✕";
+    setTimeout(() => (c.textContent = "⧉"), 1200);
+  };
+  msg.querySelector(".fork-btn").after(c);
 }
 
 // ask_user args as the model sent them — a list, or (parser fallback) a JSON string

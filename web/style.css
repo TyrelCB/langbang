@@ -590,10 +590,13 @@ button[disabled] { opacity: .4; cursor: default; pointer-events: none; }
 .speak-btn { display: block; margin-top: 6px; }
 /* ⑂ fork chip: beside 🔊 on answers, at the foot of user bubbles */
 .fork-btn { display: inline-block; margin: 6px 6px 0 0; font-size: 14px; line-height: 1; padding: 2px 7px; }
-.msg.assistant .fork-btn + .speak-btn { display: inline-block; }
+.msg.assistant .copy-btn + .speak-btn { display: inline-block; }
+/* ⧉ copy chip: rides right after ⑂ in every bubble */
+.copy-btn { display: inline-block; margin: 6px 6px 0 0; font-size: 14px; line-height: 1; padding: 2px 7px; }
 .fork-btn.fail { color: var(--danger); border-color: var(--danger); }
-.msg.user .fork-btn { display: block; margin: 6px 0 0 auto; opacity: .55; }
-.msg.user:hover .fork-btn, .fork-btn:focus { opacity: 1; }
+.msg.user { display: flow-root; } /* contains the floated ⑂ ⧉ chips */
+.msg.user .fork-btn, .msg.user .copy-btn { float: right; margin: 6px 0 0 6px; opacity: .55; }
+.msg.user:hover .fork-btn, .msg.user:hover .copy-btn, .fork-btn:focus, .copy-btn:focus { opacity: 1; }
 .speak-btn.on { color: var(--cyan); border-color: var(--cyan); }
 /* per-bubble TTS mini player — inside .msg (chat child-index invariant) */
 .tts-player { display: flex; align-items: center; gap: 5px; margin-top: 6px; }
