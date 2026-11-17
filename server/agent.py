@@ -1895,6 +1895,20 @@ class _ToolFilter(AgentMiddleware):
         return await handler(request)
 
 
+def env_note() -> str:
+    """Ground the model in its live environment (date/time + host). A frozen
+    training-cutoff 'now' otherwise leaks out as a confident wrong date (the
+    'it's January' failure). Built per run: stable within a run (prefix cache
+    intact mid-run), refreshed next turn. Date carries the offset so the model
+    can convert; now_utc gives exact seconds when precision matters."""
+    lt = time.localtime()
+    tz = time.tzname[lt.tm_isdst]
+    return (f"\n\n<env>Today is {time.strftime('%A, %B %d %Y, %H:%M', lt)} {tz}"
+            f" (UTC offset {time.strftime('%z', lt)}). Host {os.uname().nodename}"
+            f" ({os.uname().machine}). For any date/time claim, trust this over"
+            f" your prior; call now_utc when you need exact time.</env>")
+
+
 async def build_agent(s: dict, checkpointer=None, thread_prompt: str = "", project: dict | None = None):
     cp = checkpointer or _checkpointer
     if s.get("lb_bare"):
@@ -1902,7 +1916,7 @@ async def build_agent(s: dict, checkpointer=None, thread_prompt: str = "", proje
         # tools, no harness, LangBang's system prompt + thread prompt kept
         return create_react_agent(
             model(s), [], checkpointer=cp,
-            prompt=SystemMessage(content=s["system_prompt"] + learning.thread_note(thread_prompt)),
+            prompt=SystemMessage(content=s["system_prompt"] + env_note() + learning.thread_note(thread_prompt)),
             pre_model_hook=_compaction_hook(s) if s.get("compact_enabled", True) else None,
         )
     enabled = s.get("local_tools") or {}
@@ -1926,7 +1940,7 @@ async def build_agent(s: dict, checkpointer=None, thread_prompt: str = "", proje
     tools = [t for t in tools if t.name not in off]
     # built per run: memory edits and thread-prompt changes apply next turn
     # (also keeps the system prompt stable — and prefix-cached — mid-run)
-    prompt = (s["system_prompt"] + learning.thread_note(thread_prompt)
+    prompt = (s["system_prompt"] + env_note() + learning.thread_note(thread_prompt)
               + local_tools.TOOLS_NOTE + (procs.NOTE if bg else "")
               + learning.memory_note(s, project["name"] if project else ""))
     if deep:
