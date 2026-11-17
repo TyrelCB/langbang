@@ -109,6 +109,7 @@ DEFAULTS = {"n": 198, "concurrency": 1, "max_tokens": 32768, "thinking": True,
             "budget": 0, "temperature": 0.6,  # GPQA needs ≥32k CoT+answer room
             "context": 131072,  # Terminal-Bench: terminus-2's context window (summarizes near it)
             "agent": "", "host": ""}  # Harbor benches: "" = the bench's default agent / this box
+ABORT_STREAK = 8  # consecutive errored items that stop a run (state=error; RESUME retries them)
 TEXT_CAP = 6000  # chars of answer text kept per item (reasoning: length only)
 ANSI_RE = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07]*\x07|[()][A-Za-z0-9])|\r")  # tmux pane captures
 
@@ -383,6 +384,12 @@ async def _stats(rid: str) -> dict:
             "avg_tokens": round(tok) if tok else None, "secs": round(secs or 0)}
 
 
+async def get_run(rid: str) -> dict | None:
+    cur = await _db.execute("SELECT * FROM runs WHERE id=?", (rid,))
+    r = await cur.fetchone()
+    return {**_row(r), **(await _stats(rid))} if r else None
+
+
 async def list_runs() -> list[dict]:
     cur = await _db.execute("SELECT * FROM runs ORDER BY created DESC")
     return [{**_row(r), **(await _stats(r[0]))} for r in await cur.fetchall()]
@@ -444,9 +451,9 @@ async def _ask(c: httpx.AsyncClient, s: dict, prompt: str, temperature: float) -
         if r.status_code in (429, 502, 503) and attempt < 5:  # busy backend (sglang caps ~4 streams)
             await asyncio.sleep(5 * (attempt + 1))
             continue
-        r.raise_for_status()
-        return r.json()
-    r.raise_for_status()
+        break
+    if r.is_error:  # keep the backend's reason: raise_for_status alone says only "400 Bad Request"
+        raise RuntimeError(f"HTTP {r.status_code} from {url}: {r.text.strip()[:500]}")
     return r.json()
 
 
@@ -540,10 +547,23 @@ async def _run(rid: str) -> None:
                     await _host_prep(p["host"], run["bench"])
                 one = functools.partial(_one_harbor, bench=run["bench"])
 
+            streak, abort = [0], []
+
             async def go(i):
                 async with sem:
+                    if abort:
+                        return
                     await one(c, rid, i, qs[i], s, p)
+                    cur = await _db.execute("SELECT error FROM items WHERE run_id=? AND idx=?", (rid, i))
+                    err = ((await cur.fetchone()) or [None])[0]
+                    streak[0] = streak[0] + 1 if err else 0
+                    if streak[0] >= ABORT_STREAK and not abort:
+                        abort.append(err)
             await asyncio.gather(*(go(i) for i in todo))
+        if abort:  # every request failing (bad params, server down) — say so, don't call it "done"
+            await _write("UPDATE runs SET state='error', error=?, ended=? WHERE id=?",
+                         (f"stopped after {ABORT_STREAK} failures in a row — last: {abort[0]}"[:600], time.time(), rid))
+            return
         await _write("UPDATE runs SET state='done', ended=? WHERE id=?", (time.time(), rid))
     except asyncio.CancelledError:
         await _write("UPDATE runs SET state='stopped', ended=? WHERE id=?", (time.time(), rid))

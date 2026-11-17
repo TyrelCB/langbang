@@ -440,7 +440,11 @@ async def bench_start(body: BenchRunIn):
 
 @app.get("/api/bench/runs/{rid}")
 async def bench_items(rid: str):
-    return {"items": await bench.run_items(rid)}
+    run = await bench.get_run(rid)
+    if not run:
+        raise HTTPException(404, "no such bench run")
+    # run: state (running|done|stopped|lost|error), n, done, errors, acc, error — what a poller needs
+    return {"run": run, "items": await bench.run_items(rid)}
 
 
 @app.get("/api/bench/runs/{rid}/items/{idx}")

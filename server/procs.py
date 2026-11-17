@@ -52,6 +52,15 @@ EARLY_S = 180
 SHELL_ERR = re.compile(
     r"command not found|syntax error|unexpected EOF|bad substitution|unbound variable"
     r"|No such container|Could not resolve hostname|Permission denied \(publickey", re.I)
+# A watcher whose output never changes is either waiting on something that
+# isn't moving or its check is broken (wrong API field, errors hidden by
+# 2>/dev/null) — 11-16: a KD bench watcher printed "gpqa: ? 0" every 2 min for
+# 70 min while both runs had long since failed. Wake once when the last
+# SAME_N lines are identical (ignoring a leading "[n]"/"n:" counter and clock
+# times) for SAME_S, or right away (≥ SAME_EARLY_N lines) if nothing it
+# printed since launch (≥ 5 min) ever differed.
+SAME_N, SAME_S, SAME_EARLY_N = 6, 15 * 60, 3
+_COUNTER = re.compile(r"^\s*(?:\[\s*\d+\s*(?:/\s*\d+)?\]|#?\d+[:.)])\s*|\b\d{1,2}:\d{2}(?::\d{2})?\b")
 _HOST_OK = re.compile(r"^[A-Za-z0-9_.@-]{1,100}$")
 
 
@@ -269,6 +278,21 @@ async def _wake(p: dict, what: str, advice: str = "") -> bool:
     return True
 
 
+def _same_output(pid: str, age: float) -> str | None:
+    """Why this process's output looks stuck (→ wake), or None. See SAME_N."""
+    lines = [ln for ln in tail(pid, 200).splitlines() if ln.strip()]
+    if len(lines) < SAME_EARLY_N:
+        return None
+    norm = [_COUNTER.sub("", ln).strip() for ln in lines]
+    if len(lines) < 200 and age >= 300 and len(set(norm)) == 1:
+        return (f"has printed the same line {len(lines)} times since it started "
+                f"(“{lines[-1][:160]}”) — still running")
+    if len(norm) >= SAME_N and age >= SAME_S and len(set(norm[-SAME_N:])) == 1:
+        return (f"has printed the same line for its last {SAME_N} outputs "
+                f"(“{lines[-1][:160]}”) — still running")
+    return None
+
+
 async def _tick() -> None:
     cur = await agent._db.execute(
         f"SELECT {_COLS}, log_off FROM procs WHERE state='running' "
@@ -289,6 +313,15 @@ async def _tick() -> None:
                         "\nThe command itself is probably broken (wrong machine? quoting? "
                         "typo?) and it is STILL RUNNING: bg_stop it, run its check once with "
                         "run_bash, then bg_start the fixed version (host= for remote checks).")):
+                    async with agent._wt(agent._db):
+                        await agent._db.execute("UPDATE procs SET warned=? WHERE id=?",
+                                                (time.time(), p["id"]))
+            if p["thread_id"] and not p["warned"] and p["wake"] != "none":
+                same = await asyncio.to_thread(_same_output, p["id"], time.time() - p["started"])
+                if same and await _wake(p, same, (
+                        "\nIf it says the same thing every check, the check is probably broken "
+                        "(wrong field/endpoint, errors hidden by 2>/dev/null). Look at the real "
+                        "state once with run_bash; bg_stop it if it can't work as written.")):
                     async with agent._wt(agent._db):
                         await agent._db.execute("UPDATE procs SET warned=? WHERE id=?",
                                                 (time.time(), p["id"]))
