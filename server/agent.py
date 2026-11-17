@@ -2048,6 +2048,33 @@ async def overview() -> dict:
     return out
 
 
+# ⚙ TOOLS panel's READ-ONLY preset: tools that only look things up. Unknown
+# names default to NOT read-only (the preset leaves them off). An MCP
+# server's own readOnlyHint wins over the name; otherwise the name's first
+# word must be a read verb (snake_case or CamelCase).
+READONLY_TOOLS = {
+    "ask_user", "exit_plan_mode", "write_todos",  # talk / plan only, no side effects
+    "glob", "grep", "ls", "read_file", "list_dir",
+    "crawl_url", "web_search", "semantic_search", "semantic_search_image",
+    "generate_image",  # makes a new image file; changes nothing that exists
+    "bg_status", "now_utc", "calculate",
+}
+_READ_VERBS = {"get", "list", "search", "read", "fetch", "find", "query", "lookup",
+               "describe", "show", "view", "check", "count", "inspect", "browse", "status"}
+
+
+def tool_is_readonly(name: str) -> bool:
+    if name in mcp.readonly_hint:
+        return mcp.readonly_hint[name]
+    if name in READONLY_TOOLS:
+        return True
+    words = re.findall(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])", name)
+    words = [w.lower() for w in words]
+    # rag_search / rag_status: a namespace prefix, then the verb
+    return bool(words) and (words[0] in _READ_VERBS
+                            or (len(words) == 2 and words[1] in _READ_VERBS))
+
+
 async def tool_catalog() -> dict:
     """What a thread's ⚙ TOOLS panel can toggle: every local / background
     tool (even globally off — threads may force those on), the harness and
@@ -2073,6 +2100,9 @@ async def tool_catalog() -> dict:
              "tools": [{"name": n, "global": True} for n in harness if n not in bg]},
         ],
         "mcp": [{"name": m["name"], "state": m["state"], "tools": m["tools"]} for m in ov["mcp"]],
+        "readonly": sorted({n for n in [*(t.name for t in local_tools.LOCAL_TOOLS), *bg, *harness,
+                                        *(n for m in ov["mcp"] for n in m["tools"])]
+                            if tool_is_readonly(n)}),
         "flags": {"memory": bool(s.get("memory_enabled", True)),
                   "skills": bool(s.get("skills_enabled", True)),
                   "compact": bool(s.get("compact_enabled", True)),

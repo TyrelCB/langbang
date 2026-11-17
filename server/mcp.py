@@ -90,6 +90,8 @@ _tools_lock = asyncio.Lock()
 _fingerprint = None
 last_errors: dict[str, str] = {}  # server -> why its tools are missing right now
 by_server: dict[str, list[str]] = {}  # server -> tool names from the last load (NEW CHAT overview)
+# tool name -> the server's MCP readOnlyHint (True/False), when it declared one
+readonly_hint: dict[str, bool] = {}
 
 
 def _fingerprint_of(servers: dict):
@@ -142,6 +144,7 @@ async def get_tools(servers: dict) -> list:
         tools: list = []
         last_errors.clear()
         by_server.clear()
+        readonly_hint.clear()
         client = MultiServerMCPClient({n: _client_cfg(c) for n, c in servers.items()}) if servers else None
         for name, cfg in servers.items():
             try:
@@ -152,6 +155,10 @@ async def get_tools(servers: dict) -> list:
                 logger.warning("MCP server %r skipped this run: %s", name, last_errors[name])
                 continue
             by_server[name] = [t.name for t in got]
+            for t in got:
+                h = (t.metadata or {}).get("readOnlyHint")
+                if isinstance(h, bool):
+                    readonly_hint[t.name] = h
             secs = float(cfg.get("call_timeout") or CALL_TIMEOUT)
             tools += [_with_timeout(t, name, secs) for t in got]
         _tools = tools

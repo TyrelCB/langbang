@@ -549,6 +549,7 @@
         <div class="hint">Overrides CONFIG for this thread only (scheduled runs too), from the next message. The system prompt and thread prompt are always kept.</div>
         <div class="row topts-presets">
           <button id="btn-topts-bare" class="btn ghost" type="button" title="no tools at all — plain chat like llama-server">∅ BARE PRESET</button>
+          <button id="btn-topts-ro" class="btn ghost" type="button" title="only tools that look things up: get/list/search/read… on (an MCP server's own readOnlyHint wins); create/update/delete/send/run, shell, file writes and sub-agents off">🔒 READ-ONLY PRESET</button>
           <button id="btn-topts-temp" class="btn ghost" type="button" title="throwaway: no auto-learn / memory, kept out of other threads' auto-search hints, deleted after 24 h idle">⌛ TEMP PRESET</button>
         </div>
         <label class="topts-check"><input type="checkbox" id="topts-bare"><span>∅ <b>bare</b> — no tools at all (no harness, no sub-agents, no skills); like llama-server</span></label>
@@ -557,6 +558,7 @@
         <div id="topts-flags" class="topts-flags"></div>
         <div class="learn-head">TOOLS <span class="hint">unchecked = not offered to the model · <span class="topts-forced">cyan</span> = differs from CONFIG</span>
           <button id="btn-topts-all" class="btn ghost" type="button">ALL</button>
+          <button id="btn-topts-ro2" class="btn ghost" type="button" title="check only the read-only tools">READ-ONLY</button>
           <button id="btn-topts-none" class="btn ghost" type="button">NONE</button></div>
         <div id="topts-tools"></div>
         <div id="topts-msg" class="hint"></div>

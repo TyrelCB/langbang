@@ -6047,6 +6047,21 @@ $("#topts-eph").onchange = () => toptsRender(toptsRead()); // repaint the "(defa
 $("#btn-topts-bare").onclick = () => toptsRender({ ...toptsRead(), bare: true });
 $("#btn-topts-temp").onclick = () => toptsRender({ ...toptsRead(), ephemeral: true });
 const toptsAll = (on) => { for (const i of $("#topts-tools").querySelectorAll("input[type=checkbox]:not(:disabled)")) { i.checked = on; i.onchange(); } };
+// 🔒 READ-ONLY: server classifies (catalog.readonly) — reads on, writes off;
+// an MCP server stays on when it has at least one read tool
+const toptsReadOnly = () => {
+  const ro = new Set((toptsCat && toptsCat.readonly) || []);
+  $("#topts-bare").checked = false;
+  $("#topts-tools").classList.remove("dim");
+  for (const i of $("#topts-tools").querySelectorAll("input[data-tool]:not(:disabled)")) { i.checked = ro.has(i.dataset.tool); i.onchange(); }
+  for (const i of $("#topts-tools").querySelectorAll("input[data-mcp]:not(:disabled)")) {
+    const list = i.closest(".topts-group").nextElementSibling;
+    i.checked = [...list.querySelectorAll("input[data-tool]")].some((t) => ro.has(t.dataset.tool));
+    i.onchange();
+  }
+};
+$("#btn-topts-ro").onclick = toptsReadOnly;
+$("#btn-topts-ro2").onclick = toptsReadOnly;
 $("#btn-topts-all").onclick = () => toptsAll(true);
 $("#btn-topts-none").onclick = () => toptsAll(false);
 $("#btn-topts-save").onclick = () => saveTOpts(toptsRead());
