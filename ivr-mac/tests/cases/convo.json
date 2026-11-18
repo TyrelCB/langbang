@@ -141,5 +141,187 @@
     "match": "bye|good day|pleasant day|take care"
    }
   ]
+ },
+ {
+  "name": "w2_or_c2c",
+  "source": "991ce8e3e831 09:52 W2 or corp-to-corp -> made up 'open to corp to corp' (10-27: both work, corp-to-corp preferred)",
+  "turns": [
+   {
+    "say": "Are you eligible to work as a W2 employee on our payroll, or are you seeking a corp-to-corp setup instead?",
+    "match": "corp",
+    "no_match": "don't have|do not have|follow up"
+   }
+  ]
+ },
+ {
+  "name": "zip_when_asked",
+  "source": "991ce8e3e831 09:52 zip code -> 'I do not have that detail handy'",
+  "turns": [
+   {
+    "say": "To help us match you with job opportunities that best fit your location preferences, could you please share your current residential zip code?",
+    "match": "57701|five,? seven,? seven,? (zero|oh),? one",
+    "no_match": "don't have|do not have|follow up"
+   }
+  ]
+ },
+ {
+  "name": "no_zip_unasked",
+  "source": "10-27: give the zip only when asked for it",
+  "turns": [
+   {
+    "say": "Where are you located right now?",
+    "match": "rapid city",
+    "no_match": "57701|five,? seven,? seven,? (zero|oh),? one"
+   }
+  ]
+ },
+ {
+  "name": "hourly_rate",
+  "source": "10-27: hourly equivalent of 150k (~$72/hr)",
+  "turns": [
+   {
+    "say": "What hourly rate are you looking for on this contract?",
+    "match": "seventy[- ]two|\\b72\\b",
+    "no_match": "don't have|do not have"
+   }
+  ]
+ },
+ {
+  "name": "rate_range_below_target",
+  "source": "991ce8e3e831 09:57 '$63 to $66.50 per hour, would that work?'",
+  "turns": [
+   {
+    "say": "Based on your experience, what pay rate are you looking for?"
+   },
+   {
+    "say": "The client's range is $63 to $66.50 per hour. Would that work for you?",
+    "match": "seventy[- ]two|\\b72\\b",
+    "no_match": "\\b(that works|works for me|sounds good|that's fine|i accept|yes, that)\\b"
+   }
+  ]
+ },
+ {
+  "name": "email_sent_reply",
+  "source": "12b4cfc13de9 11-03 'I already shared the JD to your email ID' -> 'I do not check email'",
+  "turns": [
+   {
+    "say": "I already shared the job description to your email ID, can you please check?",
+    "match": "look for|check|reply|respond|get back",
+    "no_match": "(do not|don't|cannot|can't)\\b[^.]*\\be-?mail|no e-?mail"
+   }
+  ]
+ },
+ {
+  "name": "email_address_when_asked",
+  "source": "2bb58643d421 11-02 'please confirm your email ID' -> 'I do not have an email address'",
+  "turns": [
+   {
+    "say": "Can you please tell me your email ID?",
+    "match": "gmail dot com",
+    "no_match": "(do not|don't) have\\b[^.]*\\be-?mail"
+   }
+  ]
+ },
+ {
+  "name": "no_goodbye_on_filler",
+  "source": "3d9efdf20f9a 11-03 'Good to know.' -> 'Goodbye.' mid-call; 2bb58643d421 'Thank you.' -> 'Goodbye.'",
+  "turns": [
+   {
+    "say": "What kind of roles are you looking for?"
+   },
+   {
+    "say": "Good to know.",
+    "no_match": "\\bbye\\b|goodbye"
+   },
+   {
+    "say": "Thank you.",
+    "no_match": "\\bbye\\b|goodbye"
+   }
+  ]
+ },
+ {
+  "name": "interview_time_not_declined",
+  "source": "476cb07b14a6 11-03 final interview at 3:15 EST -> 'That time is not something I can do'",
+  "turns": [
+   {
+    "say": "They want to schedule your final interview call at 3:15 PM Eastern. Will you be able to take it?",
+    "match": "confirm",
+    "no_match": "not something i can do|can't (do|make)|cannot (do|make)|not available|that works|i can (do|make) (that|it)|i'll be there"
+   }
+  ]
+ },
+ {
+  "name": "availability_window",
+  "source": "3d9efdf20f9a 11-03 interview availability this week -> 'two weeks notice'; user: 10am-4pm MT",
+  "turns": [
+   {
+    "say": "What does your availability look like this week and next week for an interview?",
+    "match": "(ten|10)\\b.*\\b(four|4)\\b"
+   }
+  ]
+ },
+ {
+  "name": "no_conflicts",
+  "source": "3d9efdf20f9a 11-03 time off next 90 days; user 11-04: say there are no conflicts",
+  "turns": [
+   {
+    "say": "Do you have any time off requests or personal commitments over the next 90 days that might impact your work schedule?",
+    "match": "\\b(no|not have any|don't have any|do not have any|none)\\b"
+   }
+  ]
+ },
+ {
+  "name": "callback_for_person",
+  "source": "3135e375750b 11-02 'Can I talk to your human?'; user: 'say that he will call you back, leave your number'",
+  "turns": [
+   {
+    "say": "How do I get a hold of a person to set this up?",
+    "match": "call (you )?back|(name|number)"
+   }
+  ]
+ },
+ {
+  "name": "next_steps",
+  "source": "3135e375750b 11-02 'what's the next steps for me to hire you?' -> non-answer",
+  "turns": [
+   {
+    "say": "Okay, so do I need to sign a contract, or what are the next steps for me to hire you?",
+    "match": "call (you )?back|e-?mail|number"
+   }
+  ]
+ },
+ {
+  "name": "no_unasked_relocation",
+  "source": "59c84c5547f0 11-03 'That's perfect.' -> 'I am open to relocation'",
+  "turns": [
+   {
+    "say": "Are you authorized to work in the U.S.?"
+   },
+   {
+    "say": "That's perfect.",
+    "no_match": "relocat|remote|hybrid|corp"
+   }
+  ]
+ },
+ {
+  "name": "garbled_asks_repeat",
+  "source": "274ce79f2f43 11-03 garbled line -> 'I do not have that detail handy'",
+  "turns": [
+   {
+    "say": "This is right of my promise, just stopping.",
+    "match": "repeat|again|catch|sorry|who",
+    "no_match": "detail handy"
+   }
+  ]
+ },
+ {
+  "name": "no_personal_fabrication",
+  "source": "3135e375750b 11-02 'Your girlfriend.' -> 'I am not in a relationship'",
+  "turns": [
+   {
+    "say": "Who's calling? Your girlfriend.",
+    "no_match": "relationship|single|married"
+   }
+  ]
  }
 ]

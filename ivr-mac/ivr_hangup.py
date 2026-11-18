@@ -115,38 +115,81 @@ def ws_recv_text(s: socket.socket, want_id: int, timeout: float = 5.0) -> dict |
     return None
 
 
-def main() -> int:
+# is the in-call panel still up? (the far end hung up -> GV drops it)
+PANEL_JS = (
+    "(() => {"
+    "const L=[...document.querySelectorAll('button,[role=button]')]"
+    ".map(x=>(x.getAttribute('aria-label')||'').trim());"
+    "return L.includes('Hang up call')||L.includes('Mute call')||L.includes('Hold call');})()"
+)
+
+
+def _gv_pages():
+    """The GV call tabs (never the SMS watcher's), or (None, why)."""
     try:
         port = int(open(PORT_FILE).read().split("\n")[0])
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=3) as r:
             targets = json.load(r)
     except Exception as e:
-        print(f"no CDP ({e.__class__.__name__}) — GV leg left as-is")
-        return 0
-    page = next(
-        (t for t in targets
-         if t.get("type") == "page"
-         and t.get("url", "").startswith("https://voice.google.com")
-         and SKIP_URL_MARK not in t.get("url", "")
-         and t.get("webSocketDebuggerUrl")),
-        None,
-    )
-    if not page:
-        print("no GV tab — nothing to hang up")
-        return 0
+        return None, f"no CDP ({e.__class__.__name__})"
+    pages = [t for t in targets
+             if t.get("type") == "page"
+             and t.get("url", "").startswith("https://voice.google.com")
+             and SKIP_URL_MARK not in t.get("url", "")
+             and t.get("webSocketDebuggerUrl")]
+    return (pages, None) if pages else (None, "no GV tab")
+
+
+def _eval(page: dict, expr: str):
     try:
         s = ws_connect(page["webSocketDebuggerUrl"])
-        req = json.dumps({
-            "id": 1,
-            "method": "Runtime.evaluate",
-            "params": {"expression": JS, "returnByValue": True},
-        }).encode()
-        ws_send(s, req)
-        msg = ws_recv_text(s, 1)
-        val = (((msg or {}).get("result") or {}).get("result") or {}).get("value")
-        print(f"GV teardown: {val or 'no response'}")
+        try:
+            req = json.dumps({
+                "id": 1,
+                "method": "Runtime.evaluate",
+                "params": {"expression": expr, "returnByValue": True},
+            }).encode()
+            ws_send(s, req)
+            msg = ws_recv_text(s, 1)
+        finally:
+            s.close()
     except Exception as e:
-        print(f"GV hangup warn: {e.__class__.__name__}: {e}")
+        return None, f"{e.__class__.__name__}: {e}"
+    if msg is None:
+        return None, "no response"
+    return (((msg.get("result") or {}).get("result") or {}).get("value")), None
+
+
+def gv_eval(expr: str):
+    """Runtime.evaluate on the first GV call tab: (value, None), or (None, why)."""
+    pages, why = _gv_pages()
+    return _eval(pages[0], expr) if pages else (None, why)
+
+
+def call_panel_up() -> bool | None:
+    """True: some GV tab shows a call. False: every GV tab answered and none
+    does (the far end hung up). None: couldn't tell. Asks EVERY tab: with a
+    stale duplicate tab (seen 11-01) the first one can show no call while
+    the live call sits in another."""
+    pages, _ = _gv_pages()
+    if not pages:
+        return None
+    vals = [_eval(p, PANEL_JS)[0] for p in pages]
+    if True in vals:
+        return True
+    return False if all(v is False for v in vals) else None
+
+
+def main() -> int:
+    val, why = gv_eval(JS)
+    if why and why.startswith("no CDP"):
+        print(f"{why} — GV leg left as-is")
+    elif why == "no GV tab":
+        print("no GV tab — nothing to hang up")
+    elif why:
+        print(f"GV hangup warn: {why}")
+    else:
+        print(f"GV teardown: {val or 'no response'}")
     return 0
 
 

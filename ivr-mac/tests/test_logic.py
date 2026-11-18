@@ -132,6 +132,9 @@ class FakeDownlink:
     def threshold(self, over=0.0):
         return -55.0 + over
 
+    def caller_gone(self):
+        return False
+
 
 def _quiet(spans):
     return round(LOOP.wait_line_quiet(FakeDownlink(spans)), 2)
@@ -185,3 +188,100 @@ def test_sentence_splitter():
     r = subprocess.run([os.path.join(NODE, ".venv", "bin", "python"), "-c", SPLIT_CHECK],
                        cwd=NODE, capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, (r.stderr or r.stdout).strip().splitlines()[-1]
+
+
+# ---- end of utterance on a noisy line ----------------------------------------
+
+class FrameLine(FakeDownlink):
+    """FakeDownlink for listen(): needs a pre-roll ring and real frame bytes,
+    and the 'line' ends after the scripted spans."""
+
+    def __init__(self, spans):
+        super().__init__(spans)
+        import collections
+        self.ring = collections.deque(maxlen=50)
+
+    def frame(self, timeout):
+        if self.i >= len(self.dbs):
+            raise EOFError
+        self.i += 1
+        f = b"\0\0" * int(LOOP.SR * LOOP.FRAME_S)
+        self.ring.append(f)
+        return (f, self.dbs[self.i - 1])
+
+
+def _turn_end(spans):
+    line = FrameLine(spans)
+    try:
+        LOOP.listen(line, 60)
+    except EOFError:
+        return None
+    return round(line.i * LOOP.FRAME_S, 2)
+
+
+def test_turn_ends_on_noisy_line():
+    # 162520672c68 (11-01): "Hey Ty." at -10..-27 dB, then room noise at
+    # -35..-50 dB with -25 dB bumps — the absolute threshold (-55) called it all
+    # speech, and the turn ran 12 s until a dropout
+    # (bumps closer together than END_REL_S keep the turn open by design)
+    noise = [(0.5, -42), (0.3, -26), (1.2, -45), (0.6, -38), (0.6, -48), (0.2, -27)] * 3
+    end = _turn_end([(1.0, -90), (2.0, -14)] + noise)
+    # speech stops at 3.0 s; the last bump ends at 3.8 s, then END_REL_S of quiet
+    assert end is not None and end <= 3.8 + LOOP.END_REL_S + 0.2, f"turn ended at {end}"
+
+
+def test_pause_over_noise_keeps_the_turn():
+    # natural mid-sentence pause over the same noise: one turn, not two —
+    # "Yeah, let's add that to the... / The IVR knowledge." (c8d18315086e)
+    end = _turn_end([(1.0, -90), (2.0, -14), (1.5, -42), (2.0, -14), (0.2, -90)])
+    assert end is None, f"cut the caller off at {end}s"
+
+
+# ---- caller hung up ------------------------------------------------------------
+
+def test_caller_gone_needs_gv_to_agree():
+    # every call the caller ended (11-02..11-03) got ~25 s of "didn't catch
+    # that / are you still there?" to an empty line; but a muted caller sends
+    # zeros too (476cb07b14a6: 29 s of them, then they talked again)
+    asked = []
+    real, env = LOOP.ivr_hangup.call_panel_up, os.environ.pop("IVR_NO_GV", None)
+
+    def line(panel_up):
+        LOOP.ivr_hangup.call_panel_up = lambda: asked.append(1) or panel_up
+        dl = LOOP.Downlink.__new__(LOOP.Downlink)
+        dl.zeros, dl.probed = 0, False
+        return dl
+
+    def zeros(dl, secs):
+        for _ in range(round(secs / LOOP.FRAME_S)):
+            dl._zero(LOOP.ZERO_FRAME)
+
+    try:
+        dl = line(False)
+        zeros(dl, LOOP.GONE_S - 0.1)
+        assert not dl.caller_gone() and not asked, "asked GV before GONE_S of zeros"
+        zeros(dl, 0.2)
+        assert dl.caller_gone(), "GV says the call is gone: end it"
+
+        asked.clear()
+        dl = line(True)
+        zeros(dl, 5.0)
+        assert not dl.caller_gone(), "muted caller (GV panel still up) was hung up on"
+        assert not dl.caller_gone() and len(asked) == 1, "asked GV more than once per run of zeros"
+        dl._zero(b"\1" + LOOP.ZERO_FRAME[1:])        # they talk again…
+        zeros(dl, 5.0)                               # …then go quiet: a new run, ask again
+        assert not dl.caller_gone() and len(asked) == 2
+
+        asked.clear()
+        dl = line(None)                              # GV unreachable: never end the call
+        zeros(dl, 5.0)
+        assert not dl.caller_gone()
+    finally:
+        LOOP.ivr_hangup.call_panel_up = real
+        if env is not None:
+            os.environ["IVR_NO_GV"] = env
+
+
+def test_long_turn_not_cut():
+    # 3135e375750b (11-02): an 18 s sentence was cut at 15 s and the rest lost
+    assert LOOP.MAX_UTTER_S >= 25.0, f"MAX_UTTER_S={LOOP.MAX_UTTER_S}"
