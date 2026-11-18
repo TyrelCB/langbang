@@ -3,6 +3,7 @@ Runs on THIS machine — the box serving LangBang. Deliberately unrestricted
 (personal LAN tool, bypass-perms philosophy); see README before exposing this
 server beyond localhost/LAN."""
 import concurrent.futures
+import contextvars
 import json
 import os
 import re
@@ -38,6 +39,13 @@ def _tavily_key() -> str:
         except OSError:
             return ""
     return k
+
+
+# 🔐 agent._SecretBroker sets this for ONE run_bash call: vault values the
+# command references as "$LB_S1"… ride the subprocess env, never the command
+# line (ps / trajectory / checkpoint see only the variable name).
+SECRET_ENV: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "lb_secret_env", default=None)
 
 
 def _trim(s: str) -> str:
@@ -101,6 +109,7 @@ def bash(command: str, timeout: int = 60) -> str:
             capture_output=True,
             text=True,
             timeout=min(int(timeout), 300),
+            env={**os.environ, **senv} if (senv := SECRET_ENV.get()) else None,
         )
         return _trim(
             f"exit={r.returncode}\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"

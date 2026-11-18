@@ -1767,6 +1767,182 @@ class _HumanGate(AgentMiddleware):
         return await handler(request)
 
 
+# ---- 🔐 secret vault: handles in, values only at execution, redaction out ----
+# The model writes {{secret:Group/Entry.field}}; it never sees a value. The
+# broker swaps values in on a COPY of the tool call (checkpoint keeps the
+# handle) and redacts every tool result while a vault is open. Policy:
+#  - run_bash: values ride the subprocess env as $LB_S1… (never argv)
+#  - MCP tools (browser form fill, …): inline substitution; a URL in the
+#    args must match the entry's URL host (domain binding)
+#  - every other built-in (web_search, crawl_url, write_file, task,
+#    schedulers, memory…) is refused: those send text out or persist it
+#  - sensitive tier (Cards/, Identity/) → interrupt for approval per call
+#  - scheduled runs (lb_nogate) → only the TPM-sealed unattended vault and
+#    only handles the task was granted in the UI (lb_grants)
+
+def _vault_flags() -> tuple[bool, list[str], str]:
+    try:
+        c = (get_config() or {}).get("configurable") or {}
+    except RuntimeError:
+        c = {}
+    return bool(c.get("lb_nogate")), list(c.get("lb_grants") or []), str(c.get("lb_sched_id") or "")
+
+
+@tool
+def list_secrets(query: str = "") -> str:
+    """List the secrets in the user's vault you can USE (never see): entry
+    names, field names, tier, bound domain, card last-4. Values are never
+    shown. To use one, put the handle {{secret:Entry/Path.field}} in a
+    run_bash command or a browser/MCP tool argument — it is filled in at
+    execution and redacted from the output. Sensitive entries (cards,
+    identity) need the user's approval each use."""
+    from . import vault
+    nogate, _, _ = _vault_flags()
+    rows = vault.catalog(query, unattended=nogate)
+    if not rows:
+        st = vault.status()
+        if not nogate and st["locked"]:
+            return ("The vault is locked. Ask the user to unlock it (🔐 VAULT in "
+                    "settings) — don't ask them to paste the secret into chat.")
+        return "No matching vault entries." if query else "The vault is empty."
+    lines = []
+    for r in rows:
+        extra = [r["tier"]]
+        if r.get("domain"):
+            extra.append("domain " + r["domain"])
+        if r.get("last4"):
+            extra.append("…" + r["last4"])
+        if nogate and not r.get("unattended_ok"):
+            extra.append("NOT usable unattended")
+        lines.append(f"- {r['entry']} ({', '.join(extra)}): "
+                     + ", ".join(f"{{{{secret:{r['entry']}.{f}}}}}" for f in r["fields"]))
+    return "Vault entries (handles only):\n" + "\n".join(lines)
+
+
+_URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.I)
+SECRET_INLINE_BUILTIN: set[str] = set()  # none: built-ins either use env or are refused
+
+
+class _SecretBroker(AgentMiddleware):
+    def __init__(self):
+        super().__init__()
+        self.tools = [list_secrets]
+
+    async def awrap_model_call(self, request, handler):  # noqa: ANN001
+        from . import vault
+        if vault.MAIN.is_open or vault.AUTO.is_open:
+            request = request.override(system_message=append_to_system_message(
+                request.system_message, SECRET_NOTE))
+        return await handler(request)
+
+    @staticmethod
+    def _err(request, msg: str) -> ToolMessage:  # noqa: ANN001
+        return ToolMessage(content="🔐 " + msg, name=request.tool_call.get("name"),
+                           status="error", tool_call_id=request.tool_call["id"])
+
+    async def awrap_tool_call(self, request, handler):  # noqa: ANN001
+        from . import vault
+        name = request.tool_call.get("name") or ""
+        args = request.tool_call.get("args") or {}
+        blob = json.dumps(args, ensure_ascii=False, default=str)
+        handles = list(dict.fromkeys(vault.HANDLE_RE.findall(blob)))
+        if not handles:
+            res = await handler(request)
+            return self._redact(res)
+        nogate, grants, sched_id = _vault_flags()
+        is_mcp = any(name in names for names in mcp.by_server.values())
+        if name != "run_bash" and not is_mcp:
+            return self._err(request, (
+                f"secret handles are not allowed in {name}: it would send the value "
+                "out or store it. Use them only in run_bash or a browser/MCP tool."))
+        try:
+            got = [vault.lookup(h, unattended=nogate, grants=grants) for h in handles]
+        except vault.VaultError as e:
+            return self._err(request, str(e))
+        # domain binding: a URL in the call must belong to the entry's site
+        urls = [vault.host_of(u) for u in _URL_RE.findall(blob)]
+        for g in got:
+            d = g["domain"]
+            bad = [u for u in urls if u and d and not (u == d or u.endswith("." + d))]
+            if is_mcp and bad:
+                return self._err(request, (
+                    f"{g['entry']} is bound to {d}; refusing to use it with {bad[0]}"))
+        sensitive = [g for g in got if g["tier"] == "sensitive"]
+        approved_by = f"grant:{sched_id}" if nogate else "auto"
+        if sensitive and not nogate:
+            ans = interrupt({
+                "kind": "secret", "tool": name,
+                "entries": [f"{g['entry']}.{g['field']}" for g in sensitive],
+                "target": (urls and [u for u in urls if u][:1] or [""])[0],
+                "preview": _cap(blob, 400),
+            })
+            ok = isinstance(ans, dict) and ans.get("approved")
+            if not ok:
+                return self._err(request, (
+                    "the user DENIED using " + ", ".join(g["entry"] for g in sensitive)
+                    + ". Don't retry it; continue without it or ask what they want."))
+            approved_by = "user"
+        # substitute on a copy — the persisted AIMessage keeps the handles
+        if name == "run_bash":
+            env, cmd = {}, str(args.get("command") or "")
+            for i, (h, g) in enumerate(zip(handles, got), 1):
+                env[f"LB_S{i}"] = g["value"]
+                cmd = re.sub(r"\{\{\s*secret:" + re.escape(h) + r"\s*\}\}",
+                             f'"$LB_S{i}"', cmd)
+            new_tc = {**request.tool_call, "args": {**args, "command": cmd}}
+            tok = local_tools.SECRET_ENV.set(env)
+            try:
+                res = await handler(request.override(tool_call=new_tc))
+            finally:
+                local_tools.SECRET_ENV.reset(tok)
+        else:
+            vals = {h: g["value"] for h, g in zip(handles, got)}
+
+            def sub(o):  # noqa: ANN001, ANN202
+                if isinstance(o, str):
+                    return vault.HANDLE_RE.sub(
+                        lambda m: vals.get(m.group(1), m.group(0)), o)
+                if isinstance(o, list):
+                    return [sub(x) for x in o]
+                if isinstance(o, dict):
+                    return {k: sub(v) for k, v in o.items()}
+                return o
+            new_tc = {**request.tool_call, "args": sub(args)}
+            res = await handler(request.override(tool_call=new_tc))
+        try:
+            try:
+                tid = ((get_config() or {}).get("configurable") or {}).get("thread_id", "")
+            except RuntimeError:  # outside a graph run (tests)
+                tid = ""
+            for g in got if tid else ():
+                await _log(tid, "", "secret_use", name=name, meta={
+                    "entry": g["entry"], "field": g["field"], "tier": g["tier"],
+                    "vault": g["vault"], "approved_by": approved_by})
+        except Exception:  # noqa: BLE001 - audit must not break the call
+            logger.exception("secret_use audit row failed")
+        return self._redact(res)
+
+    @staticmethod
+    def _redact(res):  # noqa: ANN001, ANN205
+        from . import vault
+        if not (vault.MAIN.is_open or vault.AUTO.is_open):
+            return res
+        if isinstance(res, ToolMessage):
+            red = vault.redact_obj(res.content)
+            if red != res.content:
+                res = res.model_copy(update={"content": red})
+        return res
+
+
+SECRET_NOTE = """## 🔐 Secret vault (unlocked)
+The user's passwords, cards and personal data are usable through handles —
+call list_secrets to see them. Write {{secret:Entry/Path.field}} where the
+value goes (a run_bash command, or a browser/MCP tool argument); it is filled
+in at execution and shows as ‹secret:…› in output. You never see values:
+don't ask the user to paste secrets, and never put handles in web searches,
+files or scheduled-task prompts."""
+
+
 async def pending_gates(thread_id: str) -> list[dict]:
     """Interrupts waiting in the thread's checkpoint (a question / plan the
     user hasn't answered). Survives restarts — it's checkpoint state."""
@@ -2027,6 +2203,7 @@ async def build_agent(s: dict, checkpointer=None, thread_prompt: str = "", proje
         if off:
             mw.append(_ToolFilter(off))  # per-thread deny-list for harness tools
         mw.append(_EmptyAnswerRetry())  # last = innermost, right around the model
+        mw.append(_SecretBroker())  # 🔐 innermost around tools: handles → values → redaction
         main = model(s)
         main.lb_main_prompt = prompt  # → _capture (/btw replays this view)
         return create_deep_agent(
@@ -2128,6 +2305,7 @@ READONLY_TOOLS = {
     "crawl_url", "web_search", "semantic_search", "semantic_search_image",
     "generate_image",  # makes a new image file; changes nothing that exists
     "bg_status", "now_utc", "calculate",
+    "list_secrets",  # names only — values never leave the vault
 }
 _READ_VERBS = {"get", "list", "search", "read", "fetch", "find", "query", "lookup",
                "describe", "show", "view", "check", "count", "inspect", "browse", "status"}
@@ -2593,7 +2771,7 @@ async def export_thread(thread_id: str) -> dict | None:
         " FROM threads WHERE id=?", (thread_id,))).fetchone()
     if not row:
         return None
-    return {
+    return _vault_redact({  # 🔐 defense in depth: values pasted into chat by hand
         "format": "langbang-thread-export/1",
         "exported_at": time.time(),
         "thread": {"id": row[0], "title": row[1], "created_at": row[2],
@@ -2602,7 +2780,7 @@ async def export_thread(thread_id: str) -> dict | None:
                    "archived": row[6], "opts": _opts_json(row[7])},
         "messages": await history(thread_id),
         "trajectory": await trajectory(thread_id),
-    }
+    })
 
 
 # ---- thread bookkeeping ----
@@ -3491,6 +3669,9 @@ async def run_chat(
                 "thread_id": thread_id,
                 "lb_plan": bool(plan),
                 "lb_nogate": sched is not None,  # nobody's there to answer
+                # 🔐 the task's UI-set vault grants (schedule._fire)
+                "lb_grants": list((sched or {}).get("grants") or []),
+                "lb_sched_id": (sched or {}).get("id", ""),
                 "lb_project": proj["name"] if proj else "",  # remember(project_only=…)
             },
             "recursion_limit": 2 * int(s.get("max_react_iterations", 12)) + 2 + (16 if deep else 0),
@@ -3501,7 +3682,7 @@ async def run_chat(
             ] + [{"type": "text", "text": user_text or "Describe the image."}]
         else:
             content = user_text
-        h_kwargs = {"lb_sched": sched} if sched else {}
+        h_kwargs = {"lb_sched": {k: v for k, v in sched.items() if k != "grants"}} if sched else {}
         if wake:
             h_kwargs["lb_wake"] = {**wake, "ts": time.time()}  # ⚙ procs._wake
         if stale:
@@ -3684,7 +3865,7 @@ async def run_chat(
                     yield {
                         "type": "tool_start",
                         "name": ev["name"],
-                        "input": _safe(ev["data"].get("input")),
+                        "input": _vault_redact(_safe(ev["data"].get("input"))),
                         "run_id": rid,
                         "sub": sub_id,
                         **({"consult": consult} if consult else {}),
@@ -3706,8 +3887,9 @@ async def run_chat(
                         }
                 elif kind == "on_tool_end":
                     rid = str(ev["run_id"])
-                    out_text = _tool_text(ev["data"].get("output"))
+                    out_text = _vault_redact(_tool_text(ev["data"].get("output")))
                     st0, sub0, inp0 = tool_t0.pop(rid, (None, sub_id, None))
+                    inp0 = _vault_redact(inp0)
                     dur = round(time.time() - st0, 3) if st0 else None
                     meta = {"in": _cap(inp0, 2000), "out": _cap(out_text, 2000), "sub": sub0}
                     if ev["name"] == "task":
@@ -3742,7 +3924,8 @@ async def run_chat(
                     sub_runs.discard(rid)
                     st0, sub0, inp0 = tool_t0.pop(rid, (None, sub_id, None))
                     dur = round(time.time() - st0, 3) if st0 else None
-                    err = str(ev["data"].get("error") or "tool error")[:500]
+                    err = _vault_redact(str(ev["data"].get("error") or "tool error"))[:500]
+                    inp0 = _vault_redact(inp0)
                     await _log(
                         thread_id, turn_id, "tool", name=ev["name"], dur=dur,
                         meta={"in": _cap(inp0, 2000), "err": err, "sub": sub0},
@@ -3878,6 +4061,13 @@ async def run_user_shell(thread_id: str, command: str) -> dict:
         {"configurable": {"thread_id": thread_id}}, {"messages": [msg]}, as_node="__start__"
     )
     return {"cmd": command, "out": out, "exit": exit_code, "dur": dur}
+
+
+def _vault_redact(x):  # noqa: ANN001, ANN202
+    """Tool callbacks see the SUBSTITUTED args / raw output (the broker
+    redacts only the ToolMessage) — scrub before the UI or run_events."""
+    from . import vault
+    return vault.redact_obj(x) if (vault.MAIN.is_open or vault.AUTO.is_open) else x
 
 
 def _safe(x):

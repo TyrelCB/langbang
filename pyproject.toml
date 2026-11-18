@@ -27,6 +27,7 @@ dependencies = [
     "nltk>=3.10.4",
     "immutabledict>=4.3.1",
     "packaging>=26.3",
+    "pykeepass>=4.2.0",
 ]
 
 [project.optional-dependencies]

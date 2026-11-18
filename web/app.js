@@ -156,6 +156,19 @@ const api = {
     }));
   },
   async delSchedule(id) { await fetch("/api/schedules/" + id, { method: "DELETE" }); },
+  async putGrants(id, grants) {
+    return J(await fetch("/api/schedules/" + id + "/grants", {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ grants }),
+    }));
+  },
+  async vaultStatus() { return J(await fetch("/api/vault/status")); },
+  async vaultCatalog() { return J(await fetch("/api/vault/catalog")); },
+  async vaultUnlock(password) {
+    return J(await fetch("/api/vault/unlock", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password }),
+    }));
+  },
+  async vaultLock() { return J(await fetch("/api/vault/lock", { method: "POST" })); },
   async runSchedule(id) {
     return J(await fetch("/api/schedules/" + id + "/run", { method: "POST" }));
   },
@@ -188,7 +201,9 @@ function renderMarkdown(text) {
   return DOMPurify.sanitize(marked.parse(String(text || "")));
 }
 function setMarkdown(node, raw) {
-  node.innerHTML = renderMarkdown(raw);
+  // 🔐 redacted vault values (‹secret:Group/Entry.field›) → a chip
+  node.innerHTML = renderMarkdown(raw).replace(/‹secret:([^›<]{1,200})›/g,
+    '<span class="secret-chip" title="vault value — redacted, the model never saw it">🔐 $1</span>');
   enhanceCodeBlocks(node);
 }
 // escape + wrap first case-insensitive occurrence of q in <mark> (result hl)
@@ -2145,6 +2160,7 @@ const lostTodos = (name, err) => name === "write_todos" && /todos\s+Field requir
 function gateSummary(v) {
   if (!v || typeof v !== "object") return String(v ?? "");
   if (v.kind === "plan") return "◆ plan proposed for approval";
+  if (v.kind === "secret") return "🔐 asked to use " + (v.entries || []).join(", ") + " in " + (v.tool || "?");
   return "◆ asked: " + (v.questions || []).map((q) => q.question).join(" | ");
 }
 // Human-readable text for one row (what ⧉ copies). Note: the trajectory
@@ -4847,6 +4863,7 @@ function closeSchedules() {
 
 async function refreshSchedules() {
   if ($("#sched-panel").classList.contains("hidden")) return;
+  if (document.querySelector("#sched-list .grant-editor")) return; // don't wipe a 🔑 edit mid-typing
   const list = await api.schedules();
   const box = $("#sched-list");
   box.innerHTML = "";
@@ -4899,10 +4916,16 @@ async function refreshSchedules() {
   };
     const edit = el("button", "btn ghost sm", "EDIT");
     edit.onclick = () => { SFX.play("click"); schedEdit(s); };
+    // 🔐 vault grants: only this UI sets them (the agent's tools can't)
+    const gr = s.grants || [];
+    if (gr.length) card.insertBefore(el("div", "sched-sub grants", "🔑 " + gr.join(", ")), act);
+    const grant = el("button", "btn ghost sm", "🔑 GRANTS" + (gr.length ? " (" + gr.length + ")" : ""));
+    grant.title = "Vault entries this task may use unattended (from LangBang-auto.kdbx). Changing the task prompt from the agent clears them.";
+    grant.onclick = () => { SFX.play("click"); schedGrants(s, card); };
     const del = el("button", "btn ghost sm", "✕ DELETE");
     del.title = "Delete the task and its run-history thread";
     del.onclick = async () => { SFX.play("click"); await api.delSchedule(s.id); refreshSchedules(); };
-    act.append(run, edit, del);
+    act.append(run, edit, grant, del);
     card.appendChild(act);
     box.appendChild(card);
   }
@@ -6538,6 +6561,21 @@ function gateCard(tid, g) {
       resumeGate(tid, g.id, { approved: false, feedback: notes }, card);
     };
     act.append(ok, rev);
+  } else if (v.kind === "secret") {
+    card.classList.add("gate-secret");
+    card.appendChild(el("div", "gate-head", "🔐 THE AGENT WANTS TO USE A SENSITIVE SECRET"));
+    const b = el("div", "gate-q");
+    b.appendChild(el("div", "gate-qt", (v.entries || []).join(", ")));
+    b.appendChild(el("div", "sched-sub", "in " + (v.tool || "?") + (v.target ? " → " + v.target : "")));
+    const pre = el("pre", "gate-preview", v.preview || "");
+    b.appendChild(pre);
+    b.appendChild(el("div", "sched-sub dim", "Approving fills the value in for this one call only. The model still never sees it."));
+    card.appendChild(b);
+    const ok = el("button", "btn accent", "✓ APPROVE THIS USE");
+    const no = el("button", "btn ghost", "✕ DENY");
+    ok.onclick = () => { gateSeal(card, "APPROVED — " + (v.entries || []).join(", ")); resumeGate(tid, g.id, { approved: true }, card); };
+    no.onclick = () => { gateSeal(card, "DENIED"); resumeGate(tid, g.id, { approved: false }, card); };
+    act.append(ok, no);
   } else {
     card.appendChild(el("div", "gate-head", "◆ THE AGENT NEEDS YOUR INPUT"));
     const qs = v.questions || [];
@@ -8521,3 +8559,103 @@ refreshThreads().then(() => {
   const q = p.get("q"); // shareable search deep-link
   if (q) { $("#search").value = q; runSearch(); }
 });
+
+
+// ---- 🔐 secret vault (server/vault.py) ----
+let vaultState = null;
+function vaultFmtLeft(sec) {
+  if (sec == null) return "";
+  return sec >= 3600 ? Math.floor(sec / 3600) + "h" : sec >= 60 ? Math.ceil(sec / 60) + "m" : sec + "s";
+}
+async function vaultRefresh(withCatalog) {
+  let st;
+  try { st = await api.vaultStatus(); } catch { return; }
+  vaultState = st;
+  const b = $("#btn-vault");
+  b.classList.toggle("hidden", !st.exists && !st.auto.exists);
+  b.classList.toggle("on", !st.locked);
+  b.textContent = st.locked ? "🔐 LOCKED" : "🔓 VAULT " + vaultFmtLeft(st.expires_in);
+  const box = $("#vault-status");
+  if (!box) return;
+  box.textContent = !st.exists
+    ? "No vault yet — create " + st.path + " in KeePassXC (groups: Passwords/, Cards/, Identity/)."
+    : (st.locked ? "LOCKED" : "UNLOCKED · " + st.entries + " entries" + (st.expires_in != null ? " · auto-locks in " + vaultFmtLeft(st.expires_in) : ""))
+      + (st.keyfile ? " · keyfile on" : "")
+      + " · unattended vault: " + (st.auto.open ? "open (" + st.auto.entries + ")" : st.auto.exists ? "present, not open (no TPM credential)" : "none")
+      + (st.secure_origin ? "" : " · ⚠ this page isn't https — unlock is refused here");
+  $("#btn-vault-unlock").disabled = !st.exists || !st.locked;
+  $("#btn-vault-lock").disabled = st.locked;
+  if (document.activeElement !== $("#vault-idle")) $("#vault-idle").value = st.auto_lock_min;
+  if (withCatalog) {
+    const cat = $("#vault-catalog");
+    cat.replaceChildren();
+    if (!st.locked || st.auto.open) {
+      for (const r of await api.vaultCatalog()) {
+        const row = el("div", "vault-row");
+        row.append(el("span", "vault-entry", r.entry),
+          el("span", "vault-tier " + r.tier, r.tier),
+          el("span", "dim", r.fields.join(", ") + (r.domain ? " · " + r.domain : "") + (r.last4 ? " · …" + r.last4 : "") + (r.vault === "auto" ? " · AUTO" : "")));
+        cat.appendChild(row);
+      }
+    }
+  }
+}
+$("#btn-vault-unlock").onclick = async () => {
+  const pw = $("#vault-pw").value;
+  const err = $("#vault-err");
+  err.classList.add("hidden");
+  try {
+    await api.vaultUnlock(pw);
+    SFX.play("click");
+  } catch (e) {
+    err.textContent = "UNLOCK FAILED — " + e.message;
+    err.classList.remove("hidden");
+  }
+  $("#vault-pw").value = "";
+  vaultRefresh(true);
+};
+$("#vault-pw").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); $("#btn-vault-unlock").click(); } });
+$("#btn-vault-lock").onclick = async () => { await api.vaultLock(); vaultRefresh(true); };
+$("#vault-idle").onchange = async () => {
+  const n = Math.max(0, Math.min(1440, parseInt($("#vault-idle").value, 10) || 0));
+  await api.saveSettings({ vault: { auto_lock_min: n } });
+  vaultRefresh();
+};
+$("#btn-vault").onclick = async () => {
+  if (vaultState && !vaultState.locked) { await api.vaultLock(); vaultRefresh(true); return; }
+  await openSettings();
+  cfgShowTab("tools");
+  vaultRefresh(true);
+  const card = $("#cfg-vault");
+  if (card) card.scrollIntoView({ block: "start" });
+  $("#vault-pw").focus();
+};
+$("#btn-settings").addEventListener("click", () => setTimeout(() => vaultRefresh(true), 300));
+vaultRefresh();
+setInterval(vaultRefresh, 15000);
+
+async function schedGrants(s, card) {
+  const old = card.querySelector(".grant-editor");
+  if (old) { old.remove(); return; }
+  const ed = el("div", "grant-editor");
+  const cat = await api.vaultCatalog().catch(() => []);
+  const auto = cat.filter((r) => r.vault === "auto");
+  const ta = el("textarea", "gate-text");
+  ta.rows = 3;
+  ta.placeholder = "One per line: Passwords/Example (whole entry), Passwords/Example.password (one field), Passwords/* (a group)";
+  ta.value = (s.grants || []).join("\n");
+  ed.appendChild(el("div", "sched-sub dim", auto.length
+    ? "Entries in the unattended vault: " + auto.map((r) => r.entry + (r.unattended_ok ? "" : " (sensitive — needs lb_unattended)")).join(", ")
+    : "The unattended vault isn't open — grants are saved but can't resolve until LangBang-auto.kdbx + its TPM credential are set up."));
+  ed.appendChild(ta);
+  const save = el("button", "btn accent sm", "SAVE GRANTS");
+  save.onclick = async () => {
+    const list = ta.value.split(/[\n,]+/).map((x) => x.trim()).filter(Boolean);
+    await api.putGrants(s.id, list);
+    SFX.play("click");
+    ed.remove();
+    refreshSchedules();
+  };
+  ed.appendChild(save);
+  card.appendChild(ed);
+}

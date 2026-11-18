@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from . import agent, audioart, backup, bench, caps, comfy, config, decide, fileassist, ivr, learning, mcp, notify, procs, projects, rag, runs, schedule, searchidx, sfxgen, stream, term, ttsjobs, voice
+from . import agent, audioart, backup, bench, caps, comfy, config, decide, fileassist, ivr, learning, mcp, notify, procs, projects, rag, runs, schedule, searchidx, sfxgen, stream, term, ttsjobs, vault, voice
 from .ivr_hub import router as ivr_hub_router
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
@@ -45,6 +45,8 @@ async def _startup():
     await agent.init()
     await schedule.init()
     schedule.start_loop()
+    vault.open_auto()  # 🔐 unattended vault via TPM-sealed systemd credential
+    asyncio.create_task(vault.loop())  # idle auto-lock for the main vault
     await bench.init()  # ▤ BENCH: runs a restart killed become resumable "lost"
     agent.start_sweeper()  # hourly: delete abandoned empty "New chat"s
     procs.start_poller()  # ⚙ background processes: exits, log caps, thread wakes
@@ -725,12 +727,72 @@ async def new_schedule(body: SchedIn):
 @app.put("/api/schedules/{sid}")
 async def put_schedule(sid: str, body: SchedPatch):
     try:
-        row = await schedule.update(sid, body.model_dump(exclude_none=True))
+        row = await schedule.update(sid, body.model_dump(exclude_none=True), keep_grants=True)
     except ValueError as e:
         raise HTTPException(422, str(e))
     if not row:
         raise HTTPException(404, "no such schedule")
     return _sched_view(row)
+
+
+class GrantsBody(BaseModel):
+    grants: list[str]
+
+
+@app.put("/api/schedules/{sid}/grants")
+async def put_schedule_grants(sid: str, body: GrantsBody):
+    """🔐 Which vault handles a task may use unattended. UI-only: no agent
+    tool calls this, so the agent can't grant itself credentials."""
+    row = await schedule.set_grants(sid, body.grants)
+    if not row:
+        raise HTTPException(404, "no such schedule")
+    return _sched_view(row)
+
+
+# ---- 🔐 secret vault (server/vault.py) ----
+
+def _secure_origin(request: Request) -> bool:
+    """The master password may only arrive over TLS or from this box. Caddy's
+    :80 LAN front proxies from loopback too, so a forwarded request must say
+    https; an unforwarded one must come from loopback itself."""
+    peer = request.client.host if request.client else ""
+    if peer not in ("127.0.0.1", "::1"):
+        return False
+    fwd = request.headers.get("x-forwarded-proto")
+    return fwd is None or fwd.lower() == "https"
+
+
+class VaultUnlock(BaseModel):
+    password: str
+
+
+@app.get("/api/vault/status")
+async def vault_status(request: Request):
+    return {**vault.status(), "secure_origin": _secure_origin(request)}
+
+
+@app.post("/api/vault/unlock")
+async def vault_unlock(body: VaultUnlock, request: Request):
+    if not _secure_origin(request):
+        raise HTTPException(403, "unlock only over https (ai.tyrel.cloud) or from localhost "
+                                 "— the master password must not cross the LAN in clear text")
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, vault.unlock, body.password)
+    except vault.VaultError as e:
+        await asyncio.sleep(1.0)  # blunt guessing
+        raise HTTPException(401, str(e))
+    return vault.status()
+
+
+@app.post("/api/vault/lock")
+async def vault_lock():
+    vault.lock()
+    return vault.status()
+
+
+@app.get("/api/vault/catalog")
+async def vault_catalog(q: str = ""):
+    return vault.catalog(q)
 
 
 @app.delete("/api/schedules/{sid}")

@@ -19,6 +19,7 @@ skipped (skipping would mean it never runs at all).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -62,6 +63,8 @@ async def init() -> None:
     for col in ("run_at", "done_at"):  # one-off tasks (added 2026-10-02)
         if col not in have:
             await _db.execute(f"ALTER TABLE schedules ADD COLUMN {col} REAL")
+    if "grants" not in have:  # 🔐 vault grants, JSON list (added 2026-11-18)
+        await _db.execute("ALTER TABLE schedules ADD COLUMN grants TEXT")
     await _db.commit()
     # Stale bookkeeping from a dead process: a run that died mid-flight (or
     # whose finally-block UPDATE itself hit "database is locked") leaves
@@ -197,7 +200,8 @@ async def _fire(row: dict, manual: bool = False, claimed: bool = False) -> None:
                 row["thread_id"],
                 agent.run_chat(
                     row["thread_id"], row["prompt"], s,
-                    sched={"ts": time.time(), "manual": bool(manual)},
+                    sched={"ts": time.time(), "manual": bool(manual), "id": rid,
+                           "grants": await _grants(rid)},
                 ),
             )
             await hub.task  # _produce swallows run errors into the stream;
@@ -250,11 +254,20 @@ def _clear_flag(rid, ts, nxt, done: bool = False, keep_last: bool = False) -> No
 # ---- CRUD (used by main.py routes) ----
 
 _COLS = ("id", "title", "prompt", "cron", "thread_id", "enabled",
-         "last_run", "next_run", "running", "created_at", "run_at", "done_at")
+         "last_run", "next_run", "running", "created_at", "run_at", "done_at", "grants")
+
+
+def _row(r) -> dict:  # noqa: ANN001
+    d = dict(zip(_COLS, r))
+    try:
+        d["grants"] = json.loads(d.get("grants") or "[]")
+    except ValueError:
+        d["grants"] = []
+    return d
 
 
 def _rows(fetched) -> list[dict]:
-    return [dict(zip(_COLS, r)) for r in fetched]
+    return [_row(r) for r in fetched]
 
 
 async def list_schedules() -> list[dict]:
@@ -267,7 +280,7 @@ async def get(sid: str) -> dict | None:
     cur = await _db.execute(f"SELECT {', '.join(_COLS)} FROM schedules WHERE id=?",
                             (sid,))
     r = await cur.fetchone()
-    return dict(zip(_COLS, r)) if r else None
+    return _row(r) if r else None
 
 
 def _check(cron: str, run_at: float | None) -> None:
@@ -292,8 +305,27 @@ async def create(title: str, prompt: str, cron: str = "", run_at: float | None =
     return await get(sid)
 
 
-async def update(sid: str, patch: dict) -> dict | None:
-    cur = await _db.execute("SELECT cron, run_at FROM schedules WHERE id=?", (sid,))
+async def _grants(sid: str) -> list[str]:
+    """Read fresh at fire time — never from the row the loop fetched."""
+    cur = await _db.execute("SELECT grants FROM schedules WHERE id=?", (sid,))
+    r = await cur.fetchone()
+    try:
+        return [str(g) for g in json.loads((r and r[0]) or "[]")]
+    except ValueError:
+        return []
+
+
+async def set_grants(sid: str, grants: list[str]) -> dict | None:
+    """🔐 UI-only (PUT /api/schedules/{id}/grants): which vault handles this
+    task may use unattended. No agent tool reaches this."""
+    clean = sorted({g.strip() for g in grants if g and g.strip()})
+    if not await _set("UPDATE schedules SET grants=? WHERE id=?", (json.dumps(clean), sid)):
+        return None
+    return await get(sid)
+
+
+async def update(sid: str, patch: dict, keep_grants: bool = False) -> dict | None:
+    cur = await _db.execute("SELECT cron, run_at, prompt, grants FROM schedules WHERE id=?", (sid,))
     r = await cur.fetchone()
     if not r:
         return None
@@ -303,6 +335,12 @@ async def update(sid: str, patch: dict) -> dict | None:
         if patch.get(k) is not None:
             cols.append(f"{k}=?")
             vals.append(patch[k])
+    # 🔐 a grant was given for THAT prompt: an agent rewriting the prompt of a
+    # granted task must not inherit the credentials (the UI passes keep_grants)
+    if (not keep_grants and patch.get("prompt") is not None
+            and patch["prompt"] != r[2] and r[3] not in (None, "", "[]")):
+        cols.append("grants=?")
+        vals.append("[]")
     timing = patch.get("cron") is not None or "run_at" in patch and patch["run_at"] is not None
     if timing:
         # switching kinds is allowed: a cron clears run_at, a run_at clears cron

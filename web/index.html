@@ -49,6 +49,7 @@
         <button id="btn-topts" class="btn ghost" title="tools + features for THIS thread only — restrict/force tools, bare mode (no tools), auto-learn off, ⌛ temp throwaway">⚙ TOOLS</button>
         <button id="btn-reasoning" class="btn ghost" title="model reasoning for THIS thread — click to choose">◈ THINKING</button>
         <button id="btn-voice" class="btn ghost" title="OFF → SPEAK (read answers aloud) → TALK (hands-free: listen, send on a pause, read the answer, listen again). Per-message 🔊 works regardless">🔊 VOICE: OFF</button>
+        <button id="btn-vault" class="btn ghost hidden" title="🔐 secret vault — the agent uses passwords/cards by handle and never sees values. Click: unlock (in CONFIG) / lock now">🔐 LOCKED</button>
         <div id="ctx-tag" title="Tokens the model re-reads on the next call (post-compaction)"></div>
         <button id="model-tag" class="btn ghost" type="button" title="model for THIS thread — click to override the global default"></button>
       </div>
@@ -340,6 +341,20 @@
           <label>Save images to <input id="set-img-out_dir" type="text" autocomplete="off" spellcheck="false" placeholder="~/Pictures/langbang"></label>
           <label>Steps <input id="set-img-steps" type="number" min="4" max="60" step="1"></label>
         </div>
+      </section>
+      <section class="cfg-card wide" data-tab="tools" id="cfg-vault">
+        <h3>🔐 SECRET VAULT</h3>
+        <div class="hint">KeePassXC database the agent can <b>use but never see</b>: it writes handles like <code>{{secret:Passwords/Amazon.password}}</code>, LangBang fills the value in only when <code>run_bash</code> (as <code>$LB_S1</code> env) or a browser/MCP tool runs, and every value is shown as <code>‹secret:…›</code> in output, history, trajectory and exports. Groups <code>Cards/</code> and <code>Identity/</code> ask your approval on every use. Create/edit entries in KeePassXC; LangBang only reads <code>data/vault/LangBang.kdbx</code>. Unlock works only over https or localhost.</div>
+        <div id="vault-status" class="hint"></div>
+        <div class="row">
+          <label>Master password <input id="vault-pw" type="password" autocomplete="off" spellcheck="false" placeholder="unlock for this session"></label>
+          <button id="btn-vault-unlock" class="btn accent sm" type="button">UNLOCK</button>
+          <button id="btn-vault-lock" class="btn ghost sm" type="button">LOCK NOW</button>
+          <label>Auto-lock after idle (min, 0 = never) <input id="vault-idle" type="number" min="0" max="1440" step="1"></label>
+        </div>
+        <div id="vault-err" class="error hidden"></div>
+        <div id="vault-catalog" class="vault-catalog"></div>
+        <div class="hint">Scheduled tasks can't unlock anything: they use only <code>LangBang-auto.kdbx</code> (opened at startup with a TPM-sealed key) and only the entries you grant per task with 🔑 GRANTS in ⏰ SCHEDULES.</div>
       </section>
       <section class="cfg-card wide" data-tab="alerts" id="cfg-notify">
         <h3>NOTIFICATIONS</h3>

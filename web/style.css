@@ -1481,3 +1481,19 @@ html[data-theme="light"] .spk-hud-phrase span.on { text-shadow: none; }
 #think-menu .btn { font-size: 11px; padding: 4px 10px; text-align: left; }
 #think-menu .btn.on { color: var(--cyan); border-color: var(--cyan); }
 .result .r-why { float: right; color: var(--cyan, #3ad); font-size: 11px; margin-left: 6px; letter-spacing: 0; }
+
+/* ---- 🔐 secret vault ---- */
+.secret-chip { display: inline-block; padding: 0 .4em; border: 1px solid var(--cyan); border-radius: 3px;
+  font-family: inherit; font-size: .85em; color: var(--cyan); white-space: nowrap; }
+#btn-vault.on { color: var(--cyan); border-color: var(--cyan); }
+.vault-catalog { display: flex; flex-direction: column; gap: 2px; margin: 6px 0; font-size: .85em; }
+.vault-row { display: flex; gap: .8em; align-items: baseline; flex-wrap: wrap; }
+.vault-entry { font-family: inherit; }
+.vault-tier { font-size: .8em; padding: 0 .4em; border: 1px solid var(--muted); border-radius: 3px; text-transform: uppercase; }
+.vault-tier.sensitive { border-color: var(--orange); color: var(--orange); }
+.vault-row .dim { color: var(--muted); }
+.msg.gate.gate-secret { border-color: var(--orange); }
+.gate-preview { max-height: 9em; overflow: auto; font-size: .8em; white-space: pre-wrap; word-break: break-all; opacity: .85; }
+.grant-editor { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.grant-editor .btn { align-self: flex-start; }
+.sched-sub.grants { color: var(--cyan); }

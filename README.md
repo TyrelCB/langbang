@@ -205,6 +205,46 @@ prompt and no login — by design, this is a personal LAN tool.
 - MCP servers you add run with your privileges too (stdio servers are spawned
   as local processes).
 
+### 🔐 Secret vault
+
+`data/vault/LangBang.kdbx` (a KeePassXC database you create and edit) holds
+passwords, cards and personal data the agent can **use but never see**:
+
+- The agent writes handles such as `{{secret:Passwords/Amazon.password}}`
+  (`list_secrets` shows what exists). The value is filled in only when the
+  tool runs: as a `$LB_S1` env var for `run_bash`, inline for MCP/browser
+  tools. Every value is then redacted to `‹secret:…›` before it reaches the
+  checkpoint, the trajectory, the UI stream or an export.
+- Handles are refused in tools that would send or store the value
+  (`web_search`, `crawl_url`, `write_file`, sub-agents, schedulers, memory).
+- An entry's URL binds it to that site: a URL for another domain in the same
+  call is refused.
+- Entries in the `Cards/` and `Identity/` groups (or `lb_tier=sensitive`) ask
+  for approval on every use.
+- The vault starts locked. The master password is entered in CONFIG → 🔐
+  SECRET VAULT, only over https or from localhost, and is held in RAM only.
+  The vault auto-locks after idle minutes (default 15) and on every restart.
+  `data/keys/vault.key`, if present, is a second factor.
+- Scheduled runs cannot unlock it. They use only `data/vault/LangBang-auto.kdbx`
+  and only the entries you grant per task with 🔑 GRANTS in ⏰ SCHEDULES.
+  Rewriting the task's prompt from the agent clears its grants. The auto
+  vault is opened at startup with a password sealed to this machine's TPM:
+  ```sh
+  sudo mkdir -p /etc/credstore.encrypted
+  read -rs PW; printf %s "$PW" | sudo systemd-creds encrypt --with-key=tpm2 \
+      --name=vault_auto - /etc/credstore.encrypted/vault_auto; unset PW
+  # langbang.service drop-in:  [Service]  LoadCredentialEncrypted=vault_auto
+  ```
+
+**What the vault protects:** model context, chat history, trajectory, thread
+exports, learned memories, the off-box backup (ciphertext only) and outbound
+search queries.
+
+**What it doesn't protect:** while a vault is open, the agent's shell runs as
+a child of the server, so a deliberately crafted command could read the
+server's memory. Keep the unlock window short, and put only low-stakes
+credentials in the auto vault.
+
 ## Docs
 
 - [docs/FEATURES.md](docs/FEATURES.md) — full feature reference and design notes
