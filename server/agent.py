@@ -1489,6 +1489,11 @@ class _PrefetchNote(AgentMiddleware):
         return await handler(request.override(messages=msgs) if hit else request)
 
 
+# model endpoint -> max images per prompt, learned from its 400 (vLLM wording)
+_IMAGE_CAP: dict[str, int] = {}
+_IMAGE_CAP_RE = re.compile(r"At most (\d+) image\(s\) may be provided", re.I)
+
+
 class _MediaReadGuard(AgentMiddleware):
     """Keep binary media that read_file returns out of the model's context.
 
@@ -1524,13 +1529,64 @@ class _MediaReadGuard(AgentMiddleware):
             res = res.model_copy(update={"content": note})
         return res
 
+    @staticmethod
+    def _key(request) -> str:  # noqa: ANN001
+        md = request.model
+        return f"{getattr(md, 'openai_api_base', '') or ''}|{getattr(md, 'model_name', '') or ''}"
+
+    @staticmethod
+    def _cap_images(msgs: list, cap: int) -> tuple[list, int]:
+        """Keep the NEWEST `cap` image blocks; older ones become a text note
+        (the file is still on disk — read_file it again to look again)."""
+        seen = dropped = 0
+        out = list(msgs)
+        for k in range(len(out) - 1, -1, -1):
+            m = out[k]
+            if not isinstance(m.content, list):
+                continue
+            blocks, changed = [], False
+            for b in reversed(m.content):
+                if isinstance(b, dict) and b.get("type") in ("image", "image_url"):
+                    seen += 1
+                    if seen > cap:
+                        b, changed = {"type": "text", "text": (
+                            f"[older image dropped — the model server takes at most {cap} "
+                            "image(s) per prompt; read_file it again if you need it]")}, True
+                        dropped += 1
+                blocks.append(b)
+            if changed:
+                out[k] = m.model_copy(update={"content": blocks[::-1]})
+        return out, dropped
+
     async def awrap_model_call(self, request, handler):  # noqa: ANN001
         msgs, hit = [], False
         for m in request.messages:
             if isinstance(m, ToolMessage) and (note := self._note(m)) and m.content != note:
                 m, hit = m.model_copy(update={"content": note}), True
             msgs.append(m)
-        return await handler(request.override(messages=msgs) if hit else request)
+        # Per-prompt image cap (vLLM --limit-mm-per-prompt): a screenshot-heavy
+        # thread 400'd on EVERY call once it held more images than that, and
+        # "continue" couldn't recover (seen 11-18). Learned from the server's
+        # own 400, then applied to every later call on that model.
+        key = self._key(request)
+        cap = _IMAGE_CAP.get(key)
+        if cap is not None:
+            msgs, n = self._cap_images(msgs, cap)
+            hit = hit or bool(n)
+        req = request.override(messages=msgs) if hit else request
+        try:
+            return await handler(req)
+        except openai.BadRequestError as e:
+            mm = _IMAGE_CAP_RE.search(str(e))
+            if not mm:
+                raise
+            cap = int(mm.group(1))
+            _IMAGE_CAP[key] = cap
+            msgs, n = self._cap_images(msgs, cap)
+            if not n:
+                raise
+            logger.warning("image cap %d learned for %s — dropped %d older image(s), retrying", cap, key, n)
+            return await handler(request.override(messages=msgs))
 
 
 # ---- human gates: ask_user + plan mode ----
