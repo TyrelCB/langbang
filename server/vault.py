@@ -143,7 +143,7 @@ class _Vault:
                            if not k.startswith("lb_") and v and not k.startswith("KP2A_")})
             top = gpath[0].lower() if gpath else ""
             tier = (meta.get("lb_tier") or "").strip().lower() or (
-                "sensitive" if top in SENSITIVE_GROUPS else "login")
+                "sensitive" if any(g.lower() in SENSITIVE_GROUPS for g in gpath) else "login")
             out[key] = {
                 "fields": fields,
                 "tier": "sensitive" if tier == "sensitive" else "login",
@@ -183,11 +183,142 @@ MAIN = _Vault("main", MAIN_PATH)
 AUTO = _Vault("auto", AUTO_PATH, auto=True)
 
 
+# ---- which database + what the agent may see (data/vault/config.json) ----
+# Kept OUT of settings.json: PUT /api/settings is unauthenticated, so the
+# agent's shell could curl itself wider scope. While the vault is unlocked the
+# snapshot taken AT UNLOCK is authoritative — edits to the file on disk only
+# apply at the next unlock, and the UI routes that change it need the token.
+CONFIG_PATH = VAULT_DIR / "config.json"
+DEFAULT_PATH = VAULT_DIR / "LangBang.kdbx"
+_CFG_LIVE: dict | None = None
+
+
+def _defaults() -> dict:
+    try:
+        idle = float((config.load().get("vault") or {}).get("auto_lock_min", 15))
+    except Exception:  # noqa: BLE001
+        idle = 15.0
+    # dedicated vault: the agent may use all of it ("*")
+    return {"path": str(DEFAULT_PATH), "keyfile": "", "auto_lock_min": idle,
+            "allowed_groups": {"*": "auto"}, "write_group": "LangBang"}
+
+
+def load_cfg() -> dict:
+    import json
+    d = _defaults()
+    try:
+        d.update(json.loads(CONFIG_PATH.read_text()))
+    except (OSError, ValueError):
+        pass
+    if not isinstance(d.get("allowed_groups"), dict):
+        d["allowed_groups"] = {}
+    return d
+
+
+def cfg() -> dict:
+    return _CFG_LIVE if (MAIN.is_open and _CFG_LIVE is not None) else load_cfg()
+
+
+def save_cfg(patch: dict) -> dict:
+    """Merge + write config.json. A new database path locks the vault and
+    resets allowed groups to NONE for a non-dedicated file (opt-in scope)."""
+    import json
+    global _CFG_LIVE
+    cur = load_cfg()
+    new = {**cur, **{k: v for k, v in patch.items() if k in cur}}
+    if "path" in patch:
+        new["path"] = str(Path(str(patch["path"])).expanduser())
+        if new["path"] != cur["path"]:
+            lock()
+            new["allowed_groups"] = ({"*": "auto"} if Path(new["path"]) == DEFAULT_PATH else {})
+    if "keyfile" in patch:
+        new["keyfile"] = str(Path(str(patch["keyfile"])).expanduser()) if patch["keyfile"] else ""
+    wg = str(new.get("write_group") or "LangBang").strip().strip("/")
+    new["write_group"] = wg or "LangBang"
+    new["allowed_groups"] = {str(k).strip().strip("/"): (v if v in ("auto", "login", "sensitive") else "auto")
+                             for k, v in (new.get("allowed_groups") or {}).items() if str(k).strip()}
+    new["auto_lock_min"] = max(0.0, min(1440.0, float(new.get("auto_lock_min") or 0)))
+    VAULT_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = CONFIG_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(new, indent=2))
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, CONFIG_PATH)
+    if MAIN.is_open:
+        _CFG_LIVE = dict(new)
+    return new
+
+
 def _idle_minutes() -> float:
     try:
-        return float((config.load().get("vault") or {}).get("auto_lock_min", 15))
+        return float(cfg().get("auto_lock_min", 15))
     except Exception:  # noqa: BLE001
         return 15.0
+
+
+def _group_of(key: str, groups: dict) -> str | None:
+    """Longest allowed group that contains this entry key."""
+    best = None
+    for g in groups:
+        if g != "*" and (key == g or key.startswith(g + "/")) and (best is None or len(g) > len(best)):
+            best = g
+    return best
+
+
+def agent_visible(key: str, c: dict | None = None) -> bool:
+    c = c or cfg()
+    ag = c.get("allowed_groups") or {}
+    if "*" in ag:
+        return True
+    wg = c.get("write_group") or ""
+    if wg and (key == wg or key.startswith(wg + "/")):
+        return True
+    return _group_of(key, ag) is not None
+
+
+def _eff_tier(key: str, e: dict, c: dict | None = None) -> str:
+    """lb_tier attribute > the allowed group's tier > group-name rule."""
+    if e.get("tier_set") in ("login", "sensitive"):
+        return e["tier_set"]
+    c = c or cfg()
+    ag = c.get("allowed_groups") or {}
+    g = _group_of(key, ag)
+    t = ag.get(g) if g else ag.get("*")
+    if t in ("login", "sensitive"):
+        return t
+    return e["tier"]
+
+
+def kdbx_files() -> list[str]:
+    """Picker candidates: *.kdbx under ~ (depth 4) + data/vault."""
+    home = Path.home()
+    out: set[str] = set()
+    skip = {".cache", ".local", "node_modules", ".git", ".bak", "Trash"}
+    for root, dirs, files in os.walk(home):
+        depth = len(Path(root).relative_to(home).parts)
+        dirs[:] = [d for d in dirs if d not in skip and (depth < 4)]
+        out.update(str(Path(root) / f) for f in files if f.endswith(".kdbx"))
+    if VAULT_DIR.exists():
+        out.update(str(p) for p in VAULT_DIR.glob("*.kdbx"))
+    return sorted(out)
+
+
+def groups() -> list[dict]:
+    """Every group path in the open main vault with its entry count (UI)."""
+    if not MAIN.is_open:
+        return []
+    counts: dict[str, int] = {}
+    with MAIN._lock:
+        MAIN._fresh()
+        for g in MAIN._kp.groups:
+            gp = [x for x in (g.path or []) if x]
+            if not gp or "Recycle Bin" in gp:
+                continue
+            counts.setdefault("/".join(gp), 0)
+        for key in MAIN._entries:
+            parts = key.split("/")[:-1]
+            for i in range(1, len(parts) + 1):
+                counts["/".join(parts[:i])] = counts.get("/".join(parts[:i]), 0) + 1
+    return [{"group": k, "entries": n} for k, n in sorted(counts.items())]
 
 
 # ---- writes (LangBang manages the vault; KeePassXC is optional) ----
@@ -240,10 +371,23 @@ def _save(v: _Vault) -> None:
         olds = sorted(BAK_DIR.glob(v.path.stem + "-*.kdbx"))
         for o in olds[:-BAK_KEEP]:
             o.unlink(missing_ok=True)
-    tmp = v.path.with_suffix(".kdbx.tmp")
+    # serialize to a temp file, then copy the bytes INTO the existing file:
+    # same inode → its ACLs/owner/mode survive (a personal database may carry
+    # ACLs; os.replace would drop them). The backup above is the crash undo.
+    tmp = BAK_DIR / (v.path.name + ".tmp")
     v._kp.save(filename=str(tmp))
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, v.path)
+    data = tmp.read_bytes()
+    if v.path.exists():
+        with open(v.path, "r+b") as f:
+            f.write(data)
+            f.truncate()
+            f.flush()
+            os.fsync(f.fileno())
+    else:
+        with open(v.path, "wb") as f:
+            f.write(data)
+        os.chmod(v.path, 0o600)
+    tmp.unlink(missing_ok=True)
     v._mtime = v.path.stat().st_mtime
     v._entries = v._index(v._kp)
 
@@ -260,6 +404,19 @@ def _find(v: _Vault, groups: list[str], title: str, create: bool = False):  # no
         g = nxt
     e = next((x for x in g.entries if x.title == title), None)
     return g, e
+
+
+def agent_write_path(entry: str) -> str:
+    """The agent writes only inside the write group: relative paths are put
+    under it; anything resolving outside is refused."""
+    wg = cfg().get("write_group") or "LangBang"
+    p = (entry or "").strip().strip("/")
+    if not (p == wg or p.startswith(wg + "/")):
+        p = f"{wg}/{p}"
+    groups, title = _split(p)
+    if not groups or groups[0] != wg:
+        raise VaultError(f"you can only write inside {wg}/")
+    return "/".join([*groups, title])
 
 
 def get_entry(vault: str, path: str) -> dict:
@@ -374,13 +531,22 @@ def generate(length: int = 24, symbols: bool = True) -> str:
 # ---- public API ----
 
 def unlock(password: str) -> int:
-    kf = str(KEYFILE) if KEYFILE.exists() else None
-    return MAIN.open(password, kf)
+    global _CFG_LIVE
+    c = load_cfg()
+    MAIN.path = Path(c["path"]).expanduser()
+    kf = c.get("keyfile") or (str(KEYFILE) if KEYFILE.exists() else "")
+    if kf and not Path(kf).exists():
+        raise VaultError(f"keyfile {kf} not found")
+    n = MAIN.open(password, kf or None)
+    _CFG_LIVE = c
+    return n
 
 
 def lock() -> None:
+    global _CFG_LIVE
     MAIN.close()
     UI_TOKENS.clear()
+    _CFG_LIVE = None
 
 
 def touch() -> None:
@@ -391,16 +557,24 @@ def status() -> dict:
     _expire()
     idle = _idle_minutes()
     left = max(0, int(MAIN.last_used + idle * 60 - time.time())) if MAIN.is_open and idle > 0 else None
+    c = cfg()
+    p = Path(c["path"]).expanduser()
+    vis = sum(1 for k in MAIN.entries() if agent_visible(k, c)) if MAIN.is_open else 0
     return {
-        "exists": MAIN_PATH.exists(),
+        "exists": p.exists(),
+        "agent_entries": vis,
+        "allowed_groups": c["allowed_groups"],
+        "write_group": c["write_group"],
+        "dedicated": p == DEFAULT_PATH,
         "locked": not MAIN.is_open,
         "entries": len(MAIN.entries()) if MAIN.is_open else 0,
         "expires_in": left,
         "auto_lock_min": idle,
-        "keyfile": KEYFILE.exists(),
+        "keyfile": bool(c.get("keyfile")) or KEYFILE.exists(),
+        "keyfile_path": c.get("keyfile") or "",
         "auto": {"exists": AUTO_PATH.exists(), "open": AUTO.is_open,
                  "entries": len(AUTO.entries()) if AUTO.is_open else 0},
-        "path": str(MAIN_PATH),
+        "path": str(p),
     }
 
 
@@ -408,8 +582,7 @@ def _expire() -> None:
     idle = _idle_minutes()
     if MAIN.is_open and idle > 0 and time.time() - MAIN.last_used > idle * 60:
         logger.info("vault idle %.0f min — auto-lock", idle)
-        MAIN.close()
-        UI_TOKENS.clear()
+        lock()
 
 
 def open_auto() -> bool:
@@ -441,22 +614,28 @@ async def loop() -> None:
             logger.exception("vault expiry tick failed")
 
 
-def catalog(query: str = "", unattended: bool = False) -> list[dict]:
+def catalog(query: str = "", unattended: bool = False, everything: bool = False) -> list[dict]:
     """Entries as the model may see them — names, fields, tier, domain,
-    card last-4. NEVER values."""
+    card last-4. NEVER values. `everything` (token-gated UI) lists the whole
+    main database with an `agent` flag instead of only the allowed groups."""
     _expire()
     out, seen = [], set()
     srcs = [AUTO] if unattended else [MAIN, AUTO]
     q = (query or "").lower()
+    c = cfg()
     for v in srcs:
         if not v.is_open:
             continue
         for key, e in sorted(v.entries().items()):
             if key in seen or (q and q not in key.lower()):
                 continue
+            vis = v.auto or agent_visible(key, c)
+            if not vis and not everything:
+                continue
             seen.add(key)
-            d = {"entry": key, "fields": sorted(e["fields"]), "tier": e["tier"],
-                 "vault": v.name}
+            d = {"entry": key, "fields": sorted(e["fields"]),
+                 "tier": e["tier"] if v.auto else _eff_tier(key, e, c),
+                 "vault": v.name, "agent": vis}
             if e["domain"]:
                 d["domain"] = e["domain"]
             num = _digits(e["fields"].get("number", ""))
@@ -487,10 +666,13 @@ def lookup(inner: str, unattended: bool = False, grants: list[str] | None = None
         if not srcs:
             raise VaultError("the vault is locked — ask the user to unlock it "
                              "(🔐 VAULT in settings), then retry")
+    c = cfg()
     for v in srcs:
         e = v.entries().get(path)
-        if e is None:
+        if e is None or (v is MAIN and not agent_visible(path, c)):
             continue
+        if v is MAIN:
+            e = {**e, "tier": _eff_tier(path, e, c)}
         if field not in e["fields"]:
             raise VaultError(f"{path} has no field {field!r} (has: {', '.join(sorted(e['fields']))})")
         if unattended and e["tier"] == "sensitive" and not e["unattended"]:

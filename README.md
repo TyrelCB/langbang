@@ -215,6 +215,16 @@ never sees) and `delete_secret`. Overwrites, deletes and Cards/Identity
 changes need your approval. Every save backs up to `data/vault/.bak`, and
 KeePassXC can still open the files.
 
+- **Any KeePass database works.** Pick it in the 🔐 card (e.g. your
+  personal one). A database other than the dedicated one shares **no**
+  groups with the agent until you tick them under 🤖 WHAT THE AGENT MAY USE,
+  each with a tier. The agent writes only into its write group (default
+  `LangBang/`); the UI editor can change anything. Saves write the file in
+  place, so its ACLs and inode survive, with a backup taken first.
+  Redaction covers every value in the open database, shared or not.
+- Scope and database settings live in `data/vault/config.json`, not
+  settings.json. While unlocked, the copy taken at unlock is authoritative,
+  and changing it needs the UI token.
 - Reveal, edit and grant routes need the token your browser got at unlock,
   sent as a header from page memory. The agent's shell can reach localhost
   but not that token.

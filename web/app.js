@@ -162,7 +162,12 @@ const api = {
     }));
   },
   async vaultStatus() { return J(await fetch("/api/vault/status")); },
-  async vaultCatalog() { return J(await fetch("/api/vault/catalog")); },
+  async vaultCatalog() { return J(await fetch("/api/vault/catalog", { headers: vaultHdr() })); },
+  async vaultConfig(patch) {
+    return J(await fetch("/api/vault/config", { method: "PUT", headers: vaultHdr(true), body: JSON.stringify(patch) }));
+  },
+  async vaultFiles() { return J(await fetch("/api/vault/files")); },
+  async vaultGroups() { return J(await fetch("/api/vault/groups", { headers: vaultHdr() })); },
   async vaultUnlock(password) {
     const r = await J(await fetch("/api/vault/unlock", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password }),
@@ -8595,21 +8600,28 @@ async function vaultRefresh(withCatalog) {
   if (!box) return;
   box.textContent = !st.exists
     ? "No vault yet — create " + st.path + " in KeePassXC (groups: Passwords/, Cards/, Identity/)."
-    : (st.locked ? "LOCKED" : "UNLOCKED · " + st.entries + " entries" + (st.expires_in != null ? " · auto-locks in " + vaultFmtLeft(st.expires_in) : ""))
+    : (st.locked ? "LOCKED" : "UNLOCKED · " + st.entries + " entries · agent can use " + st.agent_entries + (st.expires_in != null ? " · auto-locks in " + vaultFmtLeft(st.expires_in) : "")
+       + (vaultTok() ? "" : " · ⚠ this page has no vault session — re-enter the password + UNLOCK to manage"))
       + (st.keyfile ? " · keyfile on" : "")
       + " · unattended vault: " + (st.auto.open ? "open (" + st.auto.entries + ")" : st.auto.exists ? "present, not open (no TPM credential)" : "none")
       + (st.secure_origin ? "" : " · ⚠ this page isn't https — unlock is refused here");
-  $("#btn-vault-unlock").disabled = !st.exists || !st.locked;
+  $("#btn-vault-unlock").disabled = !st.exists || (!st.locked && !!vaultTok());
   $("#btn-vault-lock").disabled = st.locked;
   if (document.activeElement !== $("#vault-idle")) $("#vault-idle").value = st.auto_lock_min;
+  if (withCatalog || !vaultFilesLoaded) {
+    vaultLoadFiles(st.path);
+    if (document.activeElement !== $("#vault-keyfile")) $("#vault-keyfile").value = st.keyfile_path || "";
+  }
   if (withCatalog) {
+    vaultScope(st);
     const cat = $("#vault-catalog");
     cat.replaceChildren();
     if (!st.locked || st.auto.open) {
       const rows = await api.vaultCatalog();
       if (!rows.length) cat.appendChild(el("div", "dim", "No entries yet — + NEW ENTRY, or ask the agent to save one."));
       for (const r of rows) {
-        const row = el("div", "vault-row");
+        const row = el("div", "vault-row" + (r.agent ? "" : " not-agent"));
+        row.title = r.agent ? "the agent can use this" : "hidden from the agent (group not shared)";
         const ed = el("button", "btn ghost sm", "✎");
         ed.title = "view / edit (reveals values on this page only)";
         ed.onclick = () => vaultEdit(r.vault, r.entry);
@@ -8620,7 +8632,7 @@ async function vaultRefresh(withCatalog) {
           try { await api.vaultDel(r.vault, r.entry); } catch (e) { vaultErr(e); }
           vaultRefresh(true);
         };
-        row.append(el("span", "vault-entry", r.entry),
+        row.append(el("span", "vault-entry", (r.agent ? "🤖 " : "") + r.entry),
           el("span", "vault-tier " + r.tier, r.tier),
           el("span", "dim", r.fields.join(", ") + (r.domain ? " · " + r.domain : "") + (r.last4 ? " · …" + r.last4 : "") + (r.vault === "auto" ? " · AUTO VAULT" : "")),
           el("span", "vault-acts"));
@@ -8648,9 +8660,75 @@ $("#vault-pw").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.p
 $("#btn-vault-lock").onclick = async () => { await api.vaultLock(); vaultRefresh(true); };
 $("#vault-idle").onchange = async () => {
   const n = Math.max(0, Math.min(1440, parseInt($("#vault-idle").value, 10) || 0));
-  await api.saveSettings({ vault: { auto_lock_min: n } });
+  try { await api.vaultConfig({ auto_lock_min: n }); } catch (e) { vaultErr(e); }
   vaultRefresh();
 };
+$("#btn-vault-use").onclick = async () => {
+  $("#vault-err").classList.add("hidden");
+  try {
+    await api.vaultConfig({ path: $("#vault-path").value, keyfile: $("#vault-keyfile").value.trim() });
+    vaultTok("");
+    SFX.play("click");
+  } catch (e) { vaultErr(e); }
+  vaultRefresh(true);
+};
+let vaultFilesLoaded = false;
+async function vaultLoadFiles(cur) {
+  const sel = $("#vault-path");
+  let files = [];
+  try { files = await api.vaultFiles(); } catch {}
+  if (cur && !files.includes(cur)) files.unshift(cur);
+  sel.replaceChildren(...files.map((f) => { const o = document.createElement("option"); o.value = f; o.textContent = f.replace(/^\/home\/[^/]+/, "~"); return o; }));
+  sel.value = cur || "";
+  vaultFilesLoaded = true;
+}
+async function vaultScope(st) {
+  const box = $("#vault-scope");
+  if (st.locked || !vaultTok()) { box.classList.add("hidden"); return; }
+  let gs;
+  try { gs = await api.vaultGroups(); } catch { box.classList.add("hidden"); return; }
+  box.replaceChildren();
+  box.classList.remove("hidden");
+  const ag = st.allowed_groups || {};
+  box.appendChild(el("div", "gate-head", "🤖 WHAT THE AGENT MAY USE"));
+  box.appendChild(el("div", "hint", "Ticked groups (and their sub-groups) are visible to the agent; everything else doesn't exist for it. The tier decides whether each use asks you first. The agent writes only into the write group."));
+  const allL = el("label", "sched-en");
+  const all = document.createElement("input"); all.type = "checkbox"; all.checked = "*" in ag;
+  allL.append(all, document.createTextNode(" share the WHOLE database"));
+  box.appendChild(allL);
+  const list = el("div", "vault-groups");
+  const rows = [];
+  for (const g of gs) {
+    const depth = g.group.split("/").length - 1;
+    const r = el("div", "vault-grow");
+    r.style.paddingLeft = depth * 14 + "px";
+    const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = g.group in ag;
+    const t = document.createElement("select");
+    for (const [v, l] of [["auto", "tier: by name"], ["login", "login — no prompt"], ["sensitive", "sensitive — ask each use"]]) {
+      const o = document.createElement("option"); o.value = v; o.textContent = l; t.appendChild(o);
+    }
+    t.value = ag[g.group] || "auto";
+    const lab = el("label"); lab.append(cb, document.createTextNode(" " + g.group.split("/").pop() + " "), el("span", "dim", "(" + g.entries + ")"));
+    r.append(lab, t);
+    list.appendChild(r);
+    rows.push({ g: g.group, cb, t });
+  }
+  box.appendChild(list);
+  const wr = el("div", "row");
+  const wg = el("input"); wg.type = "text"; wg.value = st.write_group || "LangBang"; wg.spellcheck = false;
+  const wl = el("label"); wl.append(document.createTextNode("Agent write group "), wg);
+  const save = el("button", "btn accent sm", "SAVE SCOPE"); save.type = "button";
+  save.onclick = async () => {
+    const out = {};
+    if (all.checked) out["*"] = "auto";
+    for (const r of rows) if (r.cb.checked) out[r.g] = r.t.value;
+    try { await api.vaultConfig({ allowed_groups: out, write_group: wg.value.trim() || "LangBang" }); SFX.play("click"); }
+    catch (e) { vaultErr(e); }
+    vaultRefresh(true);
+  };
+  wr.append(wl, save);
+  box.appendChild(wr);
+}
 $("#btn-vault").onclick = async () => {
   if (vaultState && !vaultState.locked) { await api.vaultLock(); vaultRefresh(true); return; }
   await openSettings();

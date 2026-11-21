@@ -1505,3 +1505,9 @@ html[data-theme="light"] .spk-hud-phrase span.on { text-shadow: none; }
 .vault-field .vf-name { width: 9em; flex: none; }
 .vault-field .vf-val { flex: 1; min-width: 0; }
 @media (max-width: 640px) { .vault-field { flex-wrap: wrap; } .vault-field .vf-val { flex-basis: 100%; order: 5; } }
+.vault-row.not-agent .vault-entry { opacity: .55; }
+.vault-scope { border: 1px solid var(--line); padding: 8px; margin: 6px 0; display: flex; flex-direction: column; gap: 6px; }
+.vault-groups { display: flex; flex-direction: column; gap: 2px; max-height: 22em; overflow: auto; }
+.vault-grow { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+.vault-grow select { font-size: .8em; }
+#vault-path { max-width: 100%; }

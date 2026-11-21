@@ -347,12 +347,18 @@
         <div class="hint">KeePassXC database the agent can <b>use but never see</b>: it writes handles like <code>{{secret:Passwords/Amazon.password}}</code>, LangBang fills the value in only when <code>run_bash</code> (as <code>$LB_S1</code> env) or a browser/MCP tool runs, and every value is shown as <code>‹secret:…›</code> in output, history, trajectory and exports. Groups <code>Cards/</code> and <code>Identity/</code> ask your approval on every use. Manage entries right here (or let the agent: <code>save_secret</code> generates passwords it never sees; overwrites, deletes and Cards/Identity changes ask you first). Every save keeps a backup in <code>data/vault/.bak</code>; KeePassXC can still open the files. Unlock, reveal and edits work only over https or localhost, from this unlocked page.</div>
         <div id="vault-status" class="hint"></div>
         <div class="row">
+          <label>Database <select id="vault-path"></select></label>
+          <label>Keyfile (optional) <input id="vault-keyfile" type="text" autocomplete="off" spellcheck="false" placeholder="none"></label>
+          <button id="btn-vault-use" class="btn ghost sm" type="button" title="switch database (locks the vault; a non-LangBang database shares NO groups with the agent until you pick them)">USE</button>
+        </div>
+        <div class="row">
           <label>Master password <input id="vault-pw" type="password" autocomplete="off" spellcheck="false" placeholder="unlock for this session"></label>
           <button id="btn-vault-unlock" class="btn accent sm" type="button">UNLOCK</button>
           <button id="btn-vault-lock" class="btn ghost sm" type="button">LOCK NOW</button>
           <label>Auto-lock after idle (min, 0 = never) <input id="vault-idle" type="number" min="0" max="1440" step="1"></label>
         </div>
         <div id="vault-err" class="error hidden"></div>
+        <div id="vault-scope" class="vault-scope hidden"></div>
         <div id="vault-catalog" class="vault-catalog"></div>
         <div class="row"><button id="btn-vault-new" class="btn ghost sm" type="button">+ NEW ENTRY</button></div>
         <div id="vault-editor" class="vault-editor hidden"></div>

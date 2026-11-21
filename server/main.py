@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.parse
 import uuid
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
@@ -814,8 +815,48 @@ async def vault_lock():
 
 
 @app.get("/api/vault/catalog")
-async def vault_catalog(q: str = ""):
-    return vault.catalog(q)
+async def vault_catalog(request: Request, q: str = ""):
+    """Without the UI token: only what the agent may see (no values either
+    way). With it: the whole database, each row flagged `agent`."""
+    full = _secure_origin(request) and vault.ui_token_ok(request.headers.get("x-vault-token"))
+    return vault.catalog(q, everything=full)
+
+
+class VaultConfig(BaseModel):
+    path: str | None = None
+    keyfile: str | None = None
+    allowed_groups: dict[str, str] | None = None
+    write_group: str | None = None
+    auto_lock_min: float | None = None
+
+
+@app.put("/api/vault/config")
+async def vault_config(body: VaultConfig, request: Request):
+    """Database path / keyfile may be picked while LOCKED (you choose the file
+    before unlocking it); everything else — and any change while unlocked —
+    needs the UI token, so the agent shell can't widen its own scope."""
+    patch = body.model_dump(exclude_none=True)
+    pick_only = set(patch) <= {"path", "keyfile"}
+    if not (pick_only and vault.status()["locked"]):
+        _need_vault_ui(request)
+    elif not _secure_origin(request):
+        raise HTTPException(403, "vault settings only over https or localhost")
+    if "path" in patch and not Path(patch["path"]).expanduser().is_file():
+        raise HTTPException(422, f"no file at {patch['path']}")
+    return {**vault.save_cfg(patch), "status": vault.status()}
+
+
+@app.get("/api/vault/files")
+async def vault_files(request: Request):
+    if not _secure_origin(request):
+        raise HTTPException(403, "only over https or localhost")
+    return await asyncio.get_running_loop().run_in_executor(None, vault.kdbx_files)
+
+
+@app.get("/api/vault/groups")
+async def vault_groups(request: Request):
+    _need_vault_ui(request)
+    return vault.groups()
 
 
 @app.get("/api/vault/entry")

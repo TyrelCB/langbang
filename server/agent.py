@@ -1868,7 +1868,10 @@ def list_secrets(query: str = "") -> str:
         if not nogate and st["locked"]:
             return ("The vault is locked. Ask the user to unlock it (🔐 VAULT in "
                     "settings) — don't ask them to paste the secret into chat.")
-        return "No matching vault entries." if query else "The vault is empty."
+        if query:
+            return "No matching vault entries."
+        return ("No vault entries are shared with you yet (the user picks allowed "
+                f"groups in 🔐 VAULT). You can still save_secret into {st['write_group']}/.")
     lines = []
     for r in rows:
         extra = [r["tier"]]
@@ -1880,7 +1883,9 @@ def list_secrets(query: str = "") -> str:
             extra.append("NOT usable unattended")
         lines.append(f"- {r['entry']} ({', '.join(extra)}): "
                      + ", ".join(f"{{{{secret:{r['entry']}.{f}}}}}" for f in r["fields"]))
-    return "Vault entries (handles only):\n" + "\n".join(lines)
+    st = vault.status()
+    return ("Vault entries (handles only):\n" + "\n".join(lines)
+            + (f"\nsave_secret/delete_secret write only inside {st['write_group']}/." if not nogate else ""))
 
 
 def _vault_write_gate(action: str, entry: str, detail: str) -> str | None:
@@ -1895,9 +1900,10 @@ def _vault_write_gate(action: str, entry: str, detail: str) -> str | None:
 @tool
 def save_secret(entry: str, generate: list[str] | None = None, fields: dict[str, str] | None = None,
                 length: int = 24, symbols: bool = True) -> str:
-    """Create or update an entry in the user's vault (the main vault).
-    `entry` is Group/Title, e.g. "Passwords/github.com" (groups: Passwords/,
-    Cards/, Identity/, or any other). `generate` names fields whose value
+    """Create or update an entry in the user's vault. You can only write
+    inside LangBang's own group (list_secrets names it) — `entry` is relative
+    to it, e.g. "Passwords/github.com" (sub-groups Cards/ and Identity/ are
+    sensitive). `generate` names fields whose value
     LangBang creates itself — e.g. ["password"] for a new account; you never
     see it, you get its handle to type it into a form. `fields` sets values
     you already have (username, url, notes, an API key a site just showed
@@ -1915,8 +1921,8 @@ def save_secret(entry: str, generate: list[str] | None = None, fields: dict[str,
         return "🔐 put literal values in fields (or use generate) — handles can't be copied into another entry."
     gen = [g for g in (generate or []) if g]
     try:
-        cur = vault.exists("main", entry)
-        path = entry.strip().strip("/")
+        path = vault.agent_write_path(entry)
+        cur = vault.exists("main", path)
         top = path.split("/")[0].lower()
         clobber = sorted(k for k in [*fields, *gen] if cur and cur["fields"].get(k)
                          and (k in gen or cur["fields"][k] != fields.get(k)))
@@ -1942,16 +1948,16 @@ def save_secret(entry: str, generate: list[str] | None = None, fields: dict[str,
 
 @tool
 def delete_secret(entry: str, field: str = "") -> str:
-    """Delete a vault entry, or just one of its fields. Always asks the user
-    first (a backup of the vault is kept)."""
+    """Delete a vault entry you manage (inside LangBang's group), or just one
+    of its fields. Always asks the user first (a backup is kept)."""
     from . import vault
     nogate, _, _ = _vault_flags()
     if nogate:
         return "🔐 scheduled runs can't change the vault."
     if not vault.MAIN.is_open:
         return "🔐 the vault is locked — ask the user to unlock it (🔐 VAULT), then retry."
-    path = entry.strip().strip("/")
     try:
+        path = vault.agent_write_path(entry)
         if not vault.exists("main", path):
             return f"🔐 no entry {path!r} (list_secrets shows what exists)"
         why = _vault_write_gate("delete_secret", path + (f".{field}" if field else ""),
