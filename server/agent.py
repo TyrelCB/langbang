@@ -1493,6 +1493,51 @@ class _PrefetchNote(AgentMiddleware):
 _IMAGE_CAP: dict[str, int] = {}
 _IMAGE_CAP_RE = re.compile(r"At most (\d+) image\(s\) may be provided", re.I)
 
+# image payload hash -> decodes as an image? (bounded; history re-checks are hits)
+_IMG_OK: dict[str, bool] = {}
+
+
+def _img_b64(b: dict) -> str | None:
+    """The base64 payload of an image / image_url block (None if it's a URL)."""
+    if b.get("type") == "image":
+        return b.get("base64") or b.get("data")
+    if b.get("type") == "image_url":
+        u = b.get("image_url")
+        u = u.get("url") if isinstance(u, dict) else u
+        if isinstance(u, str) and u.startswith("data:") and "," in u:
+            return u.split(",", 1)[1]
+    return None
+
+
+def _img_ok(b: dict) -> bool:
+    """False when the block's bytes aren't a decodable image. A file named
+    .png that holds junk (11-21: an agent piped `print("saved")` into
+    `base64 -d`) made vLLM 400 with 'cannot identify image file' — and since
+    the block sits in history, every later call 400'd too."""
+    data = _img_b64(b)
+    if not isinstance(data, str):
+        return True  # remote URL / unknown shape: let the server judge
+    import base64, hashlib, io
+    from PIL import Image
+    key = hashlib.sha1(data.encode()).hexdigest()
+    if (ok := _IMG_OK.get(key)) is None:
+        try:
+            with Image.open(io.BytesIO(base64.b64decode(data))) as im:
+                im.verify()
+            ok = True
+        except Exception:  # noqa: BLE001 - any decode failure = unusable
+            ok = False
+        if len(_IMG_OK) > 512:
+            _IMG_OK.clear()
+        _IMG_OK[key] = ok
+    return ok
+
+
+def _bad_img_note(path: str = "image") -> str:
+    return (f"[{path} is NOT a valid image (bytes don't decode) — not attached. "
+            "The file is probably corrupt: check it with `file`/`head -c`, "
+            "and regenerate it, e.g. without mixing stdout text into a base64 pipe.]")
+
 
 class _MediaReadGuard(AgentMiddleware):
     """Keep binary media that read_file returns out of the model's context.
@@ -1523,10 +1568,26 @@ class _MediaReadGuard(AgentMiddleware):
             "(ffprobe / ffmpeg frame grabs).]"
         )
 
+    @staticmethod
+    def _scrub_bad_images(m):  # noqa: ANN001, ANN205
+        """Swap undecodable image blocks for a text note (None if none)."""
+        if not isinstance(m.content, list):
+            return None
+        path = (m.additional_kwargs or {}).get("read_file_path", "image")
+        out, hit = [], False
+        for b in m.content:
+            if isinstance(b, dict) and b.get("type") in ("image", "image_url") and not _img_ok(b):
+                b, hit = {"type": "text", "text": _bad_img_note(path)}, True
+            out.append(b)
+        return m.model_copy(update={"content": out}) if hit else None
+
     async def awrap_tool_call(self, request, handler):  # noqa: ANN001
         res = await handler(request)
-        if isinstance(res, ToolMessage) and (note := self._note(res)):
-            res = res.model_copy(update={"content": note})
+        if isinstance(res, ToolMessage):
+            if note := self._note(res):
+                res = res.model_copy(update={"content": note})
+            elif fixed := self._scrub_bad_images(res):
+                res = fixed
         return res
 
     @staticmethod
@@ -1563,6 +1624,8 @@ class _MediaReadGuard(AgentMiddleware):
         for m in request.messages:
             if isinstance(m, ToolMessage) and (note := self._note(m)) and m.content != note:
                 m, hit = m.model_copy(update={"content": note}), True
+            elif fixed := self._scrub_bad_images(m):  # heals already-poisoned threads
+                m, hit = fixed, True
             msgs.append(m)
         # Per-prompt image cap (vLLM --limit-mm-per-prompt): a screenshot-heavy
         # thread 400'd on EVERY call once it held more images than that, and
