@@ -323,6 +323,7 @@ def kdbx_files() -> list[str]:
         out.update(str(Path(root) / f) for f in files if f.endswith(".kdbx"))
     if VAULT_DIR.exists():
         out.update(str(p) for p in VAULT_DIR.glob("*.kdbx"))
+    out.discard(str(AUTO_PATH))  # the unattended vault is never the main one
     return sorted(out)
 
 
