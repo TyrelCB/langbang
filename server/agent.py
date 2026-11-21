@@ -1679,6 +1679,7 @@ PLAN_BLOCKED = {
     "write_file", "edit_file", "delete_file", "delete",
     "create_scheduled_task", "update_scheduled_task", "delete_scheduled_task",
     "set_scheduled_task_enabled", "run_scheduled_task_now",
+    "save_secret", "delete_secret",
 }
 PLAN_NOTE = """## PLAN MODE (active — set by the user)
 Investigate and design; do NOT change anything yet.
@@ -1819,6 +1820,87 @@ def list_secrets(query: str = "") -> str:
     return "Vault entries (handles only):\n" + "\n".join(lines)
 
 
+def _vault_write_gate(action: str, entry: str, detail: str) -> str | None:
+    """Approval card for a vault change. Returns an error string on deny."""
+    ans = interrupt({"kind": "secret", "tool": action, "entries": [entry],
+                     "target": "", "preview": detail, "write": True})
+    if isinstance(ans, dict) and ans.get("approved"):
+        return None
+    return f"the user DENIED {action} on {entry}. Don't retry it; ask what they want instead."
+
+
+@tool
+def save_secret(entry: str, generate: list[str] | None = None, fields: dict[str, str] | None = None,
+                length: int = 24, symbols: bool = True) -> str:
+    """Create or update an entry in the user's vault (the main vault).
+    `entry` is Group/Title, e.g. "Passwords/github.com" (groups: Passwords/,
+    Cards/, Identity/, or any other). `generate` names fields whose value
+    LangBang creates itself — e.g. ["password"] for a new account; you never
+    see it, you get its handle to type it into a form. `fields` sets values
+    you already have (username, url, notes, an API key a site just showed
+    you…) — never put a value you could generate there. Overwriting an
+    existing value, and anything in Cards/ or Identity/, asks the user first.
+    Returns the handles to use."""
+    from . import vault
+    nogate, _, _ = _vault_flags()
+    if nogate:
+        return "🔐 scheduled runs can't change the vault."
+    if not vault.MAIN.is_open:
+        return "🔐 the vault is locked — ask the user to unlock it (🔐 VAULT), then retry."
+    fields = {str(k): str(v) for k, v in (fields or {}).items()}
+    if any(vault.HANDLE_RE.search(v) for v in fields.values()):
+        return "🔐 put literal values in fields (or use generate) — handles can't be copied into another entry."
+    gen = [g for g in (generate or []) if g]
+    try:
+        cur = vault.exists("main", entry)
+        path = entry.strip().strip("/")
+        top = path.split("/")[0].lower()
+        clobber = sorted(k for k in [*fields, *gen] if cur and cur["fields"].get(k)
+                         and (k in gen or cur["fields"][k] != fields.get(k)))
+        sensitive = top in vault.SENSITIVE_GROUPS or (cur and cur["tier"] == "sensitive")
+        if clobber or sensitive:
+            detail = (("OVERWRITES existing: " + ", ".join(clobber) + "\n") if clobber else "") + \
+                (("generate: " + ", ".join(gen) + "\n") if gen else "") + \
+                (("set: " + ", ".join(f"{k}=" + ("…" if k not in ("username", "url") else v)
+                                      for k, v in fields.items())) if fields else "")
+            why = _vault_write_gate("save_secret", path, detail.strip())
+            if why:
+                return "🔐 " + why
+        for g in gen:
+            fields[g] = vault.generate(length, symbols)
+        r = vault.put_entry("main", path, fields)
+    except vault.VaultError as e:
+        return "🔐 " + str(e)
+    hs = ", ".join(f"{{{{secret:{r['entry']}.{f}}}}}" for f in r["fields"])
+    return (f"Saved {r['entry']} ({r['tier']}). "
+            + (f"Generated {', '.join(gen)} — you don't know the value; use the handle. " if gen else "")
+            + f"Handles: {hs}")
+
+
+@tool
+def delete_secret(entry: str, field: str = "") -> str:
+    """Delete a vault entry, or just one of its fields. Always asks the user
+    first (a backup of the vault is kept)."""
+    from . import vault
+    nogate, _, _ = _vault_flags()
+    if nogate:
+        return "🔐 scheduled runs can't change the vault."
+    if not vault.MAIN.is_open:
+        return "🔐 the vault is locked — ask the user to unlock it (🔐 VAULT), then retry."
+    path = entry.strip().strip("/")
+    try:
+        if not vault.exists("main", path):
+            return f"🔐 no entry {path!r} (list_secrets shows what exists)"
+        why = _vault_write_gate("delete_secret", path + (f".{field}" if field else ""),
+                                "DELETE " + ("field " + field if field else "the whole entry"))
+        if why:
+            return "🔐 " + why
+        vault.delete_entry("main", path, field)
+    except vault.VaultError as e:
+        return "🔐 " + str(e)
+    return f"Deleted {path}{'.' + field if field else ''}."
+
+
 _URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.I)
 SECRET_INLINE_BUILTIN: set[str] = set()  # none: built-ins either use env or are refused
 
@@ -1826,7 +1908,7 @@ SECRET_INLINE_BUILTIN: set[str] = set()  # none: built-ins either use env or are
 class _SecretBroker(AgentMiddleware):
     def __init__(self):
         super().__init__()
-        self.tools = [list_secrets]
+        self.tools = [list_secrets, save_secret, delete_secret]
 
     async def awrap_model_call(self, request, handler):  # noqa: ANN001
         from . import vault
@@ -1936,7 +2018,9 @@ class _SecretBroker(AgentMiddleware):
 
 SECRET_NOTE = """## 🔐 Secret vault (unlocked)
 The user's passwords, cards and personal data are usable through handles —
-call list_secrets to see them. Write {{secret:Entry/Path.field}} where the
+call list_secrets to see them; save_secret creates/updates entries (use
+generate=["password"] for new accounts — LangBang makes the value, you only
+get its handle), delete_secret removes them. Write {{secret:Entry/Path.field}} where the
 value goes (a run_bash command, or a browser/MCP tool argument); it is filled
 in at execution and shows as ‹secret:…› in output. You never see values:
 don't ask the user to paste secrets, and never put handles in web searches,

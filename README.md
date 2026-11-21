@@ -207,8 +207,17 @@ prompt and no login — by design, this is a personal LAN tool.
 
 ### 🔐 Secret vault
 
-`data/vault/LangBang.kdbx` (a KeePassXC database you create and edit) holds
-passwords, cards and personal data the agent can **use but never see**:
+`data/vault/LangBang.kdbx` (KDBX, created by `tools/vault_init.py`) holds
+passwords, cards and personal data the agent can **use but never see**.
+LangBang manages it: CONFIG → 🔐 SECRET VAULT adds, edits, reveals, generates
+and deletes entries, and the agent has `save_secret` (generated values it
+never sees) and `delete_secret`. Overwrites, deletes and Cards/Identity
+changes need your approval. Every save backs up to `data/vault/.bak`, and
+KeePassXC can still open the files.
+
+- Reveal, edit and grant routes need the token your browser got at unlock,
+  sent as a header from page memory. The agent's shell can reach localhost
+  but not that token.
 
 - The agent writes handles such as `{{secret:Passwords/Amazon.password}}`
   (`list_secrets` shows what exists). The value is filled in only when the

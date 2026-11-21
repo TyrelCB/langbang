@@ -13,7 +13,7 @@ import urllib.parse
 import uuid
 
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -740,9 +740,11 @@ class GrantsBody(BaseModel):
 
 
 @app.put("/api/schedules/{sid}/grants")
-async def put_schedule_grants(sid: str, body: GrantsBody):
-    """🔐 Which vault handles a task may use unattended. UI-only: no agent
-    tool calls this, so the agent can't grant itself credentials."""
+async def put_schedule_grants(sid: str, body: GrantsBody, request: Request):
+    """🔐 Which vault handles a task may use unattended. Needs the vault UI
+    token (only an unlocked browser has it) — the agent's shell can curl
+    localhost, so "no agent tool calls this" alone would not stop it."""
+    _need_vault_ui(request)
     row = await schedule.set_grants(sid, body.grants)
     if not row:
         raise HTTPException(404, "no such schedule")
@@ -767,6 +769,26 @@ class VaultUnlock(BaseModel):
     password: str
 
 
+def _need_vault_ui(request: Request) -> None:
+    """Reveal / write / grant routes: TLS-or-local AND the per-unlock token
+    the browser got from /unlock (never in a page, cookie or URL — a header
+    from JS memory). The agent shell reaches localhost but not the token."""
+    if not _secure_origin(request):
+        raise HTTPException(403, "vault management only over https or localhost")
+    if not vault.ui_token_ok(request.headers.get("x-vault-token")):
+        raise HTTPException(401, "vault locked or this page's vault session expired — unlock again")
+
+
+class VaultEntryPut(BaseModel):
+    vault: str = "main"
+    path: str
+    old_path: str | None = None
+    fields: dict[str, str] = {}
+    remove: list[str] = []
+    tier: str | None = None  # "", "login", "sensitive"
+    unattended: bool | None = None
+
+
 @app.get("/api/vault/status")
 async def vault_status(request: Request):
     return {**vault.status(), "secure_origin": _secure_origin(request)}
@@ -782,7 +804,7 @@ async def vault_unlock(body: VaultUnlock, request: Request):
     except vault.VaultError as e:
         await asyncio.sleep(1.0)  # blunt guessing
         raise HTTPException(401, str(e))
-    return vault.status()
+    return {**vault.status(), "token": vault.new_ui_token()}
 
 
 @app.post("/api/vault/lock")
@@ -794,6 +816,41 @@ async def vault_lock():
 @app.get("/api/vault/catalog")
 async def vault_catalog(q: str = ""):
     return vault.catalog(q)
+
+
+@app.get("/api/vault/entry")
+async def vault_entry_get(request: Request, vault_: str = Query("main", alias="vault"), path: str = ""):
+    _need_vault_ui(request)
+    try:
+        return vault.get_entry(vault_, path)
+    except vault.VaultError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.put("/api/vault/entry")
+async def vault_entry_put(body: VaultEntryPut, request: Request):
+    _need_vault_ui(request)
+    try:
+        return await asyncio.get_running_loop().run_in_executor(None, lambda: vault.put_entry(
+            body.vault, body.path, body.fields, body.remove, body.tier, body.unattended, body.old_path))
+    except vault.VaultError as e:
+        raise HTTPException(422, str(e))
+
+
+@app.delete("/api/vault/entry")
+async def vault_entry_del(request: Request, vault_: str = Query("main", alias="vault"), path: str = "", field: str = ""):
+    _need_vault_ui(request)
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, vault.delete_entry, vault_, path, field)
+    except vault.VaultError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True}
+
+
+@app.get("/api/vault/generate")
+async def vault_generate(request: Request, length: int = 24, symbols: bool = True):
+    _need_vault_ui(request)
+    return {"value": vault.generate(length, symbols)}
 
 
 @app.delete("/api/schedules/{sid}")

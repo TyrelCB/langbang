@@ -158,17 +158,32 @@ const api = {
   async delSchedule(id) { await fetch("/api/schedules/" + id, { method: "DELETE" }); },
   async putGrants(id, grants) {
     return J(await fetch("/api/schedules/" + id + "/grants", {
-      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ grants }),
+      method: "PUT", headers: vaultHdr(true), body: JSON.stringify({ grants }),
     }));
   },
   async vaultStatus() { return J(await fetch("/api/vault/status")); },
   async vaultCatalog() { return J(await fetch("/api/vault/catalog")); },
   async vaultUnlock(password) {
-    return J(await fetch("/api/vault/unlock", {
+    const r = await J(await fetch("/api/vault/unlock", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password }),
     }));
+    vaultTok(r.token || "");
+    return r;
   },
-  async vaultLock() { return J(await fetch("/api/vault/lock", { method: "POST" })); },
+  async vaultEntry(vault, path) {
+    return J(await fetch(`/api/vault/entry?vault=${encodeURIComponent(vault)}&path=${encodeURIComponent(path)}`, { headers: vaultHdr() }));
+  },
+  async vaultPut(body) {
+    return J(await fetch("/api/vault/entry", { method: "PUT", headers: vaultHdr(true), body: JSON.stringify(body) }));
+  },
+  async vaultDel(vault, path, field = "") {
+    return J(await fetch(`/api/vault/entry?vault=${encodeURIComponent(vault)}&path=${encodeURIComponent(path)}&field=${encodeURIComponent(field)}`,
+      { method: "DELETE", headers: vaultHdr() }));
+  },
+  async vaultGen(length = 24, symbols = true) {
+    return (await J(await fetch(`/api/vault/generate?length=${length}&symbols=${symbols}`, { headers: vaultHdr() }))).value;
+  },
+  async vaultLock() { vaultTok(""); return J(await fetch("/api/vault/lock", { method: "POST" })); },
   async runSchedule(id) {
     return J(await fetch("/api/schedules/" + id + "/run", { method: "POST" }));
   },
@@ -2160,6 +2175,7 @@ const lostTodos = (name, err) => name === "write_todos" && /todos\s+Field requir
 function gateSummary(v) {
   if (!v || typeof v !== "object") return String(v ?? "");
   if (v.kind === "plan") return "◆ plan proposed for approval";
+  if (v.kind === "secret" && v.write) return "🔐 asked to " + (v.tool === "delete_secret" ? "delete " : "change ") + (v.entries || []).join(", ");
   if (v.kind === "secret") return "🔐 asked to use " + (v.entries || []).join(", ") + " in " + (v.tool || "?");
   return "◆ asked: " + (v.questions || []).map((q) => q.question).join(" | ");
 }
@@ -6563,13 +6579,13 @@ function gateCard(tid, g) {
     act.append(ok, rev);
   } else if (v.kind === "secret") {
     card.classList.add("gate-secret");
-    card.appendChild(el("div", "gate-head", "🔐 THE AGENT WANTS TO USE A SENSITIVE SECRET"));
+    card.appendChild(el("div", "gate-head", v.write ? "🔐 THE AGENT WANTS TO CHANGE YOUR VAULT" : "🔐 THE AGENT WANTS TO USE A SENSITIVE SECRET"));
     const b = el("div", "gate-q");
     b.appendChild(el("div", "gate-qt", (v.entries || []).join(", ")));
     b.appendChild(el("div", "sched-sub", "in " + (v.tool || "?") + (v.target ? " → " + v.target : "")));
     const pre = el("pre", "gate-preview", v.preview || "");
     b.appendChild(pre);
-    b.appendChild(el("div", "sched-sub dim", "Approving fills the value in for this one call only. The model still never sees it."));
+    b.appendChild(el("div", "sched-sub dim", v.write ? "A backup of the vault is kept before every change (data/vault/.bak)." : "Approving fills the value in for this one call only. The model still never sees it."));
     card.appendChild(b);
     const ok = el("button", "btn accent", "✓ APPROVE THIS USE");
     const no = el("button", "btn ghost", "✕ DENY");
@@ -8590,11 +8606,25 @@ async function vaultRefresh(withCatalog) {
     const cat = $("#vault-catalog");
     cat.replaceChildren();
     if (!st.locked || st.auto.open) {
-      for (const r of await api.vaultCatalog()) {
+      const rows = await api.vaultCatalog();
+      if (!rows.length) cat.appendChild(el("div", "dim", "No entries yet — + NEW ENTRY, or ask the agent to save one."));
+      for (const r of rows) {
         const row = el("div", "vault-row");
+        const ed = el("button", "btn ghost sm", "✎");
+        ed.title = "view / edit (reveals values on this page only)";
+        ed.onclick = () => vaultEdit(r.vault, r.entry);
+        const del = el("button", "btn ghost sm", "✕");
+        del.title = "delete entry (click twice; a backup is kept)";
+        del.onclick = async () => {
+          if (!del.classList.contains("armed")) { del.classList.add("armed"); del.textContent = "✕ SURE?"; setTimeout(() => { del.classList.remove("armed"); del.textContent = "✕"; }, 3000); return; }
+          try { await api.vaultDel(r.vault, r.entry); } catch (e) { vaultErr(e); }
+          vaultRefresh(true);
+        };
         row.append(el("span", "vault-entry", r.entry),
           el("span", "vault-tier " + r.tier, r.tier),
-          el("span", "dim", r.fields.join(", ") + (r.domain ? " · " + r.domain : "") + (r.last4 ? " · …" + r.last4 : "") + (r.vault === "auto" ? " · AUTO" : "")));
+          el("span", "dim", r.fields.join(", ") + (r.domain ? " · " + r.domain : "") + (r.last4 ? " · …" + r.last4 : "") + (r.vault === "auto" ? " · AUTO VAULT" : "")),
+          el("span", "vault-acts"));
+        row.lastChild.append(ed, del);
         cat.appendChild(row);
       }
     }
@@ -8651,7 +8681,8 @@ async function schedGrants(s, card) {
   const save = el("button", "btn accent sm", "SAVE GRANTS");
   save.onclick = async () => {
     const list = ta.value.split(/[\n,]+/).map((x) => x.trim()).filter(Boolean);
-    await api.putGrants(s.id, list);
+    try { await api.putGrants(s.id, list); }
+    catch (e) { ed.appendChild(el("div", "error", "NOT SAVED — " + e.message + " (🔐 unlock the vault on this page first)")); return; }
     SFX.play("click");
     ed.remove();
     refreshSchedules();
@@ -8659,3 +8690,117 @@ async function schedGrants(s, card) {
   ed.appendChild(save);
   card.appendChild(ed);
 }
+
+
+// ---- 🔐 vault entry manager (token from /unlock, kept in this tab only) ----
+function vaultTok(set) {
+  try {
+    if (set !== undefined) { if (set) sessionStorage.setItem("lb.vaultTok", set); else sessionStorage.removeItem("lb.vaultTok"); }
+    return sessionStorage.getItem("lb.vaultTok") || "";
+  } catch { if (set !== undefined) window._lbVaultTok = set; return window._lbVaultTok || ""; }
+}
+function vaultHdr(json) {
+  const h = { "X-Vault-Token": vaultTok() };
+  if (json) h["Content-Type"] = "application/json";
+  return h;
+}
+function vaultErr(e) {
+  const err = $("#vault-err");
+  err.textContent = String(e.message || e) + (/session|locked|401/i.test(String(e.message)) ? " — enter the master password + UNLOCK on this page" : "");
+  err.classList.remove("hidden");
+}
+const VAULT_PRESETS = {
+  LOGIN: ["username", "password", "url"],
+  CARD: ["name", "number", "exp", "cvv", "zip"],
+  IDENTITY: ["name", "dob", "address", "phone", "email"],
+  "API KEY": ["api_key", "url"],
+};
+async function vaultEdit(vname, path) {
+  $("#vault-err").classList.add("hidden");
+  let cur = null;
+  if (path) {
+    try { cur = await api.vaultEntry(vname, path); } catch (e) { vaultErr(e); return; }
+  }
+  const box = $("#vault-editor");
+  box.replaceChildren();
+  box.classList.remove("hidden");
+  box.appendChild(el("div", "gate-head", path ? "✎ " + path : "+ NEW ENTRY"));
+  const top = el("div", "row");
+  const vsel = document.createElement("select");
+  for (const [v, l] of [["main", "main vault"], ["auto", "auto vault (scheduled tasks)"]]) {
+    const o = document.createElement("option"); o.value = v; o.textContent = l; vsel.appendChild(o);
+  }
+  vsel.value = vname || "main";
+  vsel.disabled = !!path;
+  const pin = el("input"); pin.type = "text"; pin.placeholder = "Group/Title — e.g. Passwords/github.com"; pin.value = path || ""; pin.spellcheck = false;
+  const tsel = document.createElement("select");
+  for (const [v, l] of [["", "tier: by group"], ["login", "login (no prompt)"], ["sensitive", "sensitive (ask each use)"]]) {
+    const o = document.createElement("option"); o.value = v; o.textContent = l; tsel.appendChild(o);
+  }
+  tsel.value = (cur && cur.tier_set) || "";
+  const una = document.createElement("input"); una.type = "checkbox"; una.checked = !!(cur && cur.unattended);
+  const unaL = el("label", "sched-en"); unaL.append(una, document.createTextNode(" usable unattended (sensitive only)"));
+  const lab = (t, n) => { const l = el("label"); l.append(document.createTextNode(t + " "), n); return l; };
+  top.append(lab("Vault", vsel), lab("Entry", pin), tsel, unaL);
+  box.appendChild(top);
+  const rowsBox = el("div", "vault-fields");
+  box.appendChild(rowsBox);
+  const addRow = (k = "", v = "") => {
+    const r = el("div", "vault-field");
+    const kn = el("input"); kn.type = "text"; kn.placeholder = "field"; kn.value = k; kn.spellcheck = false; kn.className = "vf-name";
+    const vv = el("input"); vv.type = /pass|cvv|number|ssn|key|token|secret|pin/i.test(k) ? "password" : "text";
+    vv.value = v; vv.placeholder = "value"; vv.spellcheck = false; vv.autocomplete = "off"; vv.className = "vf-val";
+    const eye = el("button", "btn ghost sm", "👁"); eye.type = "button"; eye.title = "show / hide";
+    eye.onclick = () => { vv.type = vv.type === "password" ? "text" : "password"; };
+    const cp = el("button", "btn ghost sm", "⧉"); cp.type = "button"; cp.title = "copy value";
+    cp.onclick = () => { copyText(vv.value); cp.textContent = "✓"; setTimeout(() => (cp.textContent = "⧉"), 900); };
+    const gen = el("button", "btn ghost sm", "🎲"); gen.type = "button"; gen.title = "generate a strong random value";
+    gen.onclick = async () => { try { vv.value = await api.vaultGen(24, true); vv.type = "text"; } catch (e) { vaultErr(e); } };
+    const rm = el("button", "btn ghost sm", "✕"); rm.type = "button"; rm.title = "remove field";
+    rm.onclick = () => r.remove();
+    r.append(kn, vv, eye, cp, gen, rm);
+    rowsBox.appendChild(r);
+  };
+  const fields = cur ? cur.fields : {};
+  for (const [k, v] of Object.entries(fields)) addRow(k, v);
+  if (!cur) for (const k of VAULT_PRESETS.LOGIN) addRow(k);
+  const pre = el("div", "row");
+  const plus = el("button", "btn ghost sm", "+ FIELD"); plus.type = "button"; plus.onclick = () => addRow();
+  pre.appendChild(plus);
+  for (const [name, ks] of Object.entries(VAULT_PRESETS)) {
+    const b = el("button", "btn ghost sm", name); b.type = "button";
+    b.title = "add fields: " + ks.join(", ");
+    b.onclick = () => {
+      const have = new Set([...rowsBox.querySelectorAll(".vf-name")].map((x) => x.value.trim()));
+      for (const k of ks) if (!have.has(k)) addRow(k);
+    };
+    pre.appendChild(b);
+  }
+  box.appendChild(pre);
+  const act = el("div", "row");
+  const save = el("button", "btn accent sm", "SAVE"); save.type = "button";
+  const cancel = el("button", "btn ghost sm", "CANCEL"); cancel.type = "button";
+  cancel.onclick = () => { box.classList.add("hidden"); box.replaceChildren(); };
+  save.onclick = async () => {
+    const out = {};
+    for (const r of rowsBox.querySelectorAll(".vault-field")) {
+      const k = r.querySelector(".vf-name").value.trim();
+      const v = r.querySelector(".vf-val").value;
+      if (k && v !== "") out[k] = v;
+    }
+    const p = pin.value.trim().replace(/^\/+|\/+$/g, "");
+    if (!p) { pin.focus(); return; }
+    const remove = Object.keys(fields).filter((k) => !(k in out));
+    try {
+      await api.vaultPut({ vault: vsel.value, path: p, old_path: path && path !== p ? path : null,
+        fields: out, remove, tier: tsel.value, unattended: una.checked });
+      SFX.play("click");
+      box.classList.add("hidden"); box.replaceChildren();
+      vaultRefresh(true);
+    } catch (e) { vaultErr(e); }
+  };
+  act.append(save, cancel);
+  box.appendChild(act);
+  pin.focus();
+}
+$("#btn-vault-new").onclick = () => vaultEdit("main", "");

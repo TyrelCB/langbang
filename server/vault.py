@@ -82,13 +82,13 @@ class _Vault:
         self._entries: dict[str, dict] = {}
         self.unlocked_at = 0.0
         self.last_used = 0.0
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # _fresh → open re-enters
 
     # -- lifecycle --
     def open(self, password: str, keyfile: str | None = None) -> int:
         from pykeepass import PyKeePass  # heavy import, only when used
         if not self.path.exists():
-            raise VaultError(f"no vault file at {self.path} — create it in KeePassXC first")
+            raise VaultError(f"no vault file at {self.path} — run tools/vault_init.py")
         try:
             kp = PyKeePass(str(self.path), password=password or None, keyfile=keyfile)
         except Exception as e:  # CredentialsError, HeaderChecksumError, …
@@ -148,6 +148,7 @@ class _Vault:
                 "fields": fields,
                 "tier": "sensitive" if tier == "sensitive" else "login",
                 "unattended": str(meta.get("lb_unattended", "")).lower() in ("1", "true", "yes"),
+                "tier_set": (meta.get("lb_tier") or "").strip().lower(),  # explicit override, if any
                 "domain": _site(_host(fields.get("url", ""))),
             }
         return out
@@ -189,6 +190,187 @@ def _idle_minutes() -> float:
         return 15.0
 
 
+# ---- writes (LangBang manages the vault; KeePassXC is optional) ----
+# Every save: re-read if KeePassXC changed the file meanwhile, back the old
+# file up (data/vault/.bak, newest BAK_KEEP per vault), write a temp file and
+# os.replace it in — a crash never leaves a half-written vault.
+BAK_DIR = VAULT_DIR / ".bak"
+BAK_KEEP = 30
+UI_TOKENS: set[str] = set()  # issued at unlock, held by the browser only
+
+
+def new_ui_token() -> str:
+    import secrets
+    t = secrets.token_urlsafe(32)
+    UI_TOKENS.add(t)
+    return t
+
+
+def ui_token_ok(t: str | None) -> bool:
+    import hmac
+    return bool(t) and MAIN.is_open and any(hmac.compare_digest(t, x) for x in UI_TOKENS)
+
+
+def _vault(name: str) -> _Vault:
+    v = {"main": MAIN, "auto": AUTO}.get(name or "main")
+    if v is None:
+        raise VaultError(f"unknown vault {name!r} (main | auto)")
+    if not v.is_open:
+        raise VaultError(f"the {v.name} vault is not open")
+    return v
+
+
+def _split(path: str) -> tuple[list[str], str]:
+    parts = [p.strip() for p in (path or "").strip().strip("/").split("/") if p.strip()]
+    if not parts:
+        raise VaultError("entry path is empty — use Group/Title")
+    if any(p in (".", "..") or "{" in p or "}" in p for p in parts):
+        raise VaultError(f"bad entry path {path!r}")
+    return parts[:-1], parts[-1]
+
+
+def _save(v: _Vault) -> None:
+    import shutil
+    BAK_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(BAK_DIR, 0o700)
+    if v.path.exists():
+        bak = BAK_DIR / f"{v.path.stem}-{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000:03d}.kdbx"
+        shutil.copy2(v.path, bak)
+        os.chmod(bak, 0o600)
+        olds = sorted(BAK_DIR.glob(v.path.stem + "-*.kdbx"))
+        for o in olds[:-BAK_KEEP]:
+            o.unlink(missing_ok=True)
+    tmp = v.path.with_suffix(".kdbx.tmp")
+    v._kp.save(filename=str(tmp))
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, v.path)
+    v._mtime = v.path.stat().st_mtime
+    v._entries = v._index(v._kp)
+
+
+def _find(v: _Vault, groups: list[str], title: str, create: bool = False):  # noqa: ANN202
+    kp = v._kp
+    g = kp.root_group
+    for name in groups:
+        nxt = next((c for c in g.subgroups if c.name == name), None)
+        if nxt is None:
+            if not create:
+                return None, None
+            nxt = kp.add_group(g, name)
+        g = nxt
+    e = next((x for x in g.entries if x.title == title), None)
+    return g, e
+
+
+def get_entry(vault: str, path: str) -> dict:
+    """UI-only reveal (token-gated in main.py): every field WITH values."""
+    v = _vault(vault)
+    with v._lock:
+        v._fresh()
+        e = v._entries.get(path.strip().strip("/"))
+    if e is None:
+        raise VaultError(f"no entry {path!r} in the {vault} vault")
+    return {"vault": v.name, "entry": path, **e}
+
+
+def exists(vault: str, path: str) -> dict | None:
+    v = _vault(vault)
+    with v._lock:
+        v._fresh()
+        return v._entries.get(path.strip().strip("/"))
+
+
+def put_entry(vault: str, path: str, fields: dict[str, str] | None = None,
+              remove: list[str] | None = None, tier: str | None = None,
+              unattended: bool | None = None, old_path: str | None = None) -> dict:
+    """Create or update an entry; fields merge (empty string = leave as is is
+    NOT assumed: an explicit "" clears the field). old_path renames/moves."""
+    v = _vault(vault)
+    groups, title = _split(path)
+    with v._lock:
+        v._fresh()
+        kp = v._kp
+        if old_path and old_path.strip("/") != path.strip("/"):
+            og, oe = _find(v, *_split(old_path))
+            if oe is None:
+                raise VaultError(f"no entry {old_path!r} to rename")
+            if _find(v, groups, title)[1] is not None:
+                raise VaultError(f"{path!r} already exists")
+            g, _ = _find(v, groups, title, create=True)
+            kp.move_entry(oe, g)
+            oe.title = title
+        g, e = _find(v, groups, title, create=True)
+        if e is None:
+            e = kp.add_entry(g, title, "", "")
+        for k, val in (fields or {}).items():
+            k = str(k).strip()
+            if not k or k.startswith("lb_"):
+                continue
+            val = "" if val is None else str(val)
+            if k in STD_FIELDS:
+                setattr(e, k, val or None)
+            elif val:
+                e.set_custom_property(k, val, protect=True)
+            elif k in (e.custom_properties or {}):
+                e.delete_custom_property(k)
+        for k in remove or []:
+            if k in STD_FIELDS:
+                setattr(e, k, None)
+            elif k in (e.custom_properties or {}):
+                e.delete_custom_property(k)
+        if tier is not None:
+            if tier in ("", "auto"):
+                if "lb_tier" in (e.custom_properties or {}):
+                    e.delete_custom_property("lb_tier")
+            else:
+                e.set_custom_property("lb_tier", "sensitive" if tier == "sensitive" else "login")
+        if unattended is not None:
+            if unattended:
+                e.set_custom_property("lb_unattended", "true")
+            elif "lb_unattended" in (e.custom_properties or {}):
+                e.delete_custom_property("lb_unattended")
+        e.touch(modify=True)
+        _save(v)
+        key = "/".join([*groups, title])
+        logger.info("vault %s: saved %s", v.name, key)
+        return {"vault": v.name, "entry": key, **{k: x for k, x in v._entries[key].items() if k != "fields"},
+                "fields": sorted(v._entries[key]["fields"])}
+
+
+def delete_entry(vault: str, path: str, field: str = "") -> None:
+    v = _vault(vault)
+    groups, title = _split(path)
+    with v._lock:
+        v._fresh()
+        _, e = _find(v, groups, title)
+        if e is None:
+            raise VaultError(f"no entry {path!r} in the {vault} vault")
+        if field:
+            if field in STD_FIELDS:
+                setattr(e, field, None)
+            elif field in (e.custom_properties or {}):
+                e.delete_custom_property(field)
+            else:
+                raise VaultError(f"{path} has no field {field!r}")
+        else:
+            v._kp.delete_entry(e)  # backup in .bak is the undo
+        _save(v)
+        logger.info("vault %s: deleted %s%s", v.name, path, "." + field if field else "")
+
+
+def generate(length: int = 24, symbols: bool = True) -> str:
+    import secrets
+    import string
+    length = max(8, min(int(length or 24), 128))
+    alpha = string.ascii_letters + string.digits + ("!#%+-._~@^*" if symbols else "")
+    while True:  # at least one of each class
+        pw = "".join(secrets.choice(alpha) for _ in range(length))
+        if (any(c.islower() for c in pw) and any(c.isupper() for c in pw)
+                and any(c.isdigit() for c in pw)
+                and (not symbols or any(not c.isalnum() for c in pw))):
+            return pw
+
+
 # ---- public API ----
 
 def unlock(password: str) -> int:
@@ -198,6 +380,7 @@ def unlock(password: str) -> int:
 
 def lock() -> None:
     MAIN.close()
+    UI_TOKENS.clear()
 
 
 def touch() -> None:
@@ -226,6 +409,7 @@ def _expire() -> None:
     if MAIN.is_open and idle > 0 and time.time() - MAIN.last_used > idle * 60:
         logger.info("vault idle %.0f min — auto-lock", idle)
         MAIN.close()
+        UI_TOKENS.clear()
 
 
 def open_auto() -> bool:

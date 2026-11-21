@@ -1497,3 +1497,11 @@ html[data-theme="light"] .spk-hud-phrase span.on { text-shadow: none; }
 .grant-editor { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
 .grant-editor .btn { align-self: flex-start; }
 .sched-sub.grants { color: var(--cyan); }
+.vault-row .vault-acts { margin-left: auto; display: flex; gap: 4px; }
+.vault-row .btn.armed { color: var(--danger); border-color: var(--danger); }
+.vault-editor { border: 1px solid var(--line); padding: 8px; margin-top: 6px; display: flex; flex-direction: column; gap: 6px; }
+.vault-fields { display: flex; flex-direction: column; gap: 4px; }
+.vault-field { display: flex; gap: 4px; align-items: center; }
+.vault-field .vf-name { width: 9em; flex: none; }
+.vault-field .vf-val { flex: 1; min-width: 0; }
+@media (max-width: 640px) { .vault-field { flex-wrap: wrap; } .vault-field .vf-val { flex-basis: 100%; order: 5; } }

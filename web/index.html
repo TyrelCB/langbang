@@ -344,7 +344,7 @@
       </section>
       <section class="cfg-card wide" data-tab="tools" id="cfg-vault">
         <h3>🔐 SECRET VAULT</h3>
-        <div class="hint">KeePassXC database the agent can <b>use but never see</b>: it writes handles like <code>{{secret:Passwords/Amazon.password}}</code>, LangBang fills the value in only when <code>run_bash</code> (as <code>$LB_S1</code> env) or a browser/MCP tool runs, and every value is shown as <code>‹secret:…›</code> in output, history, trajectory and exports. Groups <code>Cards/</code> and <code>Identity/</code> ask your approval on every use. Create/edit entries in KeePassXC; LangBang only reads <code>data/vault/LangBang.kdbx</code>. Unlock works only over https or localhost.</div>
+        <div class="hint">KeePassXC database the agent can <b>use but never see</b>: it writes handles like <code>{{secret:Passwords/Amazon.password}}</code>, LangBang fills the value in only when <code>run_bash</code> (as <code>$LB_S1</code> env) or a browser/MCP tool runs, and every value is shown as <code>‹secret:…›</code> in output, history, trajectory and exports. Groups <code>Cards/</code> and <code>Identity/</code> ask your approval on every use. Manage entries right here (or let the agent: <code>save_secret</code> generates passwords it never sees; overwrites, deletes and Cards/Identity changes ask you first). Every save keeps a backup in <code>data/vault/.bak</code>; KeePassXC can still open the files. Unlock, reveal and edits work only over https or localhost, from this unlocked page.</div>
         <div id="vault-status" class="hint"></div>
         <div class="row">
           <label>Master password <input id="vault-pw" type="password" autocomplete="off" spellcheck="false" placeholder="unlock for this session"></label>
@@ -354,6 +354,8 @@
         </div>
         <div id="vault-err" class="error hidden"></div>
         <div id="vault-catalog" class="vault-catalog"></div>
+        <div class="row"><button id="btn-vault-new" class="btn ghost sm" type="button">+ NEW ENTRY</button></div>
+        <div id="vault-editor" class="vault-editor hidden"></div>
         <div class="hint">Scheduled tasks can't unlock anything: they use only <code>LangBang-auto.kdbx</code> (opened at startup with a TPM-sealed key) and only the entries you grant per task with 🔑 GRANTS in ⏰ SCHEDULES.</div>
       </section>
       <section class="cfg-card wide" data-tab="alerts" id="cfg-notify">
