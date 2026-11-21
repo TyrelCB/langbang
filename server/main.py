@@ -752,14 +752,15 @@ async def put_schedule_grants(sid: str, body: GrantsBody):
 # ---- 🔐 secret vault (server/vault.py) ----
 
 def _secure_origin(request: Request) -> bool:
-    """The master password may only arrive over TLS or from this box. Caddy's
-    :80 LAN front proxies from loopback too, so a forwarded request must say
-    https; an unforwarded one must come from loopback itself."""
+    """The master password may only arrive over TLS or from this box.
+    uvicorn's proxy-headers already applied Caddy's X-Forwarded-* (trusted
+    from 127.0.0.1 only): via ai.tyrel.cloud the scheme is https and the
+    client is the browser's tailnet IP; via the :80 LAN front it is http +
+    a LAN IP. Direct localhost use: loopback with no forwarding header."""
+    if request.url.scheme == "https":
+        return True
     peer = request.client.host if request.client else ""
-    if peer not in ("127.0.0.1", "::1"):
-        return False
-    fwd = request.headers.get("x-forwarded-proto")
-    return fwd is None or fwd.lower() == "https"
+    return peer in ("127.0.0.1", "::1") and "x-forwarded-for" not in request.headers
 
 
 class VaultUnlock(BaseModel):
