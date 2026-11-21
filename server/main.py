@@ -846,6 +846,28 @@ async def vault_config(body: VaultConfig, request: Request):
     return {**vault.save_cfg(patch), "status": vault.status()}
 
 
+class VaultCreate(BaseModel):
+    path: str
+    password: str
+
+
+@app.post("/api/vault/create")
+async def vault_create(body: VaultCreate, request: Request):
+    """+ NEW DATABASE: create, switch to it and unlock it in one step."""
+    if not _secure_origin(request):
+        raise HTTPException(403, "only over https or localhost")
+    if not vault.status()["locked"]:
+        _need_vault_ui(request)  # switching away from an open vault
+    loop = asyncio.get_running_loop()
+    try:
+        path = await loop.run_in_executor(None, vault.create_db, body.path, body.password)
+        vault.save_cfg({"path": path, "keyfile": ""})
+        await loop.run_in_executor(None, vault.unlock, body.password)
+    except vault.VaultError as e:
+        raise HTTPException(422, str(e))
+    return {**vault.status(), "token": vault.new_ui_token()}
+
+
 @app.get("/api/vault/files")
 async def vault_files(request: Request):
     if not _secure_origin(request):

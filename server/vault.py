@@ -288,6 +288,30 @@ def _eff_tier(key: str, e: dict, c: dict | None = None) -> str:
     return e["tier"]
 
 
+def create_db(path: str, password: str) -> str:
+    """New KDBX4 database (groups Passwords/, Cards/, Identity/), mode 600.
+    Never overwrites."""
+    from pykeepass import create_database
+    p = Path(str(path)).expanduser()
+    if not p.is_absolute():
+        p = VAULT_DIR / p
+    if p.suffix != ".kdbx":
+        raise VaultError("the file name must end in .kdbx")
+    if p.exists():
+        raise VaultError(f"{p} already exists — pick it instead")
+    if len(password or "") < 12:
+        raise VaultError("master password: at least 12 characters")
+    if not p.parent.is_dir():
+        raise VaultError(f"folder {p.parent} doesn't exist")
+    kp = create_database(str(p), password=password)
+    for g in ("Passwords", "Cards", "Identity"):
+        kp.add_group(kp.root_group, g)
+    kp.save()
+    os.chmod(p, 0o600)
+    logger.info("vault: created %s", p)
+    return str(p)
+
+
 def kdbx_files() -> list[str]:
     """Picker candidates: *.kdbx under ~ (depth 4) + data/vault."""
     home = Path.home()

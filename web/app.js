@@ -8674,14 +8674,34 @@ $("#btn-vault-use").onclick = async () => {
 };
 let vaultFilesLoaded = false;
 async function vaultLoadFiles(cur) {
-  const sel = $("#vault-path");
   let files = [];
   try { files = await api.vaultFiles(); } catch {}
   if (cur && !files.includes(cur)) files.unshift(cur);
-  sel.replaceChildren(...files.map((f) => { const o = document.createElement("option"); o.value = f; o.textContent = f.replace(/^\/home\/[^/]+/, "~"); return o; }));
-  sel.value = cur || "";
+  $("#vault-files").replaceChildren(...files.map((f) => { const o = document.createElement("option"); o.value = f; return o; }));
+  if (document.activeElement !== $("#vault-path")) $("#vault-path").value = cur || "";
   vaultFilesLoaded = true;
 }
+$("#vault-path").addEventListener("focus", () => { $("#vault-path").select(); });
+$("#btn-vault-newdb").onclick = () => {
+  const b = $("#vault-newdb");
+  b.classList.toggle("hidden");
+  if (!b.classList.contains("hidden")) $("#vault-newdb-path").focus();
+};
+$("#btn-vault-newdb-go").onclick = async () => {
+  $("#vault-err").classList.add("hidden");
+  const path = $("#vault-newdb-path").value.trim(), pw = $("#vault-newdb-pw").value;
+  if (!path) { $("#vault-newdb-path").focus(); return; }
+  if (pw !== $("#vault-newdb-pw2").value) { vaultErr(new Error("passwords don't match")); return; }
+  try {
+    const r = await J(await fetch("/api/vault/create", { method: "POST", headers: vaultHdr(true), body: JSON.stringify({ path, password: pw }) }));
+    vaultTok(r.token || "");
+    SFX.play("click");
+    $("#vault-newdb").classList.add("hidden");
+    for (const id of ["#vault-newdb-pw", "#vault-newdb-pw2"]) $(id).value = "";
+  } catch (e) { vaultErr(e); }
+  vaultFilesLoaded = false;
+  vaultRefresh(true);
+};
 async function vaultScope(st) {
   const box = $("#vault-scope");
   if (st.locked || !vaultTok()) { box.classList.add("hidden"); return; }
