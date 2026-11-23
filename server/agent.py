@@ -595,16 +595,30 @@ def prefills_answer(s: dict, thinking: bool | None = None) -> bool:
     return not on and "inkling" in (s.get("model") or "").lower()
 
 
+# Inkling's <|end_message|>. Prefilled into answer mode, the model often
+# blurts an answer, closes the message, then opens a <|content_thinking|>
+# turn to correct itself (7-9/12 samples); stopping at the first message end
+# keeps "off" off (0/12). No-tools requests only: a tool call comes AFTER a
+# first message, so this stop would cut it off.
+INKLING_END_MESSAGE = 200010
+
+
+def answer_stop() -> dict:
+    return {"stop_token_ids": [INKLING_END_MESSAGE]}
+
+
 def answer_prefill(payload: dict) -> None:
     """Append the answer-mode prefill (prefills_answer) to a chat payload.
     Skipped when tools are offered — prefilled into text mode, Inkling
     declined a requested tool 1 time in 3 — and when the request already
-    ends in an assistant turn (_resume_payload's open <think>)."""
+    ends in an assistant turn (_resume_payload's open <think>). The ee93
+    vLLM also prefills server-side on enable_thinking=false (patched
+    renderer) — this client copy keeps working without that patch."""
     msgs = payload.get("messages")
     if not msgs or payload.get("tools") or msgs[-1].get("role") == "assistant":
         return
     msgs.append({"role": "assistant", "content": " "})
-    payload["extra_body"] = {**(payload.get("extra_body") or {}),
+    payload["extra_body"] = {**(payload.get("extra_body") or {}), **answer_stop(),
                              "continue_final_message": True, "add_generation_prompt": False}
 
 

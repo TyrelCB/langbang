@@ -656,6 +656,12 @@ def _agent_cfg(name: str, s: dict, p: dict) -> dict:
     LangBang's sampling + thinking controls."""
     from . import agent
     url, eb, mt = s["base_url"].rstrip("/"), agent.extra_body(s), int(p["max_tokens"])
+    if agent.prefills_answer(s):
+        # Harbor builds its own messages, so no client prefill: the ee93 vLLM
+        # prefills answer mode on enable_thinking=false (patched renderer);
+        # the agents here send commands as text (no tools API), so the
+        # first-message stop is safe and keeps thinking from re-opening
+        eb = {**(eb or {}), **agent.answer_stop()}
     if name == "mini-swe-agent":  # an inline config layers over mini.yaml; api_base goes inside it
         # _skip_mcp_handler: litellm ≥1.10x imports its MCP bridge (needs the `mcp`
         # package, which Harbor's install doesn't add) on any call with tools
