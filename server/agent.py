@@ -588,9 +588,11 @@ def no_think(s: dict) -> dict:
 def prefills_answer(s: dict, thinking: bool | None = None) -> bool:
     """Thinking off on Inkling: its template has no enable_thinking, but the
     model picks <|content_thinking|> vs <|content_text|> itself right after
-    <|message_model|> — prefilling an assistant " " renders
-    <|message_model|><|content_text|> " " and the server continues it in
-    answer mode: zero reasoning tokens (vs a GPQA trace hitting 32k)."""
+    <|message_model|> — prefilling an EMPTY assistant turn renders
+    <|message_model|><|content_text|> and the server continues it in answer
+    mode: zero reasoning tokens (vs a GPQA trace hitting 32k). Not " ": a
+    lone space token blocks the model's " {" token, so JSON replies lost
+    their opening brace and terminus-2 looped on parse errors (437 steps)."""
     on = bool(s.get("enable_thinking")) if thinking is None else thinking
     return not on and "inkling" in (s.get("model") or "").lower()
 
@@ -617,7 +619,7 @@ def answer_prefill(payload: dict) -> None:
     msgs = payload.get("messages")
     if not msgs or payload.get("tools") or msgs[-1].get("role") == "assistant":
         return
-    msgs.append({"role": "assistant", "content": " "})
+    msgs.append({"role": "assistant", "content": ""})
     payload["extra_body"] = {**(payload.get("extra_body") or {}), **answer_stop(),
                              "continue_final_message": True, "add_generation_prompt": False}
 
