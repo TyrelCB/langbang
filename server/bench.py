@@ -437,6 +437,10 @@ async def _ask(c: httpx.AsyncClient, s: dict, prompt: str, temperature: float) -
     from . import agent  # imports bench-free modules only; deferred to keep startup lean
     body = {"model": s["model"], "max_tokens": s["max_tokens"], "temperature": temperature,
             "messages": [{"role": "user", "content": prompt}], **(agent.extra_body(s) or {})}
+    if agent.prefills_answer(s):  # Inkling thinking-off: answer mode, no reasoning
+        body["extra_body"] = {}
+        agent.answer_prefill(body)
+        body.update(body.pop("extra_body"))
     url = s["base_url"].rstrip("/") + "/chat/completions"
     hdr = {"Authorization": f"Bearer {s.get('api_key') or 'none'}"}
     for attempt in range(6):

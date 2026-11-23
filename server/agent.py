@@ -435,6 +435,9 @@ class SGlangChatOpenAI(ChatOpenAI):
     """
 
     keep_reasoning: str = "off"
+    # thinking-off on a model with no off switch (Inkling): open the reply
+    # already in answer mode (see answer_prefill)
+    lb_prefill_answer: bool = False
     # the main agent's system prompt (build_agent): a request that starts with
     # it is the thread's own model view and is kept for /btw (_capture)
     lb_main_prompt: str = ""
@@ -444,6 +447,8 @@ class SGlangChatOpenAI(ChatOpenAI):
         for m in payload.get("messages") or []:
             defang_message(m)
         self._resume_payload(input_, payload)
+        if self.lb_prefill_answer:
+            answer_prefill(payload)
         if self.lb_main_prompt:
             self._capture(input_, payload)
         return payload
@@ -577,7 +582,30 @@ def no_think(s: dict) -> dict:
     these calls have small budgets — titles 24 tokens, recap 700 — so a
     thinking model spends all of it reasoning and returns empty content
     (seen: blank recaps, a compaction summary of ".")."""
-    return {"extra_body": extra_body(s, thinking=False)}
+    return {"extra_body": extra_body(s, thinking=False), "lb_prefill_answer": prefills_answer(s, False)}
+
+
+def prefills_answer(s: dict, thinking: bool | None = None) -> bool:
+    """Thinking off on Inkling: its template has no enable_thinking, but the
+    model picks <|content_thinking|> vs <|content_text|> itself right after
+    <|message_model|> — prefilling an assistant " " renders
+    <|message_model|><|content_text|> " " and the server continues it in
+    answer mode: zero reasoning tokens (vs a GPQA trace hitting 32k)."""
+    on = bool(s.get("enable_thinking")) if thinking is None else thinking
+    return not on and "inkling" in (s.get("model") or "").lower()
+
+
+def answer_prefill(payload: dict) -> None:
+    """Append the answer-mode prefill (prefills_answer) to a chat payload.
+    Skipped when tools are offered — prefilled into text mode, Inkling
+    declined a requested tool 1 time in 3 — and when the request already
+    ends in an assistant turn (_resume_payload's open <think>)."""
+    msgs = payload.get("messages")
+    if not msgs or payload.get("tools") or msgs[-1].get("role") == "assistant":
+        return
+    msgs.append({"role": "assistant", "content": " "})
+    payload["extra_body"] = {**(payload.get("extra_body") or {}),
+                             "continue_final_message": True, "add_generation_prompt": False}
 
 
 REASONING_EFFORTS = config.EFFORTS
@@ -656,6 +684,7 @@ def model(s: dict) -> ChatOpenAI:
         stream_chunk_timeout=600,
         extra_body=extra_body(s),
         keep_reasoning=s.get("keep_reasoning") or "off",
+        lb_prefill_answer=prefills_answer(s),
         # deepagents' read_file returns media as base64 content blocks and
         # only scrubs block types the profile marks False (missing = assumed
         # supported). Unset, a read_file on a .wav/.mp4 shipped ~350k tokens
