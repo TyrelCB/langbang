@@ -693,6 +693,40 @@ async def fast_stream(cid: str, c: dict, said: str, t0: float, line: str):
     yield ev
 
 
+_WARM_LINE = "Okay, one moment."
+_WARM_PCM = bytes(16000)  # 0.5 s of 16 kHz silence
+
+
+def _warm_engines() -> str:
+    """One real (uncached) synthesis + one STT pass. The greeting comes from
+    the line cache, so without this the caller's first question paid for
+    paging Pocket TTS / mac-stt back in: first audio 8-11 s vs ~2 s later
+    (calls 480790 11-13, bf39a1 11-17, 34949e 11-23)."""
+    t, out = time.time(), []
+    try:
+        v = _voice()
+        if (v.get("tts_provider") or "gtts") == "pocket":
+            sum(len(b) for b in voice.pocket_pcm(voice.prepare(_WARM_LINE, {"voice": v}), v, None))
+            out.append(f"tts {time.time() - t:.1f}s")
+    except Exception as e:  # noqa: BLE001 — warm-up never fails a call
+        out.append(f"tts failed: {e}")
+    t = time.time()
+    try:
+        transcribe(_WARM_PCM)
+        out.append(f"stt {time.time() - t:.1f}s")
+    except Exception as e:  # noqa: BLE001
+        out.append(f"stt failed: {e}")
+    return ", ".join(out)
+
+
+async def warm_call() -> None:
+    """At call start (the GV press-1 menu + greeting give ~15 s before the
+    caller's first words end): warm voice, STT and the prompt prefix together."""
+    t0 = time.time()
+    eng, _ = await asyncio.gather(run_in_threadpool(_warm_engines), prewarm(with_voice=False))
+    logger.warning("call warm-up %.1fs (%s)", time.time() - t0, eng)
+
+
 async def prewarm(with_voice: bool = True) -> None:
     """Pay cold costs before a caller does: the voice, then the prompt
     prefix — the system prompt ALONE, one token, so Ollama checkpoints its
@@ -809,7 +843,7 @@ async def ivr_start(request: Request, call_id: str = "", out: str = "wav", rate:
             raise HTTPException(502, f"TTS failed: {e}")
         audio = {"audio_b64": base64.b64encode(wav).decode(), "audio_format": "wav",
                  "sample_rate": rate, "tts_s": round(time.time() - t, 2)}
-    asyncio.create_task(prewarm(with_voice=False))
+    asyncio.create_task(warm_call())
     return {"call_id": cid, "reply": greet, **audio}
 
 
