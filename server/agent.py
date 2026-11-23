@@ -612,6 +612,12 @@ def extra_body(s: dict, thinking: bool | None = None) -> dict | None:
     # anything else raises in the template → only pass known values
     if on and s.get("reasoning_effort") in REASONING_EFFORTS:
         kw["reasoning_effort"] = s["reasoning_effort"]
+    elif not on and "inkling" in (s.get("model") or "").lower():
+        # Inkling's template has NO enable_thinking — it always thinks, at
+        # reasoning_effort (default 0.9 when unset), so "off" ran near-max.
+        # "none" (its effort_map → 0.0) is the closest it gets to off. Inkling
+        # only: Qwen3.8's template raises on any effort but low|medium|xhigh.
+        kw["reasoning_effort"] = "none"
     out = {"chat_template_kwargs": kw}
     budget = int(s.get("thinking_budget") or 0)
     if on and budget > 0:
