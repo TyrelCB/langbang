@@ -584,6 +584,7 @@ REASONING_EFFORTS = config.EFFORTS
 COMPACTION_TAG = "lb_compaction"
 
 
+NO_THINK_FLOOR = 1024  # thinking cap for models that can't turn thinking off (Inkling)
 ANSWER_RESERVE = 4096  # output tokens a thinking budget always leaves for the answer
 BUDGET_MESSAGE = ("\n\n(Thinking budget reached — stop reasoning now and give the "
                   "best answer from what you have.)\n")
@@ -612,15 +613,19 @@ def extra_body(s: dict, thinking: bool | None = None) -> dict | None:
     # anything else raises in the template → only pass known values
     if on and s.get("reasoning_effort") in REASONING_EFFORTS:
         kw["reasoning_effort"] = s["reasoning_effort"]
-    elif not on and "inkling" in (s.get("model") or "").lower():
-        # Inkling's template has NO enable_thinking — it always thinks, at
-        # reasoning_effort (default 0.9 when unset), so "off" ran near-max.
-        # "none" (its effort_map → 0.0) is the closest it gets to off. Inkling
-        # only: Qwen3.8's template raises on any effort but low|medium|xhigh.
+    # Inkling's template has NO enable_thinking — it always thinks, so "off"
+    # is approximated: effort "none" (its effort_map → 0.0; Qwen3.8's template
+    # raises on it, hence Inkling only) plus a hard vLLM thinking_token_budget.
+    # Effort alone barely shortens traces (GPQA runs still hit 32k); the budget
+    # cuts cleanly — at 1 the model derails to max_tokens, at ≥1024 it answers.
+    fake_off = not on and "inkling" in (s.get("model") or "").lower()
+    if fake_off:
         kw["reasoning_effort"] = "none"
     out = {"chat_template_kwargs": kw}
     budget = int(s.get("thinking_budget") or 0)
-    if on and budget > 0:
+    if fake_off:
+        budget = max(budget, NO_THINK_FLOOR)
+    if (on or fake_off) and budget > 0:
         mt = int(s.get("max_tokens") or 0)
         if mt:  # the answer keeps ANSWER_RESERVE (or half, for tiny max_tokens)
             budget = min(budget, max(mt - ANSWER_RESERVE, mt // 2))
