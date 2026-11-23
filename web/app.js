@@ -490,6 +490,220 @@ function buildToolCard(label, input) {
   return d;
 }
 
+// ---------- readable tool cards ----------
+// One card per call, filled in two halves: tcNew() = header + formatted
+// ARGS (tool_start / history tool_call), tcResult() = formatted OUTPUT +
+// ✓/✕ status (tool_end / history ToolMessage). Header is rebuilt by tcHead()
+// from card._tc so every state change (running → ok/err/abort) is one call.
+const TC_KIND = {
+  run_bash: ["RUN", "▶"], shell: ["RUN", "▶"], execute: ["RUN", "▶"],
+  bg_start: ["BG", "▶"], bg_status: ["BG", "◔"], bg_stop: ["BG", "■"],
+  read_file: ["READ", "◧"], write_file: ["WRITE", "✎"], edit_file: ["EDIT", "✎"],
+  list_dir: ["LIST", "▤"], ls: ["LIST", "▤"], glob: ["FIND", "⌕"], grep: ["GREP", "⌕"],
+  web_search: ["SEARCH", "⌕"], crawl_url: ["FETCH", "⇣"],
+  semantic_search: ["RAG", "≈"], semantic_search_image: ["RAG", "≈"], rag_search: ["RAG", "≈"],
+  auto_search: ["RAG", "≈"], generate_image: ["IMAGE", "◩"], write_todos: ["TODOS", "☰"],
+  remember: ["MEMORY", "◆"], forget: ["MEMORY", "◇"],
+};
+const TC_CODE_KEYS = { command: "bash", cmd: "bash", code: null, script: "bash", query: null };
+const TC_HL_MAX = 50_000;
+
+// one-line "what is this call doing" for the header
+function tcDesc(name, a) {
+  if (!a || typeof a !== "object") return "";
+  const first = (s) => String(s).split("\n").find((l) => l.trim()) || "";
+  if (typeof a.description === "string" && a.description.trim()) return a.description.trim();
+  if (a.command || a.cmd) return first(a.command || a.cmd);
+  if (name === "write_todos" && Array.isArray(a.todos)) {
+    const n = (st) => a.todos.filter((t) => t.status === st).length;
+    return `${a.todos.length} items · ${n("completed")} done · ${n("in_progress")} active`;
+  }
+  if (name === "grep" && a.pattern) return `/${a.pattern}/ ${a.path || ""}`.trim();
+  if (name === "glob" && a.pattern) return `${a.pattern}${a.path ? "  in " + a.path : ""}`;
+  for (const k of ["file_path", "path", "url", "query", "pattern", "prompt", "title", "id", "name"])
+    if (typeof a[k] === "string" && a[k].trim()) return first(a[k]);
+  return "";
+}
+
+// <pre><code> with hljs colors and (for multi-line) a line-number gutter
+function tcCode(text, lang, cls) {
+  text = String(text ?? "");
+  const box = el("div", "tc-code" + (cls ? " " + cls : ""));
+  const lines = text.split("\n").length;
+  // numbered: code/args (lines matter); results wrap instead (no gutter)
+  if (!/tc-result/.test(cls || "") && (lines > 1 || /tc-cmd/.test(cls || ""))) {
+    const g = el("pre", "tc-gutter");
+    g.textContent = Array.from({ length: lines }, (_, i) => i + 1).join("\n");
+    box.appendChild(g);
+  }
+  const pre = el("pre", "tc-src");
+  const code = el("code");
+  code.textContent = text;
+  if (typeof hljs !== "undefined" && text.length <= TC_HL_MAX) {
+    try {
+      if (lang && hljs.getLanguage(lang))
+        code.innerHTML = hljs.highlight(text, { language: lang, ignoreIllegals: true }).value;
+      else if (lang === undefined && text.length < 4000 && lines > 1)
+        code.innerHTML = hljs.highlightAuto(text).value;
+    } catch { /* plain text it is */ }
+  }
+  pre.appendChild(code);
+  box.appendChild(pre);
+  return box;
+}
+
+const tcSection = (label, extra) => {
+  const s = el("div", "tc-sec");
+  const h = el("div", "tc-label", label);
+  if (extra) h.appendChild(extra);
+  s.appendChild(h);
+  return s;
+};
+
+// JSON-looking text → pretty JSON; anything else → null
+function tcMaybeJSON(s) {
+  const t = String(s).trim();
+  if (!/^[[{]/.test(t)) return null;
+  try { return JSON.stringify(JSON.parse(t), null, 2); } catch { return null; }
+}
+
+function tcInputView(name, a, desc) {
+  const wrap = el("div", "tc-in");
+  if (a == null) return wrap;
+  if (typeof a !== "object") { wrap.appendChild(tcCode(String(a), null)); return wrap; }
+  const path = a.file_path || a.path;
+  const pathLang = typeof path === "string" ? edLangFor(path) : null;
+  if (name === "write_todos" && Array.isArray(a.todos)) {
+    const ul = el("ul", "tc-todos");
+    for (const t of a.todos) {
+      const st = t.status || "pending";
+      const li = el("li", "tc-todo " + st,
+        (st === "completed" ? "✓ " : st === "in_progress" ? "◐ " : "○ ") + (t.content || t.title || JSON.stringify(t)));
+      ul.appendChild(li);
+    }
+    wrap.appendChild(ul);
+    return wrap;
+  }
+  if (name === "edit_file" && ("old_string" in a || "new_string" in a)) {
+    const kv = el("div", "tc-kv");
+    for (const [k, v] of Object.entries(a))
+      if (k !== "old_string" && k !== "new_string" && v !== desc) tcKV(kv, k, v);
+    if (kv.childElementCount) wrap.appendChild(kv);
+    const s1 = tcSection("− REPLACE");
+    s1.appendChild(tcCode(a.old_string, pathLang, "tc-del"));
+    const s2 = tcSection("+ WITH");
+    s2.appendChild(tcCode(a.new_string, pathLang, "tc-add"));
+    wrap.append(s1, s2);
+    return wrap;
+  }
+  const kv = el("div", "tc-kv");
+  const blocks = [];
+  for (const [k, v] of Object.entries(a)) {
+    const isCode = k in TC_CODE_KEYS || (k === "content" && typeof v === "string");
+    if (typeof v === "string" && (isCode || v.includes("\n") || v.length > 160)) {
+      const lang = k === "content" ? pathLang : (TC_CODE_KEYS[k] ?? (k in TC_CODE_KEYS ? undefined : null));
+      const sec = tcSection(k.toUpperCase());
+      sec.appendChild(tcCode(v, lang, k === "command" || k === "cmd" ? "tc-cmd" : ""));
+      blocks.push(sec);
+    } else if (v && typeof v === "object") {
+      const sec = tcSection(k.toUpperCase());
+      sec.appendChild(tcCode(JSON.stringify(v, null, 2), "json"));
+      blocks.push(sec);
+    } else if (!(typeof v === "string" && v === desc)) tcKV(kv, k, v); // header already says it
+  }
+  if (kv.childElementCount) wrap.appendChild(kv);
+  wrap.append(...blocks);
+  return wrap;
+}
+function tcKV(kv, k, v) {
+  kv.append(el("span", "tc-k", k), el("span", "tc-v" + (typeof v === "string" ? "" : " lit"),
+    typeof v === "string" ? v : JSON.stringify(v)));
+}
+
+// shell-shaped output (local_tools.run_bash) → {exit, stdout, stderr}
+function tcShellParts(s) {
+  const m = /^exit=(-?\d+)\n--- stdout ---\n([\s\S]*?)\n?--- stderr ---\n?([\s\S]*)$/.exec(s);
+  return m ? { exit: +m[1], stdout: m[2], stderr: m[3] } : null;
+}
+
+function tcOutputView(text, failed) {
+  const wrap = el("div", "tc-out" + (failed ? " failed" : ""));
+  let s = typeof text === "string" ? text : JSON.stringify(text, null, 2);
+  s = s ?? "";
+  const sh = tcShellParts(s);
+  if (sh) {
+    const out = sh.stdout.replace(/\n+$/, ""), err = sh.stderr.replace(/\n+$/, "");
+    if (out || !err) {
+      const sec = tcSection("STDOUT");
+      const js = tcMaybeJSON(out);
+      sec.appendChild(out ? tcCode(js || out, js ? "json" : null, "tc-result") : el("div", "tc-empty", "(no output)"));
+      wrap.appendChild(sec);
+    }
+    if (err) {
+      const sec = tcSection("STDERR");
+      sec.appendChild(tcCode(err, null, "tc-result tc-stderr"));
+      wrap.appendChild(sec);
+    }
+    return { node: wrap, exit: sh.exit };
+  }
+  const sec = tcSection(failed ? "ERROR" : "RESULT");
+  const js = tcMaybeJSON(s);
+  sec.appendChild(s.trim() ? tcCode(js || s, js ? "json" : null, "tc-result") : el("div", "tc-empty", "(empty)"));
+  wrap.appendChild(sec);
+  return { node: wrap, exit: null };
+}
+
+// (re)draw the header from card._tc = {name, label, desc, state, dur, exit}
+function tcHead(card) {
+  const t = card._tc;
+  const s = card.querySelector(":scope > summary");
+  const keep = [...s.querySelectorAll(":scope > .ed-open, :scope > .block-voice")];
+  s.textContent = "";
+  s.className = "tc-head";
+  const [kind, ico] = TC_KIND[t.name] || ["TOOL", "⚙"];
+  if (t.label) s.appendChild(el("span", "tc-name", t.label));
+  else s.append(el("span", "tc-ico", ico), el("span", "tc-kind", kind), el("span", "tc-name", t.name));
+  if (t.desc) s.appendChild(el("span", "tc-desc", t.desc));
+  else s.appendChild(el("span", "tc-desc"));
+  const st = el("span", "tc-stat " + t.state);
+  const dur = typeof t.dur === "number" ? fmtShort(t.dur) : "";
+  const exitTxt = t.exit != null && t.exit !== 0 ? `exit ${t.exit}` : "";
+  st.textContent = {
+    run: "running…",
+    ok: ["✓", exitTxt, dur].filter(Boolean).join(" "),
+    warn: ["⚠", exitTxt, dur].filter(Boolean).join(" "),
+    err: ["✕ failed", dur].filter(Boolean).join(" "),
+    abort: "✕ stopped",
+    retry: "⟳ resend requested",
+  }[t.state] || "";
+  s.appendChild(st);
+  s.append(...keep);
+  card.classList.toggle("errored", t.state === "err" || t.state === "abort");
+  card.classList.toggle("tc-warn", t.state === "warn");
+}
+
+function tcNew(name, args, label, state = "run") {
+  const d = el("details", "block tool tc");
+  d.appendChild(el("summary"));
+  d._tc = { name, label: label || null, desc: tcDesc(name, args), state, dur: null, exit: null };
+  if (args != null) {
+    const iv = tcInputView(name, args, d._tc.desc);
+    if (iv.childElementCount) d.appendChild(iv);
+  }
+  tcHead(d);
+  return d;
+}
+
+function tcResult(card, output, { failed = false, dur = null } = {}) {
+  const { node, exit } = tcOutputView(output, failed);
+  card.appendChild(node);
+  Object.assign(card._tc, {
+    dur, exit,
+    state: failed ? "err" : exit != null && exit !== 0 ? "warn" : "ok",
+  });
+  tcHead(card);
+}
+
 function addBlock(kind, label, host) {
   const d = el("details", "block " + kind);
   const s = el("summary", null, label);
@@ -596,6 +810,9 @@ function consultStrip(list) {
 }
 // history replay: a turn's consulted list → its last answer bubble
 const histConsult = { list: [], bubble: null };
+// tool-call cards awaiting their ToolMessage (history has no call ids, but
+// results follow their calls in order — first open card with that name wins)
+const histTools = [];
 function flushHistConsult() {
   if (histConsult.list.length && histConsult.bubble) histConsult.bubble.appendChild(consultStrip(histConsult.list));
   histConsult.list = []; histConsult.bubble = null;
@@ -677,6 +894,7 @@ function renderHistoryInner(msgs) {
   // compaction — archived heads keep their sched stamps in their JSON.
   let curSched = null;
   histConsult.list = []; histConsult.bubble = null;
+  histTools.length = 0;
   for (const [i, m] of msgs.entries()) {
     histIdx = i; // addMsg stamps it: ⑂ then names its exact /messages index
     // one malformed step must never truncate the rest of the transcript —
@@ -813,14 +1031,33 @@ function renderHistoryMsg(m, curSched) {
           b.querySelector("pre").textContent = tc.args?.plan || "";
           continue;
         }
-        const b = addBlock(tc.consult ? "tool consult" : "tool", tc.consult ? consultLabel(tc.consult) : `⚙ ${tc.name}`);
-        if (tc.consult) histConsult.list.push(...tc.consult);
-        b.querySelector("pre").textContent = "→ " + JSON.stringify(tc.args, null, 2);
+        const b = tcNew(tc.name, tc.args, tc.consult ? consultLabel(tc.consult) : null, "none");
+        if (tc.consult) { b.classList.add("consult"); histConsult.list.push(...tc.consult); }
+        if (bulkRender && histIdx != null) b.dataset.hidx = histIdx;
+        $("#chat").appendChild(b);
         edLink(b, tc.args);
+        histTools.push(b);
       }
     } else if (m.role === "tool") {
       const failed = m.status === "error";
       const gate = GATE_TOOLS.has(m.tool_name) && !failed;
+      const ti = gate ? -1 : histTools.findIndex((c) => c._tc.name === m.tool_name);
+      if (ti >= 0) {
+        const card = histTools.splice(ti, 1)[0];
+        if (failed && lostTodos(m.tool_name, textOf(m.content))) {
+          card._tc.state = "retry"; tcHead(card); card.classList.add("retried");
+        } else tcResult(card, textOf(m.content).slice(0, 20000), { failed });
+        if (failed) card.open = true;
+        for (const md of m.media || []) {
+          if (!/^image\//.test(md.mime || "")) continue;
+          const img = el("img", "tool-media");
+          img.loading = "lazy";
+          img.src = "/api/media?path=" + encodeURIComponent(md.path);
+          img.title = md.path;
+          card.appendChild(img);
+        }
+        return curSched;
+      }
       const b = addBlock(gate ? "tool gate-hist" : failed ? "tool errored" : "tool",
         gate ? "◆ YOUR ANSWER" : failed ? `✕ ${m.tool_name} failed` : `⚙ ${m.tool_name} result`);
       b.querySelector("pre").textContent = textOf(m.content).slice(0, 20000);
@@ -1433,7 +1670,7 @@ function runPipeline(run) {
         card.appendChild(body);
         run.subs.set(ev.run_id, { card, body, t0: Date.now() });
       } else {
-        card = buildToolCard(`${ev.consult ? consultLabel(ev.consult) : "⚙ " + ev.name} …`, ev.input);
+        card = tcNew(ev.name, ev.input, ev.consult ? consultLabel(ev.consult) : null);
         if (ev.consult) {
           card._label = consultLabel(ev.consult);
           card.classList.add("consult");
@@ -1460,6 +1697,9 @@ function runPipeline(run) {
         card.querySelector("summary").textContent = `✓ DEEP DIVING — ${fmtClock(ev.dur || 0)}`;
         card.open = false;
         run.subs.delete(ev.run_id);
+      } else if (card._tc) {
+        tcResult(card, ev.output, { dur: typeof ev.dur === "number" ? ev.dur : null });
+        card.open = false;
       } else {
         card.querySelector("summary").textContent =
           `${card._label || "⚙ " + ev.name}${typeof ev.dur === "number" ? " · " + fmtShort(ev.dur) : ""}`;
@@ -1477,9 +1717,14 @@ function runPipeline(run) {
         // sglang's tool-call parser dropped the arguments; the server already
         // told the model to resend (agent.py _FileArgAlias.RESEND) — a retry,
         // not a failure worth a red alarm
-        card.querySelector("summary").textContent = "⟳ write_todos lost its arguments in transit — resend requested";
+        if (card._tc) { card._tc.state = "retry"; card._tc.desc = "lost its arguments in transit"; tcHead(card); }
+        else card.querySelector("summary").textContent = "⟳ write_todos lost its arguments in transit — resend requested";
         card.classList.add("retried");
         card.open = false;
+        run.subs.delete(ev.run_id);
+      } else if (card && card._tc) {
+        tcResult(card, ev.error || "tool error", { failed: true, dur: typeof ev.dur === "number" ? ev.dur : null });
+        card.open = true;
         run.subs.delete(ev.run_id);
       } else if (card) {
         card.querySelector("summary").textContent =
@@ -1584,6 +1829,7 @@ function runPipeline(run) {
       attachSpeak(asstMsg, asstRaw); // final answer bubble (partial on error — speakable anyway)
     }
     for (const card of run.tools.values()) {
+      if (card._tc) { card._tc.state = "abort"; tcHead(card); card.open = false; continue; }
       const s = card.querySelector("summary");
       s.textContent = "✕ " + s.textContent.replace(/ …$/, "");
       card.open = false;

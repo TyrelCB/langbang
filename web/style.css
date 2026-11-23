@@ -1511,3 +1511,62 @@ html[data-theme="light"] .spk-hud-phrase span.on { text-shadow: none; }
 .vault-grow { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
 .vault-grow select { font-size: .8em; }
 #vault-path { max-width: 100%; }
+
+/* ---------- readable tool cards (tcNew/tcResult in app.js) ---------- */
+.block.tool.tc { max-width: min(92%, 1100px); width: 100%; border: 1px solid var(--line);
+  background: var(--bg2); border-radius: 6px; overflow: hidden; flex-shrink: 0; }
+.block.tool.tc > summary.tc-head { display: flex; align-items: center; gap: 8px; min-width: 0;
+  list-style: none; border-left: 3px solid var(--green); color: var(--text); letter-spacing: .5px;
+  padding: 5px 10px; background: var(--panel); }
+.block.tool.tc > summary.tc-head::-webkit-details-marker { display: none; }
+.block.tool.tc > summary.tc-head::after { content: "▸"; color: var(--muted); flex: none;
+  transition: transform .12s; }
+.block.tool.tc[open] > summary.tc-head::after { transform: rotate(90deg); }
+.block.tool.tc[open] > summary.tc-head { border-bottom: 1px solid var(--line); }
+.tc-ico { color: var(--green); flex: none; }
+.tc-kind { color: var(--green); font-weight: 700; letter-spacing: 1px; flex: none; }
+.tc-name { color: var(--cyan); flex: none; }
+.tc-desc { color: var(--text); opacity: .85; flex: 1; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.tc-desc:not(:empty)::before { content: "— "; color: var(--muted); }
+.tc-stat { flex: none; font-size: 11px; color: var(--muted); }
+.tc-stat.ok { color: var(--green); }
+.tc-stat.warn { color: var(--orange); }
+.tc-stat.err, .tc-stat.abort { color: var(--danger); }
+.tc-stat.retry { color: var(--orange); }
+.tc-stat.run { color: var(--orange); animation: lb-pulse 1.6s ease-in-out infinite; }
+.block.tool.tc.errored > summary.tc-head { border-left-color: var(--danger); }
+.block.tool.tc.errored .tc-ico, .block.tool.tc.errored .tc-kind { color: var(--danger); }
+.block.tool.tc.tc-warn > summary.tc-head, .block.tool.tc.retried > summary.tc-head,
+.block.tool.tc.consult > summary.tc-head { border-left-color: var(--orange); }
+.block.tool.tc.consult .tc-name { color: var(--orange); }
+.block.tool.tc .ed-open, .block.tool.tc .block-voice { flex: none; }
+
+.tc-in, .tc-out { padding: 6px 10px 8px; display: flex; flex-direction: column; gap: 6px; }
+.tc-out { border-top: 1px dashed var(--line); }
+.tc-sec { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.tc-label { font-size: 10px; letter-spacing: 1.5px; color: var(--muted); }
+.tc-out.failed .tc-label { color: var(--danger); }
+.tc-kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; font-size: 12px; }
+.tc-k { color: var(--muted); }
+.tc-v { color: var(--orange); word-break: break-word; }
+.tc-v.lit { color: #ffd166; }
+.tc-code { display: flex; min-width: 0; background: var(--bg); border: 1px solid var(--line);
+  border-radius: 4px; max-height: 420px; overflow: auto; }
+.tc-code pre { margin: 0; padding: 6px 8px; background: transparent; font-size: 12px;
+  line-height: 1.5; white-space: pre; overflow: visible; }
+.tc-gutter { flex: none; color: var(--muted); opacity: .55; text-align: right; user-select: none;
+  border-right: 1px solid var(--line); position: sticky; left: 0; background: var(--bg) !important; }
+.tc-src { flex: 1; min-width: 0; }
+.tc-code.tc-result pre.tc-src { white-space: pre-wrap; word-break: break-word; }
+.tc-code.tc-cmd { border-left: 2px solid var(--green); }
+.tc-code.tc-stderr { border-left: 2px solid var(--danger); }
+.tc-code.tc-del { border-left: 2px solid var(--danger); background: rgba(255, 77, 94, .06); }
+.tc-code.tc-add { border-left: 2px solid var(--green); background: rgba(67, 224, 138, .06); }
+.tc-empty { color: var(--muted); font-style: italic; font-size: 12px; }
+.tc-todos { margin: 0; padding: 0; list-style: none; font-size: 12px; }
+.tc-todo { padding: 1px 0; }
+.tc-todo.completed { color: var(--muted); text-decoration: line-through; }
+.tc-todo.in_progress { color: var(--cyan); }
+.block.tool.tc .tool-media { margin: 0 10px 8px; }
+html[data-theme="light"] .tc-code, html[data-theme="light"] .tc-gutter { background: #f7fbfe !important; }
