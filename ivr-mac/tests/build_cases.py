@@ -15,6 +15,12 @@ while our side was talking (or right after) is dropped: on the caller leg
 that is mostly our echo, and replaying it out of context makes junk turns.
 
 Re-run after new calls:  .venv/bin/python tests/build_cases.py
+
+  --screen <call_id>      print a draft cases/screens.json entry for a new
+                          scripted 'virtual recruiter' call: its caller lines,
+                          tagged with the checkpoints the existing screens use
+                          (same match/no_match). Review it, REPLACE agency and
+                          recruiter names (public repo), then add it.
 """
 import argparse
 import glob
@@ -115,6 +121,67 @@ def build_history() -> int:
     return len(out)
 
 
+# caller wording -> checkpoint (first hit wins; order matters)
+SCREEN_TAGS = [
+    (r"am i speaking with", "identity"),
+    (r"good time to talk", "good_time"),
+    (r"opt.?out", "recording_consent"),
+    (r"authorized to work", "work_auth"),
+    (r"sponsorship", "sponsorship"),
+    (r"\bw-?2\b|corp", "w2_c2c"),
+    (r"zip code", "zip"),
+    (r"commute|relocat", "commute"),
+    (r"elaborate on", "elaborate"),
+    (r"did you say", "pay_confirm"),
+    (r"client'?s range", "pay_below_range"),
+    (r"pay rate|compensation|salary", "pay_target"),
+    (r"other offers", "other_offers"),
+    (r"most important", "most_important"),
+    (r"ideal team", "ideal_team"),
+    (r"availability|interview", "interview_window"),
+    (r"time off", "time_off"),
+    (r"how soon|start working", "start_date"),
+    (r"questions for me", "questions_for_me"),
+    (r"anything else", "anything_else"),
+    (r"feedback for me", "feedback"),
+    (r"\b(good ?bye|bye)\b", "goodbye"),
+    (r"^(got it|noted|that's fine|that makes sense|good to know|okay|great)[.!]?$", "filler"),
+]
+
+
+def draft_screen(cid: str) -> None:
+    with open(os.path.join(CASES, "screens.json")) as fh:
+        known = json.load(fh)["screens"]
+    tmpl = {}
+    for sc in known:
+        for t in sc["turns"]:
+            if t.get("check") and t["check"] not in tmpl:
+                tmpl[t["check"]] = {k: t[k] for k in ("check", "match", "no_match", "max_words") if k in t}
+    lines = []
+    with open(NODE_LOG) as fh:
+        for line in fh:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            said = (d.get("transcript") or "").strip()
+            if d.get("call_id") == cid and d.get("event") == "turn" and said and not said.startswith("("):
+                lines.append(said)
+    if not lines:
+        raise SystemExit(f"no caller turns for {cid} in {NODE_LOG}")
+    turns = []
+    for said in lines:
+        t = {"say": re.sub(r"\s+([.,?!])", r"\1", re.sub(r"(\d) ,(\d)", r"\1,\2", said))}
+        tag = next((name for rx, name in SCREEN_TAGS if re.search(rx, said, re.I)), None)
+        if tag in tmpl:
+            t.update(tmpl[tag])
+        turns.append(t)
+    print(json.dumps({"name": "vr_CHANGE_ME", "source": f"{cid} (role, employment type, state)",
+                      "turns": turns}, indent=1, ensure_ascii=False))
+    print("\n# draft only: replace agency/recruiter names, check the tags, then add it to "
+          "cases/screens.json", file=sys.stderr)
+
+
 def build_audio() -> int:
     adir = os.path.join(CASES, "audio")
     os.makedirs(adir, exist_ok=True)
@@ -161,7 +228,10 @@ def build_audio() -> int:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-audio", action="store_true", help="history only (no STT calls)")
+    ap.add_argument("--screen", metavar="CALL_ID", help="print a draft screens.json entry for this call")
     args = ap.parse_args()
+    if args.screen:
+        return draft_screen(args.screen)
     os.makedirs(CASES, exist_ok=True)
     print(f"history: {build_history()} real calls -> cases/history.json", flush=True)
     if not args.no_audio:

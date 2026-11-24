@@ -323,5 +323,62 @@
     "no_match": "relationship|single|married"
    }
   ]
+ },
+ {
+  "name": "w2_or_c2c_on_their_payroll",
+  "source": "2f88a9c432a1 11-24 'eligible to work as a W2 employee on <agency> payroll, or Corp2Corp?' -> 'I will confirm the employment type after this call' (KB states W2 or C2C; prompt's 'never claim a preference about employment type' rule wins)",
+  "turns": [
+   {
+    "say": "Are you eligible to work as a W2 employee on Acme Recruiting Payroll, or are you seeking a Corp2Corp setup instead?",
+    "match": "\\bw-?2\\b|corp",
+    "no_match": "confirm (the )?employment type|don't have that detail|do not have that detail|follow up after the call"
+   }
+  ]
+ },
+ {
+  "name": "name_given_no_who_is_calling",
+  "source": "57d918e36f03 11-24 'Yeah, hi, <name>.' -> 'Hello, who is calling?' (caller had just said who)",
+  "turns": [
+   {
+    "say": "Yeah, hi, Barrett Venn.",
+    "no_match": "who('s| is) (this|calling)"
+   }
+  ]
+ },
+ {
+  "name": "network_example_is_network",
+  "source": "2f88a9c432a1 11-24 asked for a VPN/LAN/firewall project -> hybrid Zoom deployment",
+  "turns": [
+   {
+    "say": "Describe your experience managing network connectivity, including VPNs, LANs, routing, and firewall configurations."
+   },
+   {
+    "say": "Could you share a specific example of a project where you managed VPNs, LANs, or firewall configurations and the outcome?",
+    "no_match": "zoom|don't have that detail|do not have that detail|follow up after the call"
+   }
+  ]
+ },
+ {
+  "name": "ideal_team_answered",
+  "source": "2f88a9c432a1 11-24 'How would you describe your ideal team and hiring manager?' -> 'I do not have that detail handy' (14c7e7164297 10-22 answered it from the KB: hands-on, programmability-first)",
+  "turns": [
+   {
+    "say": "How would you describe your ideal team and hiring manager?",
+    "no_match": "don't have that detail|do not have that detail|follow up after the call"
+   }
+  ]
+ },
+ {
+  "name": "thats_fine_is_filler",
+  "source": "2f88a9c432a1 11-24 \"That's fine.\" -> 'I hope this has been a helpful conversation.'",
+  "turns": [
+   {
+    "say": "How would you describe your ideal team and hiring manager?"
+   },
+   {
+    "say": "That's fine.",
+    "no_match": "helpful conversation|\\bbye\\b|goodbye|anything else"
+   }
+  ]
  }
 ]

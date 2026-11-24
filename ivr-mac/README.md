@@ -17,7 +17,16 @@ The Mac has no git: this folder is the source of truth, synced with rsync.
 
 Regression suite (run before and after any IVR change):
 
-    .venv/bin/python tests/run_suite.py [logic] [convo] [history] [audio]
+    .venv/bin/python tests/run_suite.py [logic] [convo] [history] [screen] [audio]
 
 `tests/build_cases.py` rebuilds the history and audio cases from the
 recorded calls; those stay on the Mac (real callers).
+
+`screen` is the long-form end-to-end layer: each scripted "virtual
+recruiter" phone screen in `tests/cases/screens.json` (anonymized) is
+replayed as one call, with per-turn checkpoints and whole-call checks, and
+a checkpoint scorecard is printed across screens. The model runs at
+temperature 0.9, so use `--repeat 2` or more and read the scorecard as
+rates. Add every new digital-recruiter call as a screen:
+`tests/build_cases.py --screen <call_id>` prints a draft (replace the
+agency and recruiter names before committing).

@@ -9,6 +9,12 @@ Layers (pick any; default: logic convo):
            against the call rules — ~1-2 min
   history  the caller lines of the last N real calls (cases/history.json),
            replayed the same way, call rules only — ~1 min per call
+  screen   end-to-end long-form QA: whole scripted "virtual recruiter" phone
+           screens (cases/screens.json) replayed as ONE call each, with
+           checkpoints per turn (W2/C2C, zip, pay, availability, goodbye…)
+           and whole-call checks (deflection budget, goodbye only on the
+           caller's goodbye, no reply said 3+ times); prints a checkpoint
+           scorecard across screens — ~1.5 min per screen
   audio    recorded callers (cases/audio/) played into the full rig over
            BlackHole, in the desktop session (audio_replay.py) — catches cut
            off / dropped / echo-ignored sentences, GV's voice answered, and
@@ -21,8 +27,8 @@ during the run to voicemail. Test calls are named suite-… in the call log.
 Results: tests/results/<stamp>.json. --save-baseline stores this run's
 latencies in tests/baseline.json; later runs flag a >25% slowdown.
 
-Usage: .venv/bin/python tests/run_suite.py [logic] [convo] [history] [audio]
-         [--repeat N] [--history-calls N] [--audio-calls N] [--save-baseline]
+Usage: .venv/bin/python tests/run_suite.py [logic] [convo] [history] [screen] [audio]
+         [--repeat N] [--screens NAME,...] [--history-calls N] [--audio-calls N] [--save-baseline]
 Rebuild cases after new calls: tests/build_cases.py
 """
 import argparse
@@ -62,6 +68,12 @@ RULES = [
     (r"[*#`]|https?://", "markdown or URL in speech"),
 ]
 MAX_WORDS = 55
+# "I don't have that detail handy, I'll follow up": the sanctioned answer when
+# the KB is silent, but a screen full of them reads as evasive (2f88a9c432a1).
+DEFLECT = re.compile(r"(don't|do not) have (that|those|the) details?|follow up (on that )?after (the|this) call", re.I)
+CALLER_BYE = re.compile(r"\b(good ?bye|bye|good night)\b", re.I)
+SAID_BYE = re.compile(r"\b(good ?bye|bye)\b", re.I)
+MAX_DEFLECT = 3
 
 
 def log(*a):
@@ -159,7 +171,9 @@ def converse(cid: str, turns: list[dict]) -> list[dict]:
                 why.append(f"should match /{t['match']}/")
             if t.get("no_match") and re.search(t["no_match"], reply, re.I):
                 why.append(f"must not match /{t['no_match']}/")
-            out.append({"say": t["say"], "reply": reply, "why": why,
+            if t.get("max_words") and len(reply.split()) > t["max_words"]:
+                why.append(f"{len(reply.split())} words (> {t['max_words']} here)")
+            out.append({"say": t["say"], "reply": reply, "why": why, "check": t.get("check"),
                         "first_audio_s": (done.get("timings") or {}).get("first_audio_s")})
     finally:
         try:
@@ -169,15 +183,18 @@ def converse(cid: str, turns: list[dict]) -> list[dict]:
     return out
 
 
-def show_case(name, turns, verbose):
+def show_case(name, turns, verbose, extra=()):
     bad = [t for t in turns if t["why"]]
-    log(f"  {'PASS' if not bad else 'FAIL'} {name}")
+    ok = not bad and not extra
+    log(f"  {'PASS' if ok else 'FAIL'} {name}")
     for t in turns:
         if t["why"] or verbose:
             log(f"      caller: {t['say']}\n      ivr:    {t['reply']}")
             for w in t["why"]:
                 log(f"      ✗ {w}")
-    return not bad
+    for w in extra:
+        log(f"      ✗ call: {w}")
+    return ok
 
 
 def run_convo(stamp: str, repeat: int, verbose: bool) -> dict:
@@ -203,6 +220,54 @@ def run_history(stamp: str, n: int, verbose: bool) -> dict:
         res.append({"name": c["call_id"], "ok": ok, "turns": turns})
     return {"cases": res, "passed": sum(r["ok"] for r in res), "failed": sum(not r["ok"] for r in res),
             "latency": _lat(res)}
+
+
+def screen_checks(turns: list[dict], max_deflect: int) -> list[str]:
+    """Whole-call checks for a long-form screen; per-turn checks are in converse()."""
+    out = []
+    n = sum(bool(DEFLECT.search(t["reply"])) for t in turns)
+    if n > max_deflect:
+        out.append(f"{n} 'don't have that detail' deflections (budget {max_deflect})")
+    for i, t in enumerate(turns):
+        if SAID_BYE.search(t["reply"]) and not CALLER_BYE.search(t["say"]):
+            out.append(f"turn {i + 1}: said goodbye before the caller did ({t['say'][:40]!r})")
+    seen: dict = {}
+    for t in turns:
+        k = re.sub(r"\W+", " ", t["reply"].lower()).strip()
+        seen[k] = seen.get(k, 0) + 1
+    out += [f"said {n}x: {k[:60]!r}" for k, n in seen.items() if n >= 3 and k]
+    return out
+
+
+def run_screen(stamp: str, repeat: int, verbose: bool, only: list[str] | None) -> dict:
+    with open(os.path.join(CASES, "screens.json")) as fh:
+        screens = json.load(fh)["screens"]
+    if only:
+        screens = [s for s in screens if s["name"] in only]
+        if not screens:
+            raise SystemExit(f"no screen named {only}")
+    res, board = [], {}
+    for rep in range(repeat):
+        for sc in screens:
+            turns = converse(f"suite-screen-{stamp}-{sc['name']}-{rep}", sc["turns"])
+            call_why = screen_checks(turns, sc.get("max_deflect", MAX_DEFLECT))
+            label = f"{sc['name']} ({len(turns)} turns)" + (f" (run {rep + 1})" if repeat > 1 else "")
+            ok = show_case(label, turns, verbose, extra=call_why)
+            for t in turns:
+                if t.get("check"):
+                    b = board.setdefault(t["check"], [0, 0])
+                    b[0] += not t["why"]
+                    b[1] += 1
+            n_bad = sum(bool(t["why"]) for t in turns)
+            res.append({"name": sc["name"], "run": rep, "ok": ok, "turns": turns, "call_why": call_why,
+                        "turns_failed": n_bad,
+                        "deflections": sum(bool(DEFLECT.search(t["reply"])) for t in turns)})
+    log("  -- checkpoint scorecard (passed/run across screens)")
+    for k in sorted(board, key=lambda k: (board[k][0] / board[k][1], k)):
+        p, n = board[k]
+        log(f"     {'  ' if p == n else '✗ '}{k:18} {p}/{n}")
+    return {"cases": res, "passed": sum(r["ok"] for r in res), "failed": sum(not r["ok"] for r in res),
+            "scorecard": board, "latency": _lat(res)}
 
 
 def _lat(res):
@@ -253,9 +318,10 @@ def compare(layer: str, lat: dict, base: dict) -> list[str]:
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("layers", nargs="*", default=["logic", "convo"],
-                    choices=["logic", "convo", "history", "audio"])
+                    choices=["logic", "convo", "history", "screen", "audio"])
     ap.add_argument("--repeat", type=int, default=1, help="run each convo case N times (model variance)")
     ap.add_argument("--history-calls", type=int, default=3)
+    ap.add_argument("--screens", default="", help="screen layer: only these names (comma-separated)")
     ap.add_argument("--audio-calls", type=int, default=3)
     ap.add_argument("--save-baseline", action="store_true")
     ap.add_argument("-v", "--verbose", action="store_true", help="print every turn, not just failures")
@@ -270,11 +336,11 @@ def main():
         base = {}
     out: dict = {"stamp": stamp, "layers": {}}
     regress: list[str] = []
-    needs_line = any(x in layers for x in ("convo", "history", "audio"))
+    needs_line = any(x in layers for x in ("convo", "history", "screen", "audio"))
     try:
         if needs_line:
             hold_line()
-        for layer in ("logic", "convo", "history", "audio"):
+        for layer in ("logic", "convo", "history", "screen", "audio"):
             if layer not in layers:
                 continue
             log(f"== {layer}")
@@ -285,6 +351,9 @@ def main():
                 r = run_convo(stamp, args.repeat, args.verbose)
             elif layer == "history":
                 r = run_history(stamp, args.history_calls, args.verbose)
+            elif layer == "screen":
+                r = run_screen(stamp, args.repeat, args.verbose,
+                               [x for x in args.screens.split(",") if x] or None)
             else:
                 r = run_audio(stamp, args.audio_calls)
             r["secs"] = round(time.time() - t0, 1)
