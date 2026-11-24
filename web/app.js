@@ -6525,7 +6525,7 @@ function renderBenchBoard(d) {
   // rows = models, most recently run first (d.runs is newest first)
   const rows = new Map();
   for (const r of d.runs) {
-    if (r.acc == null) continue;
+    if (r.acc == null || r.params?.qids?.length) continue;  // subset re-runs aren't scores
     const k = r.provider + "\u0000" + r.model;
     const c = rows.get(k) || { provider: r.provider, model: r.model, cells: {} };
     const cur = c.cells[r.bench];

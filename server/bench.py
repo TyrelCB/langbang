@@ -108,7 +108,9 @@ BOXED_RE = re.compile(r"\\boxed\{\s*\(?([ABCD])\)?\s*\}")
 DEFAULTS = {"n": 198, "concurrency": 1, "max_tokens": 32768, "thinking": True,
             "budget": 0, "temperature": 0.6,  # GPQA needs ≥32k CoT+answer room
             "context": 131072,  # Terminal-Bench: terminus-2's context window (summarizes near it)
-            "agent": "", "host": ""}  # Harbor benches: "" = the bench's default agent / this box
+            "agent": "", "host": "",  # Harbor benches: "" = the bench's default agent / this box
+            "timeout_mult": 1.0,  # Harbor: × each task's agent timeout_sec (slow local models)
+            "qids": []}  # only these task/question ids (e.g. re-run a run's timeouts); [] = all
 ABORT_STREAK = 8  # consecutive errored items that stop a run (state=error; RESUME retries them)
 TEXT_CAP = 6000  # chars of answer text kept per item (reasoning: length only)
 ANSI_RE = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07]*\x07|[()][A-Za-z0-9])|\r")  # tmux pane captures
@@ -217,6 +219,12 @@ def ife_items() -> list[dict]:
     out.sort(key=lambda x: _h("order:" + x["qid"]))
     _ife = out or None
     return out
+
+
+def _pick(bench: str, p: dict) -> list[dict]:
+    """The run's items: all, or only p["qids"] (in the bench's usual order)."""
+    qs, want = bench_items(bench), set(p.get("qids") or ())
+    return [q for q in qs if q["qid"] in want] if want else qs
 
 
 def bench_items(bench: str) -> list[dict]:
@@ -542,7 +550,7 @@ async def _run(rid: str) -> None:
     cur = await _db.execute("SELECT * FROM runs WHERE id=?", (rid,))
     run = _row(await cur.fetchone())
     p = {**DEFAULTS, **run["params"]}
-    qs = bench_items(run["bench"])[: run["n"]]
+    qs = _pick(run["bench"], p)[: run["n"]]
     if run["bench"] in HARBOR:  # timeouts recorded before stall detection existed
         await _restall(rid)
     cur = await _db.execute("SELECT idx FROM items WHERE run_id=? AND error IS NULL", (rid,))
@@ -736,7 +744,9 @@ async def _one_harbor(c, rid: str, idx: int, q: dict, s: dict, p: dict, bench: s
         task = f"{REMOTE_ROOT}/{os.path.basename(root)}/{q['dir']}"
     else:
         rjob, task = job_dir, os.path.join(root, q["dir"])
+    mult = max(0.1, float(p.get("timeout_mult") or 1.0))
     cfg = {"jobs_dir": os.path.dirname(rjob), "job_name": q["qid"], "n_concurrent_trials": 1,
+           **({"agent_timeout_multiplier": mult} if mult != 1.0 else {}),
            "agents": [_agent_cfg(p.get("agent") or HARBOR[bench][2], s, p)], "tasks": [{"path": task}]}
     shutil.rmtree(job_dir, ignore_errors=True)  # a resumed task starts clean
     os.makedirs(os.path.dirname(job_dir), exist_ok=True)
@@ -761,7 +771,7 @@ async def _one_harbor(c, rid: str, idx: int, q: dict, s: dict, p: dict, bench: s
         proc = await asyncio.create_subprocess_exec(*argv, stdin=PIPE if stdin else None, stdout=PIPE,
                                                     stderr=STDOUT, start_new_session=True, env=env)
         # task timeout (agent + verifier + image pull) with headroom
-        out, _ = await asyncio.wait_for(proc.communicate(stdin), q["timeout"] * 2.5 + 900)
+        out, _ = await asyncio.wait_for(proc.communicate(stdin), q["timeout"] * (mult + 1.5) + 900)
         if host:
             # ssh + tar, not rsync: under the systemd unit SELinux puts
             # /usr/bin/rsync in rsync_t, which may not exec ssh
@@ -822,10 +832,14 @@ def _spawn(rid: str) -> None:
 async def start(bench: str, provider: str, model: str, params: dict) -> dict:
     if bench not in BENCHES:
         raise ValueError(f"unknown benchmark {bench!r}")
-    qs = bench_items(bench)
-    if not qs:
-        raise ValueError("dataset not downloaded")
     p = {**DEFAULTS, **{k: v for k, v in (params or {}).items() if k in DEFAULTS or k == "effort"}}
+    p["qids"] = [str(x) for x in (p.get("qids") or [])]
+    p["timeout_mult"] = float(p.get("timeout_mult") or 1.0)
+    qs = _pick(bench, p)
+    if not qs:
+        raise ValueError("no matching items" if p["qids"] else "dataset not downloaded")
+    if p["qids"]:
+        p["n"] = len(qs)
     if bench in HARBOR:
         p["host"] = str(p.get("host") or "").strip()
         if p["host"] and not HOST_RE.match(p["host"]):
@@ -839,7 +853,7 @@ async def start(bench: str, provider: str, model: str, params: dict) -> dict:
         if not p["host"] and bench == "swebench_verified" and platform.machine() != "x86_64":
             raise ValueError("SWE-bench images are x86_64: pick an x86_64 runner host")
     else:
-        p.pop("agent", None), p.pop("host", None)
+        p.pop("agent", None), p.pop("host", None), p.pop("timeout_mult", None)
     s = config.load()
     if provider not in s["providers"]:
         raise ValueError(f"unknown provider {provider!r}")
