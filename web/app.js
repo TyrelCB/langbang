@@ -467,6 +467,7 @@ function addMsg(role, text, images, host) {
     m.insertBefore(img, m.firstChild);
   }
   if (bulkRender && histIdx != null) m.dataset.hidx = histIdx;
+  if (role === "user") m._text = text; // RUN panel ↻ EDIT & RETRY
   if (role === "user" && !host) attachFork(m, "user", text);
   (host || $("#chat")).appendChild(m);
   scrollBottom();
@@ -680,6 +681,7 @@ function tcHead(card) {
   s.append(...keep);
   card.classList.toggle("errored", t.state === "err" || t.state === "abort");
   card.classList.toggle("tc-warn", t.state === "warn");
+  card.classList.toggle("tc-run", t.state === "run");
 }
 
 // Bodies are LAZY: a card is header-only until first opened. Threads hold
@@ -2118,10 +2120,11 @@ function tickRun(run) {
     );
   // trajectory rows commit per-event server-side, so re-reading every few
   // seconds keeps the tab live during the run (not just after it)
-  if (trajVisible && Date.now() - (run._statsAt || run.t0) > 3000) {
+  if ((trajVisible || rpOpen) && Date.now() - (run._statsAt || run.t0) > (trajVisible ? 3000 : 5000)) {
     run._statsAt = Date.now();
     refreshStats();
   }
+  if (rpOpen && Date.now() - (run._rpAt || 0) > 900) { run._rpAt = Date.now(); renderRunPanel(); }
 }
 
 // ⚙ PROCESSES — background processes the agent started with bg_start
@@ -2294,8 +2297,11 @@ function renderPs() {
   $("#recap-ts").textContent = `${run} running · ${PROCS.length - run} finished`;
 }
 
+let curTodos = null; // the open thread's list as last painted — the RUN panel's progress bar
 function renderTodos(todos) {
   if (!Array.isArray(todos) || !todos.length) return hideTodos();
+  curTodos = todos;
+  if (rpOpen) renderRunPanel();
   const head = (n, s) => n + " " + s;
   const done = todos.filter((t) => t.status === "completed").length;
   const prog = todos.filter((t) => t.status === "in_progress").length;
@@ -2318,6 +2324,7 @@ function renderTodos(todos) {
 }
 
 function hideTodos() {
+  curTodos = null;
   $("#todo-panel").classList.add("hidden");
   $("#todo-list").innerHTML = "";
 }
@@ -2384,11 +2391,133 @@ async function ensureTodosCard(tid, msgs) {
   if (todos) renderTodos(todos);
 }
 
+// ---------- ▥ RUN panel ----------
+// Right-hand summary of the OPEN thread: live state + clock while a run
+// streams (RUNS bundle), thread totals from the trajectory (trajCache),
+// tools-used counts, to-do progress, and quick actions. Pure view: it reads
+// state other code owns and is redrawn from refreshStats / tickRun.
+let rpOpen = (() => { try { return localStorage.getItem("lb-runpanel") === "1"; } catch { return false; } })();
+function setRunPanel(open) {
+  rpOpen = open;
+  try { localStorage.setItem("lb-runpanel", open ? "1" : "0"); } catch {}
+  $("#run-panel").classList.toggle("hidden", !open);
+  $("#btn-runpanel").classList.toggle("on", open);
+  if (open) { renderRunPanel(); if (threadId && !trajCache) refreshStats(); }
+}
+function renderRunPanel() {
+  if (!rpOpen) return;
+  const run = threadId ? RUNS.get(threadId) : null;
+  const T = (trajCache && trajCache.totals) || {};
+  const evs = (trajCache && trajCache.events) || [];
+  const st = $("#rp-state");
+  const failed = !run && evs.length && evs[evs.length - 1].type === "error";
+  st.className = "rp-state " + (run ? "live" : failed ? "failed" : threadId ? "idle" : "none");
+  st.textContent = run ? "● RUNNING" : failed ? "● ERRORED" : threadId ? "● IDLE" : "○ NO THREAD";
+  $("#rp-clock").textContent = run ? fmtClock((Date.now() - run.t0) / 1000) : "";
+  $("#rp-stop").disabled = !run;
+
+  // current step: newest in-flight tool card, else "thinking"/"waiting"
+  const cur = $("#rp-current");
+  cur.innerHTML = "";
+  if (run) {
+    const live = [...run.tools.values()].filter((c) => c._tc).pop();
+    if (live) {
+      const [kind] = TC_KIND[live._tc.name] || ["TOOL"];
+      cur.append(el("span", "rp-cur-k", kind), el("span", "tc-name", " " + live._tc.name),
+        el("div", "rp-cur-d", live._tc.desc || ""));
+    } else cur.append(el("span", "rp-cur-k", run.waiting ? "WAITING FOR MODEL…" : "MODEL GENERATING…"));
+  }
+  cur.classList.toggle("hidden", !run);
+  // to-do progress
+  let prog = $("#rp-prog");
+  if (!prog) {
+    prog = el("div", "rp-prog");
+    prog.id = "rp-prog";
+    prog.append(el("div", "rp-prog-l"), el("div", "rp-bar"));
+    prog.lastChild.appendChild(el("div", "rp-fill"));
+    cur.after(prog);
+  }
+  if (curTodos && curTodos.length) {
+    const done = curTodos.filter((t) => t.status === "completed").length;
+    const pct = Math.round((100 * done) / curTodos.length);
+    prog.firstChild.textContent = `TO-DOS ${done} / ${curTodos.length} · ${pct}%`;
+    prog.querySelector(".rp-fill").style.width = pct + "%";
+    prog.classList.remove("hidden");
+  } else prog.classList.add("hidden");
+
+  const dl = $("#rp-facts");
+  dl.innerHTML = "";
+  const row = (k, v, cls) => { if (v == null || v === "") return; dl.append(el("dt", null, k), el("dd", cls || null, String(v))); };
+  const t = threadId && threads.find((x) => x.id === threadId);
+  row("MODEL", $("#model-tag").textContent.replace(/^[^\w]+|[^\w)]+$/g, "").trim());
+  row("THINKING", $("#btn-reasoning").textContent.replace(/^.*?THINKING:?\s*/i, "").trim() || "—");
+  row("PROJECT", t && t.project ? projName(t.project) || t.project : threadId ? "unfiled" : "");
+  row("CONTEXT", $("#ctx-tag").textContent.replace(/^CTX\s*/, ""));
+  if (run) {
+    const s = run.stats;
+    row("THIS RUN", `${s.steps} steps · LLM ${fmtShort(s.llm_s)} · TOOL ${fmtShort(s.tool_s)}`);
+    if (s.in || s.out) row("RUN TOKENS", `IN ${fmtTok(s.in)} · OUT ${fmtTok(s.out)}`);
+  }
+  if (T.turns) {
+    row("TURNS", `${T.turns} · ${T.steps} steps`);
+    row("TIME", `LLM ${fmtShort(T.llm_s || 0)} · TOOL ${fmtShort(T.tool_s || 0)}`);
+    if (T.ttft_avg != null) row("TTFT AVG", `${Math.round(1000 * T.ttft_avg)} ms`);
+    row("TOKENS", `IN ${fmtTok(T.tok_in || 0)} · OUT ${fmtTok(T.tok_out || 0)}` +
+      (T.cache_read > 0 && T.tok_in ? ` · cache ${Math.round((100 * T.cache_read) / T.tok_in)}%` : ""));
+  }
+  if (evs.length) row("LAST ACTIVE", new Date(evs[evs.length - 1].ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }));
+  if (threadId) row("THREAD", threadId, "rp-mono");
+
+  // tools used: counts from the trajectory log, failures in red
+  const tools = $("#rp-tools");
+  tools.innerHTML = "";
+  const counts = new Map();
+  for (const e of evs) if (e.type === "tool" && e.name) {
+    const c = counts.get(e.name) || { n: 0, err: 0 };
+    c.n++; if (trajFailed(e)) c.err++;
+    counts.set(e.name, c);
+  }
+  const sorted = [...counts.entries()].sort((a, b) => b[1].n - a[1].n);
+  for (const [name, c] of sorted.slice(0, 14)) {
+    const chip = el("span", "rp-chip" + (c.err ? " has-err" : ""), name);
+    chip.appendChild(el("b", null, " " + c.n));
+    if (c.err) chip.title = `${c.err} failed`;
+    tools.appendChild(chip);
+  }
+  if (sorted.length > 14) tools.appendChild(el("span", "rp-chip more", `+${sorted.length - 14} more`));
+  if (!sorted.length) tools.appendChild(el("span", "rp-empty", threadId ? "no tool calls yet" : "—"));
+  const retry = $("#rp-retry");
+  retry.disabled = !!run || !threadId || ![...$("#chat").querySelectorAll(".msg.user")].some((m) => m._text);
+}
+$("#btn-runpanel").onclick = () => { SFX.play("click"); setRunPanel(!rpOpen); };
+$("#rp-close").onclick = () => { SFX.play("click"); setRunPanel(false); };
+$("#rp-stop").onclick = () => { if (threadId && RUNS.get(threadId)) stopGeneration(); };
+$("#rp-traj").onclick = () => { SFX.play("click"); showTab("traj"); };
+$("#rp-files").onclick = () => { SFX.play("click"); openEditor(); };
+$("#rp-recap").onclick = () => $("#btn-recap").click();
+$("#rp-retry").onclick = () => {
+  const last = [...$("#chat").querySelectorAll(".msg.user")].filter((m) => m._text).pop();
+  if (!last) return;
+  SFX.play("click");
+  const inp = $("#input");
+  inp.value = last._text;
+  inp.focus();
+  inp.dispatchEvent(new Event("input"));
+};
+$("#rp-copyid").onclick = async (e) => {
+  if (!threadId) return;
+  const ok = await copyText(threadId);
+  e.currentTarget.textContent = ok ? "✓ COPIED" : "✕ COPY FAILED";
+  setTimeout(() => ($("#rp-copyid").textContent = "⧉ THREAD ID"), 1200);
+};
+queueMicrotask(() => { if (rpOpen) setRunPanel(true); }); // after the whole script has defined its globals
+
 async function refreshStats() {
   const id = threadId;
   if (!id) {
     trajCache = null;
     $("#sb-totals").textContent = "";
+    if (rpOpen) renderRunPanel();
     if (trajVisible) renderTraj();
     return;
   }
@@ -2415,6 +2544,7 @@ async function refreshStats() {
   }
   $("#sb-totals").textContent = groups.join("  │  ");
   if (trajVisible) renderTraj();
+  if (rpOpen) renderRunPanel();
 }
 
 function showTab(which) {

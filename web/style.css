@@ -1514,7 +1514,7 @@ html[data-theme="light"] .spk-hud-phrase span.on { text-shadow: none; }
 
 /* ---------- readable tool cards (tcNew/tcResult in app.js) ---------- */
 .block.tool.tc { max-width: min(92%, 1100px); width: 100%; border: 1px solid var(--line);
-  background: var(--bg2); border-radius: 6px; overflow: hidden; flex-shrink: 0; }
+  background: var(--bg2); border-radius: 4px; flex-shrink: 0; }
 .block.tool.tc > summary.tc-head { display: flex; align-items: center; gap: 8px; min-width: 0;
   list-style: none; border-left: 3px solid var(--green); color: var(--text); letter-spacing: .5px;
   padding: 5px 10px; background: var(--panel); }
@@ -1570,3 +1570,84 @@ html[data-theme="light"] .spk-hud-phrase span.on { text-shadow: none; }
 .tc-todo.in_progress { color: var(--cyan); }
 .block.tool.tc .tool-media { margin: 0 10px 8px; }
 html[data-theme="light"] .tc-code, html[data-theme="light"] .tc-gutter { background: #f7fbfe !important; }
+
+/* ---------- step timeline: thinking / tool / usage rows hang off one rail ----------
+   #chat gap is 12px: each step's rail reaches up through the gap above it,
+   so consecutive steps read as one connected line; a bubble breaks it. */
+#chat > :is(.block.thinking, .block.tool, .block.compact, .usage) { position: relative; margin-left: 26px; }
+#chat > :is(.block.thinking, .block.tool, .block.compact, .usage)::before {
+  content: ""; position: absolute; left: -17px; top: -12px; bottom: 0; width: 2px;
+  background: var(--cyan-dim); opacity: .45; pointer-events: none; }
+#chat > :is(.block.thinking, .block.tool:not(.tc), .block.compact) > summary::after,
+#chat > .usage::after {
+  content: ""; position: absolute; left: -21px; top: 9px; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--bg); border: 2px solid var(--cyan-dim); box-sizing: border-box; pointer-events: none; }
+#chat > .usage::after { width: 6px; height: 6px; left: -19px; top: 50%; margin-top: -3px; border: 0;
+  background: var(--muted); opacity: .7; }
+#chat > .block.thinking > summary::after { border-color: var(--cyan); }
+#chat > .block.tool:not(.tc) > summary::after { border-color: var(--green); background: var(--green); }
+#chat > .block.tool.retried:not(.tc) > summary::after { border-color: var(--orange); background: var(--orange); }
+#chat > .block.tool.errored:not(.tc) > summary::after { border-color: var(--danger); background: var(--danger); }
+#chat > .block.compact > summary::after { border-color: var(--muted); }
+/* the ▸ chevron already uses .tc-head::after — keep the dot on a different
+   pseudo there (summary::before is free on tool cards) */
+#chat > .block.tool.tc > summary.tc-head::before {
+  content: ""; position: absolute; left: -21px; top: 9px; width: 10px; height: 10px; border-radius: 50%;
+  box-sizing: border-box; border: 2px solid var(--green); background: var(--green); pointer-events: none; }
+#chat > .block.tool.tc.tc-warn > summary.tc-head::before,
+#chat > .block.tool.tc.retried > summary.tc-head::before { border-color: var(--orange); background: var(--orange); }
+#chat > .block.tool.tc.errored > summary.tc-head::before { border-color: var(--danger); background: var(--danger); }
+#chat > .block.tool.tc.tc-run > summary.tc-head::before { border-color: var(--orange); background: var(--bg);
+  animation: lb-pulse 1.2s ease-in-out infinite; }
+#chat > .block.tool.tc.consult > summary.tc-head::before { border-color: var(--orange); background: var(--orange); }
+@media (max-width: 720px) {
+  #chat > :is(.block.thinking, .block.tool, .block.compact, .usage) { margin-left: 16px; }
+  #chat > :is(.block.thinking, .block.tool, .block.compact, .usage)::before { left: -11px; }
+  #chat > :is(.block.thinking, .block.tool:not(.tc), .block.compact) > summary::after, #chat > .block.tool.tc > summary.tc-head::before { left: -15px; }
+  #chat > .usage::after { left: -13px; }
+}
+
+/* ---------- ▥ RUN panel (renderRunPanel in app.js) ---------- */
+#run-panel { width: 300px; min-width: 300px; display: flex; flex-direction: column; gap: 10px;
+  background: var(--bg2); border-left: 1px solid var(--line); padding: 12px; overflow-y: auto; font-size: 12px; }
+#run-panel.hidden { display: none; }
+#btn-runpanel.on { color: var(--cyan); border-color: var(--cyan-dim); }
+.rp-head { display: flex; align-items: center; gap: 10px; }
+.rp-state { font-weight: 700; letter-spacing: 1.5px; flex: 1; }
+.rp-state.live { color: var(--green); animation: lb-pulse 1.6s ease-in-out infinite; }
+.rp-state.idle { color: var(--cyan); }
+.rp-state.failed { color: var(--danger); }
+.rp-state.none { color: var(--muted); }
+.rp-clock { color: var(--text); font-variant-numeric: tabular-nums; }
+.rp-current { border: 1px solid var(--line); border-left: 3px solid var(--orange); background: var(--panel);
+  padding: 6px 8px; border-radius: 4px; min-width: 0; }
+.rp-current.hidden { display: none; }
+.rp-cur-k { color: var(--orange); font-weight: 700; letter-spacing: 1px; }
+.rp-cur-d { color: var(--text); opacity: .85; margin-top: 2px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.rp-prog.hidden { display: none; }
+.rp-prog-l { color: var(--muted); letter-spacing: 1px; font-size: 11px; margin-bottom: 4px; }
+.rp-bar { height: 6px; background: var(--panel); border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
+.rp-fill { height: 100%; width: 0; background: linear-gradient(90deg, var(--cyan-dim), var(--green));
+  transition: width .3s ease; }
+.rp-facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0;
+  padding: 8px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.rp-facts dt { color: var(--muted); letter-spacing: 1px; font-size: 11px; }
+.rp-facts dd { margin: 0; color: var(--text); min-width: 0; overflow-wrap: anywhere; }
+.rp-facts dd.rp-mono { color: var(--muted); }
+.rp-sec { color: var(--muted); letter-spacing: 1.5px; font-size: 11px; }
+.rp-tools { display: flex; flex-wrap: wrap; gap: 5px; }
+.rp-chip { border: 1px solid var(--line); background: var(--panel); color: var(--cyan); padding: 1px 7px;
+  border-radius: 10px; font-size: 11px; }
+.rp-chip b { color: var(--muted); font-weight: 400; }
+.rp-chip.has-err { border-color: var(--danger); }
+.rp-chip.more { color: var(--muted); }
+.rp-empty { color: var(--muted); font-style: italic; }
+.rp-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.rp-actions .btn { font-size: 11px; padding: 6px 4px; white-space: nowrap; }
+.rp-actions .rp-danger:not(:disabled) { color: var(--danger); border-color: var(--danger); }
+.rp-actions .btn:disabled { opacity: .4; cursor: default; }
+/* narrow screens: the chat needs the width — the panel overlays instead */
+@media (max-width: 1100px) {
+  #run-panel { position: fixed; right: 0; top: 0; bottom: 0; z-index: 40; box-shadow: -8px 0 24px rgba(0,0,0,.5); }
+}

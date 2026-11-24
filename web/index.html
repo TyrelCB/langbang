@@ -40,6 +40,7 @@
       <div class="topbar-right">
         <button id="tab-chat" class="btn ghost tab on" title="chat view">▣ CHAT</button>
         <button id="tab-traj" class="btn ghost tab" title="agent trajectory — steps, timing, sub-agents">≡ TRAJECTORY</button>
+        <button id="btn-runpanel" class="btn ghost tab" title="RUN panel — live status, stats, tools used and quick actions for this thread">▥ RUN</button>
         <button id="btn-files" class="btn ghost" title="browse + edit text files on the server (Ctrl+S saves)">✎ FILES</button>
         <button id="btn-term" class="btn ghost" title="terminals on this box + SSH into the fleet (sessions survive closing the tab)">▮ TERM</button>
       <button id="btn-watch" class="btn ghost" title="live video player — HLS (m3u8) streams and any direct URL, plays in-page">▶ WATCH</button>
@@ -106,6 +107,26 @@
       <span id="sb-live" class="hidden"></span>
     </footer>
   </main>
+  <aside id="run-panel" class="hidden" aria-label="run panel">
+    <div class="rp-head">
+      <span id="rp-state" class="rp-state idle">● IDLE</span>
+      <span id="rp-clock" class="rp-clock"></span>
+      <button id="rp-close" class="btn ghost sm" title="hide the RUN panel">✕</button>
+    </div>
+    <div id="rp-current" class="rp-current hidden"></div>
+    <dl id="rp-facts" class="rp-facts"></dl>
+    <div class="rp-sec">TOOLS USED</div>
+    <div id="rp-tools" class="rp-tools"></div>
+    <div class="rp-sec">QUICK ACTIONS</div>
+    <div class="rp-actions">
+      <button id="rp-stop" class="btn ghost rp-danger" disabled>■ STOP</button>
+      <button id="rp-traj" class="btn ghost">≡ TRAJECTORY</button>
+      <button id="rp-files" class="btn ghost">✎ FILES</button>
+      <button id="rp-recap" class="btn ghost">✦ RECAP</button>
+      <button id="rp-retry" class="btn ghost" title="put your last message back in the composer to edit and resend">↻ EDIT &amp; RETRY</button>
+      <button id="rp-copyid" class="btn ghost" title="copy this thread's id">⧉ THREAD ID</button>
+    </div>
+  </aside>
 
   <div id="settings-panel" class="hidden">
     <div class="panel-inner">
