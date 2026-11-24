@@ -703,17 +703,26 @@ def _warm_engines() -> str:
     paging Pocket TTS / mac-stt back in: first audio 8-11 s vs ~2 s later
     (calls 480790 11-13, bf39a1 11-17, 34949e 11-23)."""
     t, out = time.time(), []
+    pcm = _WARM_PCM
     try:
         v = _voice()
         if (v.get("tts_provider") or "gtts") == "pocket":
-            sum(len(b) for b in voice.pocket_pcm(voice.prepare(_WARM_LINE, {"voice": v}), v, None))
+            said = b"".join(voice.pocket_pcm(voice.prepare(_WARM_LINE, {"voice": v}), v, None))
             out.append(f"tts {time.time() - t:.1f}s")
+            # the synthesized line, at 16 kHz, is the STT warm-up clip: mac-stt's
+            # VAD drops silence before whisper runs, so a silent clip warmed
+            # nothing (2f88a9c432a1 11-24: warm-up "stt 0.1s", first turn stt 5.2 s)
+            import numpy as np
+            x = np.frombuffer(said, dtype="<i2").astype(np.float32)
+            n = int(len(x) * 16000 / voice.POCKET_RATE)
+            if n:
+                pcm = np.interp(np.linspace(0, len(x) - 1, n), np.arange(len(x)), x).astype("<i2").tobytes()
     except Exception as e:  # noqa: BLE001 — warm-up never fails a call
         out.append(f"tts failed: {e}")
     t = time.time()
     try:
-        transcribe(_WARM_PCM)
-        out.append(f"stt {time.time() - t:.1f}s")
+        heard = transcribe(pcm)
+        out.append(f"stt {time.time() - t:.1f}s ({len(heard.get('text') or '')} chars)")
     except Exception as e:  # noqa: BLE001
         out.append(f"stt failed: {e}")
     return ", ".join(out)
