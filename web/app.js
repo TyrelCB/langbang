@@ -682,25 +682,40 @@ function tcHead(card) {
   card.classList.toggle("tc-warn", t.state === "warn");
 }
 
+// Bodies are LAZY: a card is header-only until first opened. Threads hold
+// thousands of calls (Home Lab Health: 12k cards) — building every body up
+// front was ~800k nodes and a 15 s frozen tab on open.
 function tcNew(name, args, label, state = "run") {
   const d = el("details", "block tool tc");
   d.appendChild(el("summary"));
-  d._tc = { name, label: label || null, desc: tcDesc(name, args), state, dur: null, exit: null };
-  if (args != null) {
-    const iv = tcInputView(name, args, d._tc.desc);
-    if (iv.childElementCount) d.appendChild(iv);
-  }
+  d._tc = { name, label: label || null, desc: tcDesc(name, args), state, dur: null, exit: null,
+    args, out: undefined, failed: false, built: false };
+  d.addEventListener("toggle", () => { if (d.open) tcBuild(d); });
   tcHead(d);
   return d;
 }
 
+// insert body parts above any lazy .tool-media thumbs history hung on the card
+const tcPlace = (d, node) => d.insertBefore(node, d.querySelector(":scope > .tool-media"));
+
+function tcBuild(d) {
+  const t = d._tc;
+  if (t.built) return;
+  t.built = true;
+  if (t.args != null) {
+    const iv = tcInputView(t.name, t.args, t.desc);
+    if (iv.childElementCount) tcPlace(d, iv);
+  }
+  if (t.out !== undefined) tcPlace(d, tcOutputView(t.out, t.failed).node);
+}
+
 function tcResult(card, output, { failed = false, dur = null } = {}) {
-  const { node, exit } = tcOutputView(output, failed);
-  card.appendChild(node);
-  Object.assign(card._tc, {
-    dur, exit,
-    state: failed ? "err" : exit != null && exit !== 0 ? "warn" : "ok",
-  });
+  const t = card._tc;
+  const str = typeof output === "string" ? output : JSON.stringify(output, null, 2) ?? "";
+  const exit = tcShellParts(str)?.exit ?? null;
+  Object.assign(t, { out: str, failed, dur, exit,
+    state: failed ? "err" : exit != null && exit !== 0 ? "warn" : "ok" });
+  if (t.built) tcPlace(card, tcOutputView(str, failed).node);
   tcHead(card);
 }
 
